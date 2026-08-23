@@ -33,6 +33,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.core.message_bus import WILDCARD_TOPIC, get_message_bus
 from backend.core.system_state import snapshot as system_state_snapshot
+from backend.core.auth import auth_required, ENV_VAR
+import os
+import hmac
 from backend.services.portfolio_store import get_portfolio
 
 logger = logging.getLogger(__name__)
@@ -114,7 +117,15 @@ def start_event_bridge() -> None:
 
 
 @router.websocket("/agent-events")
-async def websocket_endpoint(websocket: WebSocket) -> None:
+async def websocket_endpoint(websocket: WebSocket, api_key: str = None) -> None:
+    if auth_required():
+        required = os.getenv(ENV_VAR)
+        if not required:
+            pass # Shouldn't happen if auth_required is True, but safe fallback
+        elif not api_key or not hmac.compare_digest(api_key, required):
+            await websocket.close(code=1008)
+            return
+
     await manager.connect(websocket)
     try:
         while True:

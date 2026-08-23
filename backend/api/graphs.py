@@ -52,7 +52,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 
-from backend.core.auth import require_write_auth
+from backend.core.auth import require_write_auth, auth_required, ENV_VAR
+import os
+import hmac
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +258,7 @@ async def run_analysis(
 
 
 @router.websocket("/stream")
-async def stream_graph_progress(websocket: WebSocket) -> None:
+async def stream_graph_progress(websocket: WebSocket, api_key: str = None) -> None:
     """Live node-by-node progress (spec Section 39.5).
 
     Accepts `{"symbol": "BTC/USDT"}` and streams one message per node as the graph
@@ -267,10 +269,16 @@ async def stream_graph_progress(websocket: WebSocket) -> None:
     megabytes over the socket for a 20-node run, and a dashboard needs to know which
     stage is running, not to re-receive the market.
 
-    Unauthenticated deliberately: it starts nothing. The socket runs a graph only
-    after the client asks, and `run` there goes through the same auth-free read path
-    as the rest of this router — see the note below on why that is safe.
+    Authenticated because it starts a graph run, which costs market data and model tokens.
     """
+    if auth_required():
+        required = os.getenv(ENV_VAR)
+        if not required:
+            pass # Shouldn't happen if auth_required is True, but safe fallback
+        elif not api_key or not hmac.compare_digest(api_key, required):
+            await websocket.close(code=1008)
+            return
+
     await websocket.accept()
     try:
         request = await websocket.receive_json()

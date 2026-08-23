@@ -117,7 +117,12 @@ export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
     if (busy) return;
     setBusy(true);
     try {
-      await fetch(backendUrl(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), { method: 'POST' });
+      await fetch(backendUrl(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_TRADES_API_KEY || ''}`
+        }
+      });
       await admin.reload();
     } catch {
       // The reload reflects reality either way; without the catch a thrown fetch

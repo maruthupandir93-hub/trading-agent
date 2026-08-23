@@ -67,7 +67,12 @@ export function EmergencyStopModal({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(backendUrl(BACKEND_PATHS.emergencyStop), { method: 'POST' });
+      const res = await fetch(backendUrl(BACKEND_PATHS.emergencyStop), {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_TRADES_API_KEY || ''}`
+        }
+      });
       if (!res.ok) {
         // Stay open. A failed stop must not look like a successful one.
         setError(stopFailureMessage({ httpStatus: res.status }));
@@ -146,11 +151,11 @@ export function EmergencyStopModal({
             style={
               armed && !busy
                 ? {
-                    background: 'color-mix(in srgb, var(--negative) 16%, transparent)',
-                    borderColor: 'var(--negative)',
-                    color: 'var(--negative)',
-                    fontWeight: 600,
-                  }
+                  background: 'color-mix(in srgb, var(--negative) 16%, transparent)',
+                  borderColor: 'var(--negative)',
+                  color: 'var(--negative)',
+                  fontWeight: 600,
+                }
                 : { opacity: 0.45, cursor: 'not-allowed' }
             }
           >

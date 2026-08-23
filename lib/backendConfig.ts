@@ -50,7 +50,12 @@ export function agentEventsWsUrl(): string {
   // declared in `backend/api/dashboard.py` and that router is mounted at
   // `/api/dashboard`. It was previously written as `/api/ws/agent-events`,
   // which nothing serves.
-  return `${base}/api/dashboard/agent-events`;
+  let url = `${base}/api/dashboard/agent-events`;
+  const key = process.env.NEXT_PUBLIC_TRADES_API_KEY;
+  if (key) {
+    url += `?api_key=${encodeURIComponent(key)}`;
+  }
+  return url;
 }
 
 /** Paths on the FastAPI backend, so a rename is a one-line change here. */
@@ -63,9 +68,6 @@ export const BACKEND_PATHS = {
   pause: '/api/admin/pause',
   resume: '/api/admin/resume',
   emergencyStop: '/api/admin/emergency-stop',
-  tradingMode: '/api/admin/trading-mode',
-  liveTradingEnable: '/api/admin/live-trading/enable',
-  liveTradingDisable: '/api/admin/live-trading/disable',
   agents: '/api/ai/agents',
   researchQueue: '/api/research/queue',
 
@@ -136,7 +138,12 @@ export const BACKEND_PATHS = {
  */
 export function graphStreamWsUrl(): string {
   const base = BACKEND_BASE.replace(/^http/, 'ws');
-  return `${base}/api/graphs/stream`;
+  let url = `${base}/api/graphs/stream`;
+  const key = process.env.NEXT_PUBLIC_TRADES_API_KEY;
+  if (key) {
+    url += `?api_key=${encodeURIComponent(key)}`;
+  }
+  return url;
 }
 
 export function backendUrl(path: string): string {
