@@ -17,9 +17,52 @@ class Settings:
     # to `simulation_mode=False` and routed real orders regardless, so
     # setting LIVE_TRADING=false had no effect at all. It is now the
     # single switch that decides.
+    #
+    # MUTABLE AT RUNTIME: the admin API can toggle this via
+    # set_live_trading(). The change is persisted back to .env so it
+    # survives a restart.
     # ---------------------------------------------------------------
-    LIVE_TRADING: bool = os.getenv("LIVE_TRADING", "false").lower() == "true"
+    _live_trading: bool = os.getenv("LIVE_TRADING", "false").lower() == "true"
     USE_TESTNET: bool = os.getenv("USE_TESTNET", "true").lower() == "true"
+
+    @property
+    def LIVE_TRADING(self) -> bool:
+        return self._live_trading
+
+    def set_live_trading(self, enabled: bool, *, persist: bool = True) -> None:
+        """Toggle live trading at runtime.
+
+        When `persist` is True (the default), also writes the new value back
+        to the .env file so a restart sees it. The in-memory update is always
+        immediate — `ExecutionAgent` reads `settings.LIVE_TRADING` at call
+        time, not import time, so the next trade attempt sees the new value.
+        """
+        self._live_trading = enabled
+        os.environ["LIVE_TRADING"] = str(enabled).lower()
+        if persist:
+            self._persist_env("LIVE_TRADING", str(enabled).lower())
+
+    def _persist_env(self, key: str, value: str) -> None:
+        """Write a key=value back to the .env file (create if missing).
+
+        Only touches the one line; everything else is left untouched. If the
+        key does not exist yet, it is appended.
+        """
+        import pathlib
+        env_path = pathlib.Path(__file__).resolve().parents[2] / ".env"
+        lines: list[str] = []
+        found = False
+        if env_path.exists():
+            lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} ="):
+                    lines[i] = f"{key}={value}\n"
+                    found = True
+                    break
+        if not found:
+            lines.append(f"{key}={value}\n")
+        env_path.write_text("".join(lines), encoding="utf-8")
 
     # API Keys
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")

@@ -63,6 +63,9 @@ export const BACKEND_PATHS = {
   pause: '/api/admin/pause',
   resume: '/api/admin/resume',
   emergencyStop: '/api/admin/emergency-stop',
+  tradingMode: '/api/admin/trading-mode',
+  liveTradingEnable: '/api/admin/live-trading/enable',
+  liveTradingDisable: '/api/admin/live-trading/disable',
   agents: '/api/ai/agents',
   researchQueue: '/api/research/queue',
 

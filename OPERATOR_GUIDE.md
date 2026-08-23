@@ -1,10 +1,10 @@
 # TradingOS — Operator Guide
 
-How to start the system, how the pieces fit, what happens when you give it a goal,
-and — in Part 6 — **every known bug and limitation**, stated plainly.
+How the entire system works — frontend, backend, core engine — and exactly how
+every component connects when a trade runs end to end.
 
-Written against the code as it stands. Every command and behaviour below was
-verified by running it, not recalled.
+Written against the code as it stands. Every flow described below was traced
+through the actual source, not recalled.
 
 ---
 
@@ -21,24 +21,321 @@ Below those sits `LIVE_TRADING` (default `false`), which puts the execution agen
 simulation mode and makes no exchange calls at all.
 
 **So out of the box: the agent thinks, decides, logs, and trades nothing.** That is
-deliberate. Part 5 covers turning each gate on, in order, and what each one exposes.
+deliberate. Part 7 covers turning each gate on, in order, and what each one exposes.
 
 Three more things worth knowing before you start:
 
 1. **No LLM is configured.** `LLM_PROVIDER` supports only `null`. The single
    LLM-permitted node degrades honestly and every number in the system is
-   deterministic anyway. See §6.1.
+   deterministic anyway. See §8.1.
 2. **A "target" does not currently steer trading.** You can create a
    `capital-target` mission and track progress, but no code in the decision path
-   reads it. See §6.2 — this is the gap most likely to surprise you.
+   reads it. See §8.2 — this is the gap most likely to surprise you.
 3. **Postgres is optional and not running by default.** Several features degrade to
-   "unavailable" without it, and say so rather than pretending. See §6.3.
+   "unavailable" without it, and say so rather than pretending. See §8.3.
 
 ---
 
-## Part 1 — Starting it
+## Part 1 — System Anatomy: Frontend, Backend, Core
 
-### 1.1 One-time setup
+### 1.1 The three layers
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LAYER 1: FRONTEND (Next.js)                        │
+│                                                                           │
+│  localhost:3000 — 72 React components + 26 API route handlers             │
+│  Dashboard panels, charts, trading controls, agent monitoring             │
+│  Reads JSON stores in .data/ for most views (works WITHOUT backend)       │
+│  WebSocket to backend for live agent events + graph progress              │
+│  /api/graphs/* proxied to backend for LangGraph reasoning                 │
+└────────────┬──────────────────────────────────────────────────────────────┘
+             │ HTTP + WebSocket
+             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       LAYER 2: BACKEND (FastAPI)                          │
+│                                                                           │
+│  localhost:8000 — 50+ API endpoints + WebSocket stream                    │
+│                                                                           │
+│  ┌──────────────┐  ┌───────────────┐  ┌───────────────┐  ┌─────────────┐ │
+│  │  12 Agents   │  │ 7 LangGraph   │  │  4 Workers    │  │ Services    │ │
+│  │  (event-     │  │   Graphs      │  │  (background  │  │ (exchange,  │ │
+│  │   driven)    │  │  (reasoning)  │  │   loops)      │  │  market,    │ │
+│  │              │  │               │  │               │  │  memory)    │ │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬──────┘ │
+│         │                 │                 │                 │        │
+│         └────────────────┼─────────────────┼─────────────────┘        │
+│                          ▼                 ▼                          │
+│                ┌──────────────────────────────────┐                   │
+│                │    In-Process Message Bus        │                   │
+│                │    (pub/sub, 20+ event types)    │                   │
+│                └──────────────────────────────────┘                   │
+└────────────────────────────────────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         LAYER 3: CORE ENGINE                              │
+│                                                                           │
+│  core/message_bus.py     — pub/sub backbone connecting everything         │
+│  core/risk_manager.py    — 9 deterministic risk checks, hard limits       │
+│  core/agent_base.py      — base class for all 12 agents                   │
+│  core/agent_os.py        — scheduler, health monitoring, kernel            │
+│  core/system_state.py    — pause / resume / emergency-stop state           │
+│  core/config.py          — environment-driven settings                     │
+│  core/db.py              — Postgres connection pool (optional)             │
+│  core/audit.py           — SQLite audit trail                              │
+│                                                                           │
+│  services/execution_service.py  — the TRUST BOUNDARY (inert → live)       │
+│  services/exchange_client.py    — ccxt wrapper (the only exchange caller)  │
+│  services/instrument_rules.py   — lot sizes, tick sizes, venue rules       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 The frontend in detail
+
+| Area | Key files | What it does |
+|---|---|---|
+| Dashboard shell | `components/shell/`, `app/layout.tsx` | Top navigation, sidebar, keyboard shortcuts |
+| Agent panel | `Agent.tsx`, `AgentOSPanel.tsx`, `Supervisor.tsx` | Shows all 12 agents, their states, live decisions |
+| Trading controls | `TradingControls.tsx`, `TradingControlsPanel.tsx` | Start/stop, paper/live toggle, symbol picker |
+| Autonomous trader | `AutonomousTrader.tsx`, `AutonomousTraderPanel.tsx` | The main autonomous trading view |
+| Charts & data | `LiveChart.tsx`, `Candles.tsx`, `MarketData.tsx` | Price charts, candle data, indicators |
+| Portfolio | `Portfolio.tsx`, `PortfolioAnalytics.tsx`, `RealPortfolioPanel.tsx` | Holdings, P&L, analytics |
+| Risk | `RiskManagerPanel.tsx`, `RiskMeter.tsx` | Risk exposure, limits display |
+| Backtest | `BacktestPanel.tsx` | Historical strategy testing |
+| Debate | `Debate.tsx`, `DebatePanel.tsx`, `DebateVisualizer.tsx` | Specialist panel debates |
+| Learning | `Reflection.tsx`, `Hypothesis.tsx`, `HypothesisPanel.tsx` | Trade lessons, hypotheses |
+| Memory | `Memory.tsx`, `MemoryPanel.tsx` | 7 memory stores visualization |
+| Mission | `MissionPlanner.tsx`, `MissionPlannerPanel.tsx` | Capital targets, goals |
+| Next.js API routes | `app/api/` (26 directories) | JSON store CRUD, proxies to backend |
+
+**The dashboard runs WITHOUT the backend for most panels** — Next.js route handlers
+under `app/api/` read JSON stores in `.data/`. Only the agent-event WebSocket and
+everything under `/api/graphs` require the Python process.
+
+### 1.3 The backend in detail
+
+#### 12 Event-driven agents (registered with AgentOS kernel)
+
+| Agent | Role | Key events consumed | Key events published |
+|---|---|---|---|
+| CEO | Drawdown killswitch, equity tracking | `POSITION_CLOSED` | — |
+| CIO | Correlated-exposure cap, cross-asset analysis | `DEBATE_CONCLUDED` | — |
+| CRO | Chief Risk Officer — sole approver of TARs | `TAR_SUBMITTED` | `TAR_APPROVED`, `TAR_REJECTED` |
+| Supervisor | The decision-maker (TRADE / WAIT / EXIT) | `DEBATE_CONCLUDED` | `TAR_SUBMITTED` |
+| Market Intelligence | Price, volume, structure, regime | `TICK_RECEIVED` | `FEATURES_COMPUTED` |
+| Portfolio | Holdings, exposure, correlation | — | — |
+| Execution | The single exchange chokepoint | `TAR_APPROVED` | `ORDER_FILLED` |
+| Position Monitor | Stop-loss / take-profit enforcement | `TAR_APPROVED`, `ORDER_FILLED`, `TICK_RECEIVED` | `POSITION_CLOSED` |
+| Reflection | Post-trade analysis, lesson generation | `POSITION_CLOSED` | `REFLECTION_COMPLETED` |
+| Debate | Weighted panel verdict | — | `DEBATE_CONCLUDED` |
+| Confidence | Hit-rate calibration for sizing | `REFLECTION_COMPLETED` | `CONFIDENCE_CALIBRATED` |
+| Hypothesis | Turns reflections into testable claims | `REFLECTION_COMPLETED` | — |
+| Simulation | Paper trading fills | — | `ORDER_FILLED` |
+
+#### 7 LangGraph reasoning graphs
+
+| # | Graph | Nodes | What it does |
+|---|---|---|---|
+| 1 | Market Intelligence | 5 | validate → features → analysis → regime → market state |
+| 2 | **Trade Decision** | **20** | memory → market → strategy → opportunity → 7 specialists → debate → supervisor → risk gateway |
+| 3 | Execution | — | deterministic, **outside LangGraph** by design |
+| 4 | Position Monitoring | 9+ | market state → portfolio → position snapshot → [price, market, portfolio risk] → HOLD/REDUCE/MODIFY/EXIT |
+| 5 | Reflection | 5 | closed trade → context → execution quality → outcome → lesson → memory |
+| 6 | Research | — | hypothesis → validation (see §8.4) |
+| 7 | Learning | 6 | six meta-learning questions about system's own performance |
+
+#### 4 Background workers
+
+| Worker | Loop interval | What it does |
+|---|---|---|
+| Trigger Worker | Push (per tick) + 120s poll | Evaluates price/volatility/funding/OI/regime changes, publishes `TRIGGER_FIRED` |
+| Position Worker | 300s | Runs Graph 4 for every open position |
+| Monitor Worker | 60s | System health reporting |
+| Curiosity Worker | — | Autonomous research queuing |
+
+---
+
+## Part 2 — Are all backends connected? YES — here is exactly how
+
+> **The definitive answer: YES.** When a trade starts, the system analyzes, executes,
+> monitors with stop-loss, reflects on the outcome, and learns from it — all
+> automatically connected through the in-process message bus. Every stage triggers
+> the next via published events. No manual intervention is needed between stages.
+
+### 2.1 The complete trade lifecycle — event by event
+
+```
+ ┌─ STAGE 1: DETECTION ──────────────────────────────────────────────────┐
+ │                                                                       │
+ │  Live WebSocket feed (BTC/USDT, ETH/USDT, SOL/USDT)                 │
+ │        │  every tick                                                  │
+ │        ▼                                                              │
+ │  Trigger Worker evaluates:                                            │
+ │    price move ≥2% · funding shift · OI spike · regime change          │
+ │    (debounced, rate-limited to 6 runs/min, 2/symbol/min)             │
+ │        │                                                              │
+ │        ▼                                                              │
+ │  publishes → TRIGGER_FIRED event on the bus                          │
+ └───────────────────────────────────┬───────────────────────────────────┘
+                                     │ bus subscription
+                                     ▼
+ ┌─ STAGE 2: ANALYSIS (Graph 2, 20 nodes) ──────────────────────────────┐
+ │                                                                       │
+ │  Memory Loader (7 stores) → Market Data → Feature Generation         │
+ │  → Market Analysis → Regime Detection → Market State                 │
+ │  → Strategy Scoring → Opportunity Detection                          │
+ │        │                                                              │
+ │        ├─ NO opportunity? → END (the common case)                    │
+ │        │                                                              │
+ │        ▼ opportunity found                                           │
+ │  7 Specialists IN PARALLEL:                                          │
+ │    market · funding · structure · portfolio · orderflow* · liquidity* │
+ │    news* (* = unavailable, report why)                                │
+ │        │                                                              │
+ │        ▼                                                              │
+ │  Debate (weighted verdict) → Supervisor (TRADE / WAIT / EXIT)        │
+ │        │                                                              │
+ │        ▼                                                              │
+ │  Risk Gateway (9 deterministic checks)                               │
+ │        │  approved                                                    │
+ │        ▼                                                              │
+ │  publishes → EXECUTION_PLAN_READY event on the bus                   │
+ └───────────────────────────────────┬───────────────────────────────────┘
+                                     │ bus subscription
+                                     ▼
+ ┌─ STAGE 3: EXECUTION ─────────────────────────────────────────────────┐
+ │                                                                       │
+ │  Execution Service (the TRUST BOUNDARY):                             │
+ │    1. Idempotency check (prevent duplicate orders)                   │
+ │    2. Re-validate at boundary (stop-loss, leverage, kill-switch)     │
+ │    3. Quantise to venue lot size (round down, never up)              │
+ │    4. [GRAPH_EXECUTION_ENABLED?] no → logged, nothing submitted     │
+ │        │ yes                                                          │
+ │        ▼                                                              │
+ │  publishes → TAR_SUBMITTED event on the bus                          │
+ │        │                                                              │
+ │        ▼ (bus subscription)                                          │
+ │  CRO Agent reviews → publishes TAR_APPROVED or TAR_REJECTED         │
+ │        │                                                              │
+ │        ▼ (bus subscription, TAR_APPROVED only)                       │
+ │  Execution Agent (the single exchange chokepoint):                   │
+ │    [LIVE_TRADING?] no → simulated fill                               │
+ │                    yes → ccxt order to Binance                       │
+ │        │                                                              │
+ │  publishes → ORDER_FILLED event on the bus                           │
+ └───────────────────────────────────┬───────────────────────────────────┘
+                                     │ bus subscription
+                                     ▼
+ ┌─ STAGE 4: MONITORING (continuous) ──────────────────────────────────┐
+ │                                                                       │
+ │  Position Monitor Agent:                                              │
+ │    • Joins TAR_APPROVED (stop/target) + ORDER_FILLED (symbol/side)   │
+ │    • On EVERY TICK: compares price vs stop-loss and take-profit      │
+ │    • Stop reached → closes IMMEDIATELY via Execution Agent           │
+ │        (ungated — not blocked by pause, emergency stop, or CRO)     │
+ │    • publishes → POSITION_CLOSED event on the bus                   │
+ │                                                                       │
+ │  Position Worker (every 5 min, Graph 4):                             │
+ │    • Runs 9-dimension analysis per open position                     │
+ │    • Decides: HOLD / REDUCE / MODIFY / EXIT                          │
+ │    • MODIFY = tighten stop (one-way ratchet, never widens)           │
+ │    • EXIT/REDUCE = publishes EXECUTION_PLAN_READY (intent=close)    │
+ │    • [POSITION_MONITORING_ENABLED?] no → decision logged, not applied│
+ └───────────────────────────────────┬───────────────────────────────────┘
+                                     │ bus subscription
+                                     ▼
+ ┌─ STAGE 5: REFLECTION ────────────────────────────────────────────────┐
+ │                                                                       │
+ │  Reflection Agent (triggered by POSITION_CLOSED):                    │
+ │    1. Reads memory context (7 stores) for the symbol                 │
+ │    2. Looks up measured execution quality from Postgres              │
+ │    3. Classifies outcome (Success / Failure)                         │
+ │    4. Attributes cause (trend failure, false breakout, etc.)         │
+ │    5. Generates a specific, testable lesson                          │
+ │    6. Stores lesson in Semantic Memory + Knowledge Graph             │
+ │    7. Computes confidence calibration delta                          │
+ │                                                                       │
+ │  publishes → REFLECTION_COMPLETED event on the bus                   │
+ └───────────────────────────────────┬───────────────────────────────────┘
+                                     │ bus subscription
+                                     ▼
+ ┌─ STAGE 6: LEARNING ──────────────────────────────────────────────────┐
+ │                                                                       │
+ │  Hypothesis Agent (triggered by REFLECTION_COMPLETED):               │
+ │    1. Creates a testable hypothesis from the lesson                  │
+ │    2. Generates a validation plan                                    │
+ │    3. Queues research tasks                                          │
+ │    4. Updates Knowledge Graph relationships                          │
+ │    (Status: 'proposed' — promotion requires human click)             │
+ │                                                                       │
+ │  Confidence Agent (triggered by REFLECTION_COMPLETED):               │
+ │    • Adjusts calibration using the delta from reflection             │
+ │    • Feeds back into position sizing for FUTURE trades               │
+ │                                                                       │
+ │  CEO Agent (triggered by POSITION_CLOSED):                           │
+ │    • Updates equity tracking                                         │
+ │    • Drawdown killswitch evaluation                                  │
+ │                                                                       │
+ │  Meta-Learning (Graph 7, on-demand via API):                         │
+ │    1. Where am I systematically wrong?                               │
+ │    2. Which market conditions cause failures?                        │
+ │    3. Which strategies are degrading?                                │
+ │    4. Which confidence scores are inaccurate?                        │
+ │    5. Which data sources are unreliable?                             │
+ │    6. Which agents disagree most often?                              │
+ │    (FINDINGS ONLY — never auto-deploys, no apply() function)        │
+ └──────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 The connection mechanism: the Message Bus
+
+Every connection between stages happens through **one** in-process pub/sub message
+bus (`backend/core/message_bus.py`). When an agent or graph publishes an event, every
+subscriber to that event type is called automatically. This is what makes the entire
+pipeline automatic:
+
+| Published event | Publisher | Subscriber(s) that auto-trigger |
+|---|---|---|
+| `TICK_RECEIVED` | Live WebSocket feed | Trigger Worker, Position Monitor |
+| `TRIGGER_FIRED` | Trigger Worker | Graph 2 (Trade Analysis) |
+| `EXECUTION_PLAN_READY` | Graph 2 or Graph 4 | Execution Service |
+| `TAR_SUBMITTED` | Execution Service | CRO Agent |
+| `TAR_APPROVED` | CRO Agent | Execution Agent, Position Monitor |
+| `ORDER_FILLED` | Execution Agent | Position Monitor, Reflection Agent |
+| `POSITION_CLOSED` | Position Monitor | Reflection Agent, CEO Agent |
+| `REFLECTION_COMPLETED` | Reflection Agent | Hypothesis Agent, Confidence Agent |
+
+**No event is published into a void.** Every event in the lifecycle has at least one
+subscriber that continues the chain.
+
+### 2.3 What "connected" means concretely
+
+When you start the backend, `main.py` wires every connection during startup:
+
+1. **Line 58–96**: All 12 agents are instantiated and registered with the AgentOS kernel
+2. **Line 89**: Position Monitor is attached to the Execution Agent (so it can close positions)
+3. **Line 113**: Dashboard WebSocket bridge is started (all bus events → frontend)
+4. **Line 116**: Live market data feed starts (WebSocket → `TICK_RECEIVED`)
+5. **Line 132**: Trigger Worker subscribes to `TICK_RECEIVED` and starts polling
+6. **Line 151**: Graph 2 (Trade Analysis) subscribes to `TRIGGER_FIRED`
+7. **Line 176**: Execution Service subscribes to `EXECUTION_PLAN_READY`
+8. **Line 218–219**: Position Worker is attached to the monitor and checkpointer
+9. **Line 227–232**: All 4 workers start their background loops
+
+Each agent's `__init__` (via `BaseAgent`) automatically subscribes it to the events
+listed in its `events_consumed` property. So:
+
+- **Reflection Agent** auto-subscribes to `POSITION_CLOSED` → triggers analysis on every close
+- **Hypothesis Agent** auto-subscribes to `REFLECTION_COMPLETED` → triggers learning on every reflection
+- **Confidence Agent** auto-subscribes to `REFLECTION_COMPLETED` → calibrates sizing
+- **CEO Agent** auto-subscribes to `POSITION_CLOSED` → tracks equity
+
+---
+
+## Part 3 — Starting it
+
+### 3.1 One-time setup
 
 ```bash
 # Python backend
@@ -53,7 +350,7 @@ npm install
 Copy `.env.example` to `.env` if you have not already. The safe defaults apply even
 with no `.env` at all — an absent file gives you paper trading, no live orders.
 
-### 1.2 Start the backend (FastAPI + agents + LangGraph)
+### 3.2 Start the backend (FastAPI + agents + LangGraph)
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
@@ -82,17 +379,17 @@ curl http://127.0.0.1:8000/api/graphs        # the seven graphs and their nodes
 curl http://127.0.0.1:8000/docs              # interactive API browser
 ```
 
-### 1.3 Start the frontend
+### 3.3 Start the frontend
 
 ```bash
 npm run dev        # http://localhost:3000
 ```
 
-The dashboard runs **without the backend** for most panels — Next.js route handlers
+**The dashboard runs WITHOUT the backend for most panels** — Next.js route handlers
 under `app/api/` read JSON stores in `.data/`. Only the agent-event WebSocket and
 everything under `/api/graphs` require the Python process.
 
-### 1.4 Stopping
+### 3.4 Stopping
 
 `Ctrl+C` in each terminal. If a port stays held on Windows:
 
@@ -103,104 +400,54 @@ Stop-Process -Id <pid>
 
 ---
 
-## Part 2 — How it fits together
+## Part 4 — The architectural rules
 
-```
-  Next.js dashboard  ── WebSocket ─────────────┐
-   (localhost:3000)   └── /api/graphs/* ───────┤
-                                               ▼
-                                     FastAPI (localhost:8000)
-                                       50 endpoints
-                                               │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    ▼                          ▼                          ▼
-             Python agents            LangGraph (7 graphs)         Workers
-             12 event-driven          20-node decision graph       triggers / monitor
-                    │                          │                          │
-                    └────────── in-process message bus ────────────────────┘
-                                               │
-                                   Risk Gateway (deterministic)
-                                               │
-                                        APPROVED ONLY
-                                               ▼
-                                    Execution agent → exchange
-```
+### 4.1 The one rule
 
-**The one rule:** the reasoning layer can recommend a trade; it can never place one.
+**The reasoning layer can recommend a trade; it can never place one.**
 No module under `backend/graphs/` can even *import* an order call — that is enforced
 by an AST test, not a convention.
 
-### The seven graphs
-
-| # | Graph | What it does |
-|---|---|---|
-| 1 | Market Intelligence | validate → features → analysis → regime → market state |
-| 2 | **Trade Decision** | the 20-node main graph: memory → market → strategy → opportunity → 7 specialists → debate → supervisor → risk gateway |
-| 3 | Execution | deterministic, **outside LangGraph** by design |
-| 4 | Position Monitoring | 9 dimensions → HOLD / REDUCE / MODIFY / EXIT |
-| 5 | Reflection | closed trade → context → outcome → lesson → memory |
-| 6 | Research | hypothesis → validation (see §6.4) |
-| 7 | Learning | six meta-learning questions |
-
-Only Graph 2 is subscribed to triggers. It contains all of Graph 1's stages, so
-subscribing both would run them twice per trigger.
-
----
-
-## Part 3 — What happens automatically
-
-### 3.1 The autonomous loop
+### 4.2 The execution boundary
 
 ```
-Live WebSocket feed (BTC/USDT, ETH/USDT, SOL/USDT)
-        │  every tick
-        ▼
-Trigger evaluator ── did anything actually change?
-        │  price move ≥2% · funding shift · OI spike · position risk · regime change
-        │  (debounced, rate-limited to 6 runs/min, 2/symbol/min)
-        ▼
-TRIGGER_FIRED  ──►  Graph 2 runs (20 nodes)
-        │
-        ├─ memory (7 stores) → market data → regime → strategy scoring
-        ├─ no opportunity?  → END. This is the common case.
-        ├─ 7 specialists in parallel → debate → Supervisor decides
-        │      TRADE · WAIT · EXIT · DO_NOT_TRADE
-        └─ Risk Gateway: 9 checks → approve or reject
-                │  approved
-                ▼
-        EXECUTION_PLAN_READY  (inert — a dataclass, not an order)
-                ▼
-        Execution service: re-validate → round to lot size → dedupe
-                ▼
-        [GRAPH_EXECUTION_ENABLED?]  no → logged, nothing submitted
-                │ yes
-                ▼
-        TAR_SUBMITTED → CRO reviews → TAR_APPROVED → Execution agent
-                ▼
-        [LIVE_TRADING?]  no → simulated fill
+  graphs/  (CANNOT import exchange or execution code)
+     │
+     ▼ publishes EXECUTION_PLAN_READY (inert dataclass)
+     │
+  services/execution_service.py  (the TRUST BOUNDARY)
+     │
+     ▼ publishes TAR_SUBMITTED
+     │
+  agents/cro_agent.py  (the SOLE approver)
+     │
+     ▼ publishes TAR_APPROVED
+     │
+  agents/execution_agent.py  (the SOLE exchange caller)
+     │
+     ▼ ccxt → Binance (or simulation)
 ```
 
-Separately, every 5 minutes, each open position goes through Graph 4 and gets a
-HOLD / REDUCE / MODIFY / EXIT decision — applied only if
-`POSITION_MONITORING_ENABLED=true`.
-
-### 3.2 Why most runs do nothing
-
-That is the system working. A run ends early when no regime could be classified,
-every strategy is muted for the regime, the best strategy score is below the minimum,
-or no ATR exists so no stop can be computed. Each exit records **why** in the trace.
-
-### 3.3 The one thing that is never blocked
+### 4.3 The one thing that is never blocked
 
 Closing a position. Not by pause, not by emergency stop, not by a risk check, not by
 the CRO, and not by `GRAPH_EXECUTION_ENABLED`. A gate that traps you in a losing
 position when a limit has already been breached is worse than no gate.
 
+### 4.4 Opens vs closes take different paths
+
+```
+open  → TAR_SUBMITTED → CRO reviews → TAR_APPROVED → Execution Agent
+close → Execution Agent.close_position() DIRECTLY, no CRO, no risk checks
+```
+
+This asymmetry is deliberate and is the implementation of CLAUDE.md invariant 4.
+
 ---
 
-## Part 4 — Using it
+## Part 5 — Using it
 
-### 4.1 Watching the reasoning
+### 5.1 Watching the reasoning
 
 ```bash
 curl http://127.0.0.1:8000/api/graphs/runs        # recent runs + why each stopped
@@ -212,7 +459,7 @@ curl http://127.0.0.1:8000/api/graphs/meta-learning
 `/api/graphs/nodes` is the explainability surface: it shows per node what it is
 *permitted* to write. Exactly one node in the whole system may call a model.
 
-### 4.2 Running a decision on demand
+### 5.2 Running a decision on demand
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/graphs/run/BTC/USDT
@@ -225,7 +472,7 @@ is inert and still gated.
 
 If `TRADES_API_KEY` is set, add `-H "X-API-Key: <key>"`.
 
-### 4.3 Live progress (WebSocket)
+### 5.3 Live progress (WebSocket)
 
 `ws://127.0.0.1:8000/api/graphs/stream` — send `{"symbol": "BTC/USDT"}`, receive one
 message per node:
@@ -234,7 +481,7 @@ message per node:
 {"type":"node","node":"debate","progress":14,"total":20,"unavailableCount":3}
 ```
 
-### 4.4 Kill switch
+### 5.4 Kill switch
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/admin/pause
@@ -245,7 +492,7 @@ curl      http://127.0.0.1:8000/api/admin/status
 
 All halt **new** positions. None blocks an exit.
 
-### 4.5 Giving it a goal
+### 5.5 Giving it a goal
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/missions \
@@ -263,7 +510,7 @@ curl -X POST http://127.0.0.1:8000/api/missions \
   }'
 ```
 
-**Read §6.2 before relying on this.** The mission is stored and its progress is
+**Read §8.2 before relying on this.** The mission is stored and its progress is
 tracked. It does **not** currently influence any trading decision in the Python
 backend.
 
@@ -273,7 +520,28 @@ more risk as time runs out.
 
 ---
 
-## Part 5 — Turning on autonomy, in order
+## Part 6 — Why most runs do nothing
+
+That is the system working. A run ends early when no regime could be classified,
+every strategy is muted for the regime, the best strategy score is below the minimum,
+or no ATR exists so no stop can be computed. Each exit records **why** in the trace.
+
+### 6.1 The confidence ceiling
+
+Three of seven specialists have no data feed (orderflow, liquidity, news), which caps
+directional coverage at **0.571**. Measured ceilings: **~0.239** with both directional
+legs agreeing, **~0.153** on market evidence alone.
+
+`MIN_CONFIDENCE_TO_TRADE = 0.18` sits between them — so **TRADE requires the funding
+specialist to agree with the market read.** Market evidence alone will not clear the
+bar.
+
+This is deliberate and not tuned toward action. If you widen it, you are lowering the
+evidence bar, and two tests pin both sides so the change is visible.
+
+---
+
+## Part 7 — Turning on autonomy, in order
 
 Do these one at a time and watch between each.
 
@@ -309,7 +577,7 @@ BINANCE_API_KEY=...
 BINANCE_SECRET=...
 ```
 
-Before this: read Part 6 in full, set `TRADES_API_KEY`, and understand §6.5 — the
+Before this: read Part 8 in full, set `TRADES_API_KEY`, and understand §8.5 — the
 stop-loss only exists while the process is alive.
 
 The hard limits that apply regardless: **3× leverage** on real money (10× paper,
@@ -318,12 +586,12 @@ mandatory computed stop on every position.
 
 ---
 
-## Part 6 — Known bugs, gaps and limitations
+## Part 8 — Known bugs, gaps and limitations
 
 Everything here is real and currently true. Nothing is hidden to make the system look
 finished.
 
-### 6.1 No LLM provider adapter exists
+### 8.1 No LLM provider adapter exists
 
 `get_provider()` recognises only `'null'`. Setting `LLM_PROVIDER=openai` logs a
 warning and falls back to `NullProvider`.
@@ -338,7 +606,7 @@ design. Eighteen prompts exist in `backend/prompts/registry.py`; twelve are name
 **To fix:** add an adapter class in `backend/llm/provider.py` implementing
 `complete()` and register it in `get_provider()`.
 
-### 6.2 A capital target does not steer trading ⚠️
+### 8.2 A capital target does not steer trading ⚠️
 
 **The gap most likely to surprise you.** Nothing under `backend/graphs/` or
 `backend/agents/` reads `mission_store`. A `capital-target` mission is stored,
@@ -355,7 +623,7 @@ Not your target.
 **To fix:** read the active mission in the Supervisor node and add its progress as a
 caution note on the decision. Keep it advisory — that constraint is deliberate.
 
-### 6.3 Postgres is not running, so several stores report unavailable
+### 8.3 Postgres is not running, so several stores report unavailable
 
 Affected: Risk Memory (`risk_events`), the execution-quality lookup used by
 reflection, and the CRO's persisted decisions.
@@ -366,7 +634,7 @@ blocked", which is the most reassuring possible wrong answer.
 
 Six of seven memory stores work without Postgres.
 
-### 6.4 The research graph cannot produce a real backtest score — PARTLY FIXED
+### 8.4 The research graph cannot produce a real backtest score — PARTLY FIXED
 
 **Fixed:** `HistoricalBacktestEngine.__init__` used to call
 `self.bus._subscribers.clear()` on the global bus, so running it inside the live
@@ -403,7 +671,7 @@ parameter through which one could arrive.
 `tests/test_sections_14_to_41.py` holds both halves of this: that the clearing is gone,
 and that `research_graph` still does not instantiate the engine.
 
-### 6.5 The stop-loss only exists while the process is alive ⚠️
+### 8.5 The stop-loss only exists while the process is alive ⚠️
 
 **The highest-value reliability gap in the system.** Stops are enforced by
 `PositionMonitorAgent` comparing price against a level in memory. There is **no
@@ -418,7 +686,7 @@ beyond the stop is unbounded because the stop is not a resting exchange order.
 **To fix:** place a real stop order via ccxt when a position opens. This is the
 single change with the biggest safety return.
 
-### 6.6 Idempotency is in-process only
+### 8.6 Idempotency is in-process only
 
 The execution service dedupes by key, but the store is a dict that dies with the
 process. A plan whose TAR published immediately before a crash could be submitted
@@ -429,20 +697,7 @@ subscribers on one event.
 
 **To fix:** persist the key store.
 
-### 6.7 Confidence is low by design, so TRADE is rare
-
-Three of seven specialists have no data feed (orderflow, liquidity, news), which caps
-directional coverage at **0.571**. Measured ceilings: **~0.239** with both directional
-legs agreeing, **~0.153** on market evidence alone.
-
-`MIN_CONFIDENCE_TO_TRADE = 0.18` sits between them — so **TRADE requires the funding
-specialist to agree with the market read.** Market evidence alone will not clear the
-bar.
-
-This is deliberate and not tuned toward action. If you widen it, you are lowering the
-evidence bar, and two tests pin both sides so the change is visible.
-
-### 6.8 Cross-asset correlation is not checked synchronously
+### 8.7 Cross-asset correlation is not checked synchronously
 
 The Risk Gateway's `Correlation` check hard-rejects adding to an asset you already
 hold. Cross-asset correlation is reported `delegated` to the CIO agent, which computes
@@ -450,7 +705,7 @@ real correlations from 180 4h candles per symbol — too slow for a synchronous 
 
 **To fix:** a correlation cache the CIO exposes.
 
-### 6.9 Live price is never cross-checked against the candle close
+### 8.8 Live price is never cross-checked against the candle close
 
 `market_data.price` comes from the WebSocket cache and candles from REST. Nothing
 compares them. A large divergence means one side is stale, and the thesis entry price
@@ -458,7 +713,7 @@ would come from the stale one.
 
 **To fix:** compare in `validate_market_data` and reject on a large gap.
 
-### 6.10 Reflection uses its own state, not `TradingState`
+### 8.9 Reflection uses its own state, not `TradingState`
 
 `reflection_graph` still defines `ReflectionState`, so it does not go through
 `build_graph` and gets no contract validation, declared-write enforcement or run
@@ -466,7 +721,7 @@ tracing. Spec Section 4 wants one shared state.
 
 The other six graphs are compliant.
 
-### 6.11 Agent callers run the risk gateway in lenient mode
+### 8.10 Agent callers run the risk gateway in lenient mode
 
 `supervisor_agent` and the CRO call `validate_trade()` without a portfolio snapshot or
 ledger, so margin, daily-loss, exposure and correlation report `unavailable` and become
@@ -477,7 +732,7 @@ rejects.
 
 **To fix:** pass the portfolio and ledger from the agent callers too.
 
-### 6.12 Binance futures testnet is deprecated via ccxt
+### 8.11 Binance futures testnet is deprecated via ccxt
 
 `USE_TESTNET=true` no longer gives a working paper venue — ccxt reports that Binance
 dropped futures testnet support, and private calls fail rather than executing against
@@ -486,14 +741,14 @@ a test account.
 It fails **closed**, which is the right direction. But do not treat `USE_TESTNET` as
 your safety gate. **`LIVE_TRADING=false` is the gate that actually works.**
 
-### 6.13 Watched symbols are hardcoded
+### 8.12 Watched symbols are hardcoded
 
 `BTC/USDT`, `ETH/USDT`, `SOL/USDT` in `backend/services/live_market_data.py`; regime
 watching covers BTC and ETH; funding and OI triggers are BTC-only.
 
 **To fix:** move the list to settings.
 
-### 6.14 Order sizes are not exchange-rounded outside the graph path
+### 8.13 Order sizes are not exchange-rounded outside the graph path
 
 The execution service rounds to `stepSize`/`minQty` and refuses rather than rounding
 up — rounding up would exceed the approved risk. The **agent** path
@@ -504,7 +759,7 @@ sizes.
 
 ---
 
-## Part 7 — Quick reference
+## Part 9 — Quick reference
 
 ### Environment
 
@@ -514,12 +769,13 @@ sizes.
 | `GRAPH_EXECUTION_ENABLED` | `false` | may graph runs submit TARs |
 | `POSITION_MONITORING_ENABLED` | `false` | may monitoring decisions be applied |
 | `TRADES_API_KEY` | unset | when set, guards every state-changing route |
-| `USE_TESTNET` | `true` | ⚠️ deprecated by Binance — see §6.12 |
-| `LLM_PROVIDER` | `null` | only `null` is implemented — see §6.1 |
+| `USE_TESTNET` | `true` | ⚠️ deprecated by Binance — see §8.11 |
+| `LLM_PROVIDER` | `null` | only `null` is implemented — see §8.1 |
 | `RISK_PER_TRADE` | `0.02` | fraction of equity risked per trade |
 | `GRAPH_CHECKPOINTER` | sqlite | durable state for position monitoring |
 | `BINANCE_API_KEY` / `BINANCE_SECRET` | empty | required only for live trading |
-| `DATABASE_URL` | localhost | optional — see §6.3 |
+| `DATABASE_URL` | localhost | optional — see §8.3 |
+| `POLYMARKET_ENABLED` | `false` | prediction market supplementary data |
 
 ### Hard limits (not overridable by any setting or confidence level)
 
@@ -544,9 +800,17 @@ npm run test                                # 281 tests
 
 | | |
 |---|---|
-| Graphs | `backend/graphs/` |
-| Nodes | `backend/graphs/nodes/` |
+| Frontend components | `components/` (72 files + 6 subdirectories) |
+| Frontend API routes | `app/api/` (26 route directories) |
+| Frontend state | `lib/agentOS.ts`, `lib/agentEngine.ts`, `components/AppState.tsx` |
+| Backend agents | `backend/agents/` (25 agent files) |
+| Backend graphs | `backend/graphs/` (17 files including nodes/) |
+| Backend core | `backend/core/` (14 files) |
+| Backend services | `backend/services/` (19 files) |
+| Backend workers | `backend/workers/` (5 worker files) |
 | Risk gateway | `backend/core/risk_manager.py` |
 | Execution boundary | `backend/services/execution_service.py` |
+| Message bus | `backend/core/message_bus.py` |
+| Event types | `backend/models/events.py` |
 | Safety invariants | `CLAUDE.md` |
 | Build history + audits | `LANGGRAPH_IMPLEMENTATION_PLAN.md` |

@@ -1,49 +1,167 @@
 'use client';
 
 // ---------------------------------------------------------------------
-// /settings — runtime gates plus the client-side provider config.
+// /settings — runtime gates with an interactive live-trading toggle.
 //
-// Two clearly separated halves, because they live in different places and have very
-// different consequences:
+// The three execution gates:
+//   GRAPH_EXECUTION_ENABLED      — may graph runs submit TARs (env var)
+//   POSITION_MONITORING_ENABLED  — may monitoring decisions be applied (env var)
+//   LIVE_TRADING                 — real money vs paper (TOGGLABLE from here)
 //
-//   BACKEND GATES are read-only here. LIVE_TRADING, GRAPH_EXECUTION_ENABLED and
-//   POSITION_MONITORING_ENABLED are environment variables read at call time; there
-//   is no endpoint that writes them, and there should not be — a browser toggle
-//   that turned on real-money trading would be the single most dangerous control in
-//   the app. They are shown with their live values and how to change them.
-//
-//   CLIENT CONFIG (provider, model, API key) lives in localStorage via AppState and
-//   is genuinely editable, because the key is the user's and the chat proxy needs it.
+// LIVE_TRADING is the only gate that can be changed from the browser.
+// The other two are environment variables set in .env and shown read-only.
+// The toggle calls POST /api/admin/live-trading/enable (with confirmation)
+// or POST /api/admin/live-trading/disable.
 // ---------------------------------------------------------------------
 
+import { useState, useCallback } from 'react';
 import { useAppState } from '@/components/AppState';
 import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
-import { BACKEND_PATHS } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendUrl } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
+
+interface TradingModeData {
+  liveTradingEnabled?: boolean;
+  graphExecutionEnabled?: boolean;
+  positionMonitoringEnabled?: boolean;
+  credentialsConfigured?: boolean;
+  executionTab?: string;
+  ordersRoutedTo?: string;
+}
 
 export default function SettingsPage() {
   const { config, setConfig, activeProvider, resolvedModel, hasKey } = useAppState();
+  const tradingMode = useBackend<TradingModeData>(BACKEND_PATHS.tradingMode, { intervalMs: 5_000 });
   const exchange = useBackend<Record<string, unknown>>(BACKEND_PATHS.exchangeStatus, { intervalMs: 30_000 });
   const admin = useBackend<{ isPaused?: boolean; emergencyStop?: boolean; auth?: { writeAuthEnabled?: boolean; note?: string } }>(
     BACKEND_PATHS.adminStatus, { intervalMs: 15_000 },
   );
   const polymarket = useBackend<{ enabled?: boolean; gateMeaning?: string }>(BACKEND_PATHS.polymarket, { intervalMs: 60_000 });
 
-  const live = exchange.data?.liveTradingEnabled === true;
+  const live = tradingMode.data?.liveTradingEnabled === true;
+  const graphExec = tradingMode.data?.graphExecutionEnabled === true;
+  const posMon = tradingMode.data?.positionMonitoringEnabled === true;
+  const hasCreds = tradingMode.data?.credentialsConfigured === true;
+
+  const [toggling, setToggling] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+
+  const toggleLiveTrading = useCallback(async () => {
+    if (toggling) return;
+    setToggleError(null);
+
+    if (!live) {
+      // Enabling — require confirmation
+      const confirmed = window.confirm(
+        '⚠️ ENABLE REAL-MONEY TRADING?\n\n' +
+        'This will route orders to a REAL exchange with REAL funds.\n\n' +
+        '• Ensure your Binance API keys are configured\n' +
+        '• Ensure you understand the risk limits (3× leverage, 3% per trade)\n' +
+        '• The stop-loss only exists while the backend process is alive\n\n' +
+        'Click OK to enable live trading.'
+      );
+      if (!confirmed) return;
+    }
+
+    setToggling(true);
+    try {
+      const url = backendUrl(live ? BACKEND_PATHS.liveTradingDisable : BACKEND_PATHS.liveTradingEnable);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: live ? '{}' : JSON.stringify({ confirm: 'I understand this uses real funds' }),
+      });
+      const data = await res.json();
+      if (data.status === 'error') {
+        setToggleError(data.message);
+      } else {
+        // Force refetch of trading mode
+        tradingMode.reload();
+      }
+    } catch (e) {
+      setToggleError(`Failed to toggle: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setToggling(false);
+    }
+  }, [live, toggling, tradingMode]);
 
   return (
     <div className="space-y-3">
       <h1 className="text-[17px] font-semibold">Settings</h1>
 
+      {/* ─── Trading Mode Toggle ─── */}
       <Card>
-        <SectionTitle>Runtime gates — read-only</SectionTitle>
-        <TermTable columns={[{ key: 'g', label: 'Gate' }, { key: 'v', label: 'Value' }, { key: 'e', label: 'Effect' }]}>
+        <SectionTitle>Trading Mode</SectionTitle>
+        <div className="flex items-center gap-4 mb-3">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 mb-1">
+              <Badge
+                state={live ? 'CRITICAL' : 'PASS'}
+                label={live ? '🔴 LIVE — REAL MONEY' : '🟢 Paper Trading — Safe'}
+              />
+              {toggling && <span className="text-[10px] text-txt2 animate-pulse">switching…</span>}
+            </div>
+            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+              {live
+                ? `Orders routed to: ${tradingMode.data?.ordersRoutedTo ?? 'exchange'}. Tab: ${tradingMode.data?.executionTab ?? 'real'}.`
+                : 'Orders are simulated. No real exchange calls. All trades logged as paper.'}
+            </p>
+          </div>
+          <button
+            onClick={toggleLiveTrading}
+            disabled={toggling}
+            className={`
+              relative px-4 py-2 rounded-lg text-[12px] font-mono font-semibold border-2 transition-all duration-200
+              ${live
+                ? 'border-red bg-red/10 text-red hover:bg-red/20'
+                : 'border-green bg-green/10 text-green hover:bg-green/20'}
+              disabled:opacity-40
+              ${live ? 'shadow-[0_0_12px_rgba(239,68,68,0.15)]' : ''}
+            `}
+          >
+            {live ? 'Switch to Paper' : 'Enable Live Trading'}
+          </button>
+        </div>
+        {toggleError && (
+          <div className="text-[11px] text-red bg-red/5 border border-red/20 rounded px-2.5 py-1.5 mb-2">
+            {toggleError}
+          </div>
+        )}
+        {!hasCreds && !live && (
+          <div className="text-[10.5px] text-amber bg-amber/5 border border-amber/20 rounded px-2.5 py-1.5 mb-2">
+            ⚠️ No exchange credentials configured. Set BINANCE_API_KEY and BINANCE_SECRET in .env before enabling live trading.
+          </div>
+        )}
+      </Card>
+
+      {/* ─── Pipeline Gates ─── */}
+      <Card>
+        <SectionTitle>Pipeline Gates</SectionTitle>
+        <TermTable columns={[{ key: 'g', label: 'Gate' }, { key: 'v', label: 'Status' }, { key: 'e', label: 'Effect' }]}>
+          <tr>
+            <td className="mono text-[11.5px]">GRAPH_EXECUTION_ENABLED</td>
+            <td>
+              <Badge state={graphExec ? 'PASS' : 'IDLE'} label={graphExec ? 'ON — TARs submitted' : 'OFF — dry run'} />
+            </td>
+            <td className="text-[11px] whitespace-normal max-w-[480px]" style={{ color: 'var(--text-secondary)' }}>
+              Graph reasoning runs can submit Trade Action Requests through the CRO for approval.
+            </td>
+          </tr>
+          <tr>
+            <td className="mono text-[11.5px]">POSITION_MONITORING_ENABLED</td>
+            <td>
+              <Badge state={posMon ? 'PASS' : 'IDLE'} label={posMon ? 'ON — applied' : 'OFF — logged only'} />
+            </td>
+            <td className="text-[11px] whitespace-normal max-w-[480px]" style={{ color: 'var(--text-secondary)' }}>
+              Position monitoring decisions (stop tightening, REDUCE, EXIT) are applied to open positions.
+            </td>
+          </tr>
           <tr>
             <td className="mono text-[11.5px]">LIVE_TRADING</td>
             <td><Badge state={live ? 'CRITICAL' : 'INFO'} label={live ? 'true — REAL MONEY' : 'false — paper'} /></td>
             <td className="text-[11px] whitespace-normal max-w-[480px]" style={{ color: 'var(--text-secondary)' }}>
-              The only flag that routes real orders. Not togglable from a browser by design.
+              Toggleable above. Routes orders to the real exchange when on.
             </td>
           </tr>
           <tr>
@@ -68,9 +186,8 @@ export default function SettingsPage() {
           </tr>
         </TermTable>
         <div className="text-[10.5px] mt-2 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-          These are environment variables read at call time. Change them in{' '}
-          <span className="mono">.env</span> and restart the backend — there is deliberately no
-          endpoint that writes them.
+          GRAPH_EXECUTION_ENABLED and POSITION_MONITORING_ENABLED are set in <span className="mono">.env</span> and
+          read at call time. LIVE_TRADING can be toggled from the button above.
         </div>
       </Card>
 

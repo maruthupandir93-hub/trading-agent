@@ -628,3 +628,41 @@ COMMENT ON TABLE pv_history IS 'Portfolio value samples. `complete=false` means 
 -- ---------------------------------------------------------------------
 
 ALTER TABLE missions ADD COLUMN IF NOT EXISTS baseline_equity_usd numeric;
+
+
+-- ============================================================================
+-- SECTION 4 — VIEWS: Paper vs Real trade separation
+--
+-- The `tab` column already separates paper from real in every relevant table.
+-- These views provide clean, named access without duplicating the schema:
+--
+--   SELECT * FROM real_trades;     -- only live-money trades
+--   SELECT * FROM paper_trades;    -- only simulated trades
+--
+-- Views are `CREATE OR REPLACE`, so they are safe to re-run on every startup.
+-- They have no storage cost — they are just named WHERE clauses.
+-- ============================================================================
+
+CREATE OR REPLACE VIEW real_trades AS
+  SELECT * FROM trades WHERE tab = 'real';
+
+CREATE OR REPLACE VIEW paper_trades AS
+  SELECT * FROM trades WHERE tab = 'paper';
+
+CREATE OR REPLACE VIEW real_positions AS
+  SELECT * FROM positions WHERE tab = 'real';
+
+CREATE OR REPLACE VIEW paper_positions AS
+  SELECT * FROM positions WHERE tab = 'paper';
+
+CREATE OR REPLACE VIEW real_decisions AS
+  SELECT * FROM decisions WHERE tab = 'real';
+
+CREATE OR REPLACE VIEW paper_decisions AS
+  SELECT * FROM decisions WHERE tab = 'paper';
+
+CREATE OR REPLACE VIEW real_pv_history AS
+  SELECT * FROM pv_history WHERE tab = 'real';
+
+CREATE OR REPLACE VIEW paper_pv_history AS
+  SELECT * FROM pv_history WHERE tab = 'paper';

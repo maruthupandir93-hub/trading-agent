@@ -35,6 +35,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _graph_execution_enabled() -> bool:
+    """Read at call time — mirrors execution_service.execution_enabled()."""
+    import os
+    return os.getenv("GRAPH_EXECUTION_ENABLED", "false").strip().lower() == "true"
+
+
+def _position_monitoring_enabled() -> bool:
+    """Read at call time — mirrors position_worker.monitoring_enabled()."""
+    import os
+    return os.getenv("POSITION_MONITORING_ENABLED", "false").strip().lower() == "true"
+
+
 @router.get("/status")
 async def get_exchange_status() -> Dict[str, Any]:
     """Connection and mode. The first thing to check before anything else.
@@ -54,12 +66,15 @@ async def get_exchange_status() -> Dict[str, Any]:
         # them into one "mode" string hides which is which.
         "useTestnet": settings.USE_TESTNET,
         "liveTradingEnabled": settings.LIVE_TRADING,
+        "graphExecutionEnabled": _graph_execution_enabled(),
+        "positionMonitoringEnabled": _position_monitoring_enabled(),
         "credentialsConfigured": client.has_credentials(),
         "ordersRoutedTo": (
             "simulation (no exchange orders)"
             if not settings.LIVE_TRADING
             else ("binance futures TESTNET" if settings.USE_TESTNET else "binance futures LIVE — REAL FUNDS")
         ),
+        "executionTab": settings.execution_tab,
         "note": (
             "This API is read-only. Orders cannot be placed through it — they exist only as a "
             "consequence of an approved TAR reaching the Execution Engine (spec Section 8)."

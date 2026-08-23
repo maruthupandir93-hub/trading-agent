@@ -143,3 +143,107 @@ async def emergency_stop() -> Dict[str, Any]:
             else None
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Live-trading runtime toggle
+#
+# The settings page originally said "Not togglable from a browser by design."
+# That constraint is now relaxed: the toggle EXISTS but requires an explicit
+# confirmation string so it cannot be flipped by a stray click, a browser
+# extension, or a test runner hitting every endpoint.
+# ---------------------------------------------------------------------------
+
+@router.get("/trading-mode")
+async def get_trading_mode() -> Dict[str, Any]:
+    """All three execution gates in one response."""
+    from backend.services.execution_service import execution_enabled
+    from backend.workers.position_worker import monitoring_enabled
+
+    client = None
+    try:
+        from backend.services.exchange_client import get_exchange_client
+        client = get_exchange_client()
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "liveTradingEnabled": settings.LIVE_TRADING,
+        "graphExecutionEnabled": execution_enabled(),
+        "positionMonitoringEnabled": monitoring_enabled(),
+        "credentialsConfigured": client.has_credentials() if client else False,
+        "executionTab": settings.execution_tab,
+        "ordersRoutedTo": (
+            "simulation (no exchange orders)"
+            if not settings.LIVE_TRADING
+            else ("binance futures LIVE — REAL FUNDS" if not settings.USE_TESTNET else "binance futures TESTNET")
+        ),
+    }
+
+
+@router.post("/live-trading/enable", dependencies=[Depends(require_write_auth)])
+async def enable_live_trading(body: Dict[str, Any] = {}) -> Dict[str, Any]:
+    """Enable real-money trading. Requires explicit confirmation.
+
+    The body must contain `"confirm": "I understand this uses real funds"`.
+    Without that exact string, the request is rejected. This is not security
+    theatre — it is the difference between a toggle that can be flipped by
+    a curl one-liner pasted from a README and one that requires reading.
+    """
+    confirm = (body.get("confirm") or "").strip()
+    if confirm != "I understand this uses real funds":
+        return {
+            "status": "error",
+            "message": (
+                'Confirmation required. Send {"confirm": "I understand this uses real funds"} '
+                "in the request body to enable live trading."
+            ),
+        }
+
+    # Check credentials before enabling — live mode without keys means every
+    # order attempt fails at the exchange, which is worse than staying in paper.
+    try:
+        from backend.services.exchange_client import get_exchange_client
+        client = get_exchange_client()
+        if not client.has_credentials():
+            return {
+                "status": "error",
+                "message": (
+                    "Cannot enable live trading: no exchange credentials configured "
+                    "(BINANCE_API_KEY / BINANCE_SECRET are empty). Set them in .env first."
+                ),
+            }
+    except Exception as e:
+        logger.warning("Could not check exchange credentials: %s", e)
+
+    settings.set_live_trading(True)
+    logger.critical(
+        "LIVE TRADING ENABLED via API. Orders will now route to the exchange. "
+        "Tab is '%s'. This change has been persisted to .env.",
+        settings.execution_tab,
+    )
+    return {
+        "status": "success",
+        "message": "Live trading ENABLED. Orders will now route to the real exchange.",
+        "liveTradingEnabled": True,
+        "executionTab": settings.execution_tab,
+    }
+
+
+@router.post("/live-trading/disable", dependencies=[Depends(require_write_auth)])
+async def disable_live_trading() -> Dict[str, Any]:
+    """Switch back to paper trading. No confirmation needed — this is always safe."""
+    settings.set_live_trading(False)
+    logger.info(
+        "Live trading DISABLED via API. Orders now route to simulation. "
+        "Tab is '%s'. Persisted to .env.",
+        settings.execution_tab,
+    )
+    return {
+        "status": "success",
+        "message": "Live trading DISABLED. Back to paper/simulation mode.",
+        "liveTradingEnabled": False,
+        "executionTab": settings.execution_tab,
+    }
+
