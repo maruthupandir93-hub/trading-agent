@@ -610,6 +610,96 @@ CREATE TABLE IF NOT EXISTS pv_history (
 CREATE INDEX IF NOT EXISTS idx_pv_history_tab_ts ON pv_history (tab, ts DESC);
 COMMENT ON TABLE pv_history IS 'Portfolio value samples. `complete=false` means some position had no price and total_value is partial.';
 
+-- ============================================================================
+-- SECTION 3b — BACKEND-OWNED STATE (the Python agent, not the browser)
+--
+-- WHY THESE ARE SEPARATE TABLES AND NOT `positions` / `paper_account`
+--
+-- CLAUDE.md said Postgres had "a `positions` table built for this that nothing
+-- writes to", and the obvious fix was to have the backend write it. That would
+-- have corrupted both books.
+--
+-- `lib/portfolioStore.server.ts::saveBook` runs `DELETE FROM positions` and
+-- re-inserts the BROWSER's whole book in one transaction, because "absent from
+-- the payload" is how the browser expresses a close. So `positions` is not
+-- unowned — it is owned by the Next.js side, and it is replaced wholesale on
+-- every save. Two writers on it would mean:
+--
+--   * the operator saving the browser book DELETES every position the agent is
+--     holding, and the agent then re-creates them on its next write, and
+--   * the agent's write resurrects a position the operator just closed.
+--
+-- That is precisely the "two data stores, both real — do not consolidate them"
+-- failure CLAUDE.md warns about, one level down. The backend gets its own
+-- tables, named so the ownership is unmistakable at a glance in psql.
+--
+-- These are the AGENT's book. `positions` / `paper_account` remain the
+-- BROWSER's. They are two actors holding two books, which is the existing
+-- design — see `/api/catalog/orders`'s `source` field.
+-- ============================================================================
+
+-- Source: backend/services/portfolio_store.py — the backend paper book.
+CREATE TABLE IF NOT EXISTS agent_paper_account (
+  id          text PRIMARY KEY DEFAULT 'default',
+  cash        numeric NOT NULL,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+-- NOT seeded with a starting balance, deliberately. An absent row means "this
+-- process has never traded", which `load_portfolio()` answers with
+-- PAPER_STARTING_CASH; a seeded row would be indistinguishable from an account
+-- that had genuinely traded its way back to exactly 25,000.
+COMMENT ON TABLE agent_paper_account IS 'Backend agent paper cash. Distinct from paper_account, which is the browser''s. See SECTION 3b.';
+
+CREATE TABLE IF NOT EXISTS agent_positions (
+  tab            text NOT NULL CHECK (tab IN ('paper', 'real')),
+  symbol         text NOT NULL,
+  qty            numeric NOT NULL,
+  avg_cost       numeric NOT NULL,
+  -- Margin actually locked, which is NOT qty*avg_cost once leverage is involved.
+  -- portfolio_store already tracks it and releases it proportionally on a
+  -- partial close; dropping it here would make a restart over-report free cash.
+  margin_locked  numeric,
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tab, symbol)
+);
+COMMENT ON TABLE agent_positions IS 'Backend agent open positions, aggregated per symbol. Distinct from positions, which is the browser''s. See SECTION 3b.';
+
+-- Source: backend/agents/position_monitor.py — THE LIVE WATCH LIST.
+--
+-- This is the safety-critical one. It is not a second copy of `agent_positions`:
+-- that table is an aggregated book with no stops, and this one is keyed by the
+-- TAR whose approval carries the stop the monitor is enforcing. Spec Section
+-- 22.8's worst case is "the bot goes silent while holding a leveraged position",
+-- and before this table a restart WAS that silence — the position stayed open at
+-- the exchange with a stop that existed only in a dead process's memory.
+--
+-- Rows are DELETED on close rather than marked closed. This table answers one
+-- question — "what must be watched right now?" — and a closed row can only make
+-- that answer wrong. Closed-position history already lives in `trades`,
+-- `decisions` and `reflections`; a fourth copy here would be a fourth thing to
+-- disagree with them.
+CREATE TABLE IF NOT EXISTS monitored_positions (
+  tar_id       text PRIMARY KEY,
+  -- 'pending' = risk approved it and the fill has not arrived. Persisted too,
+  -- because a restart between approval and fill is exactly how a fill becomes an
+  -- UNPROTECTED position: the monitor would have no stop to join it to.
+  status       text NOT NULL CHECK (status IN ('pending', 'open')),
+  symbol       text NOT NULL,
+  tab          text NOT NULL CHECK (tab IN ('paper', 'real')),
+  -- NULL while pending: side, size and entry are properties of the FILL.
+  side         text CHECK (side IN ('buy', 'sell')),
+  qty          numeric,
+  entry_price  numeric,
+  stop_loss    numeric,
+  take_profit  numeric,
+  peak_price   numeric,
+  opened_at    timestamptz,
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_monitored_positions_status ON monitored_positions (status);
+COMMENT ON TABLE monitored_positions IS 'Live stop-loss watch list. Rows are deleted on close — this is what must be watched NOW, not history.';
+
+
 -- ---------------------------------------------------------------------
 -- COLUMN ADDITIONS
 --

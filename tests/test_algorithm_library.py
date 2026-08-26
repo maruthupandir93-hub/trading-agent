@@ -26,6 +26,7 @@ from backend.algorithms.portfolio import (
 )
 from backend.algorithms.probability import bayesian_update, calibrate_confidence
 from backend.algorithms.risk import (
+    DEFAULT_SEED,
     RUIN_EQUITY_FRACTION,
     half_kelly_criterion,
     monte_carlo_simulation,
@@ -225,11 +226,54 @@ def test_kelly_risk_fraction_names_the_rule_that_applied():
 # ---------------------------------------------------------------------------
 
 def test_monte_carlo_is_deterministic():
-    """A stress test that changes verdict on a re-run cannot gate anything."""
-    a = monte_carlo_trade_sequence(risk_fraction=0.02)
-    b = monte_carlo_trade_sequence(risk_fraction=0.02)
+    """A stress test that changes verdict on a re-run cannot gate anything.
+
+    RUN AT A SMALL SIZE ON PURPOSE, and the reason is not just speed.
+
+    This used to call the function twice at its production defaults — 2000 x 200
+    draws, and about 20 MB of intermediate float64 arrays per call. It failed
+    once in a full-suite run on a machine that was simultaneously short of
+    memory (the same run produced a `fork: Resource temporarily unavailable`
+    from the shell), then passed in isolation and in four consecutive clean
+    full-suite runs afterwards.
+
+    So the flake was the ALLOCATION, not the seeding — which is worth stating
+    precisely, because a test named "is deterministic" that fails intermittently
+    reads as though the thing it guards is broken, and sends the next person to
+    debug a seed that was never wrong. `monte_carlo_trade_sequence` draws from
+    `np.random.default_rng(DEFAULT_SEED)`, so identical inputs cannot produce
+    different outputs.
+
+    The size does not weaken the assertion: reproducibility is a property of the
+    seeding, and 50 x 20 exercises the same code path with the same guarantee at
+    roughly 1/400th of the memory. Production defaults are unchanged — and an
+    allocation failure THERE is already handled, because
+    `simulation_agent.handle_event` wraps this call in `except Exception` and
+    fails the trade closed.
+
+    Both call sites are pinned explicitly rather than left to the defaults, so
+    this test also catches a future edit that drops `seed=DEFAULT_SEED` from the
+    signature — the actual regression it exists to prevent.
+    """
+    kwargs = dict(risk_fraction=0.02, num_simulations=50, trades_per_simulation=20)
+    a = monte_carlo_trade_sequence(**kwargs)
+    b = monte_carlo_trade_sequence(**kwargs)
+
     assert a["prob_of_ruin"] == b["prob_of_ruin"]
     assert a["expected_max_drawdown"] == b["expected_max_drawdown"]
+    assert a["worst_max_drawdown"] == b["worst_max_drawdown"]
+
+    # The seed must be REPORTED, not merely used. A caller auditing a past
+    # verdict has to be able to reproduce it, and that needs the seed in the
+    # result rather than only in the source.
+    assert a["seed"] == DEFAULT_SEED
+
+    # An explicitly different seed must give a different draw. Without this the
+    # test would still pass if the function ignored its seed argument and
+    # hardcoded one — "always identical" and "correctly seeded" are not the same
+    # property.
+    other = monte_carlo_trade_sequence(**kwargs, seed=DEFAULT_SEED + 1)
+    assert other["seed"] == DEFAULT_SEED + 1
 
 
 def test_monte_carlo_with_no_returns_reports_unknown_not_zero_risk():

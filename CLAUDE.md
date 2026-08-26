@@ -68,7 +68,7 @@ reading the wrong book:
 
 - **Postgres** is live and authoritative for the **backend agent**.
   `backend/core/db.py:init_db()` runs at startup and applies
-  `db/schema.sql` (26 tables). The agent's fills, decisions, reflections
+  `db/schema.sql` (31 tables). The agent's fills, decisions, reflections
   and risk events all land there — thousands of rows. `asyncpg`,
   `DATABASE_URL` in `.env`, and LangGraph's `AsyncPostgresSaver`
   checkpointer.
@@ -88,14 +88,50 @@ which meant `execution_quality` — added to the schema later — was never
 created, and every write to it failed after the order had already
 reached the exchange.
 
-**Open gap: positions are not persisted.**
-`backend/services/portfolio_store.py` is a module-level dict, and
-`PositionMonitorAgent`'s book is in-memory too. A restart forgets every
-open position. Postgres has a `positions` table built for this and
-nothing writes to it. For paper this loses P&L continuity; for **real
-money** the position still exists at the exchange with nobody enforcing
-its stop. `tests/test_post_trade_chain.py` pins the current behaviour —
-invert those two tests when it is fixed, don't delete them.
+**Positions are persisted — and NOT in the `positions` table.**
+
+This used to read "nothing writes to the `positions` table, put the
+backend's book there." **That instruction was wrong and following it
+would have corrupted both books.**
+`lib/portfolioStore.server.ts::saveBook` writes `positions` — with a
+`DELETE FROM positions` that replaces the *browser's* whole book, because
+"absent from the payload" is how the browser expresses a close. A second
+writer there means the operator's next save deletes every position the
+agent holds, and the agent's next write resurrects a position the
+operator just closed. Same two-actors-two-books rule as above, one level
+down.
+
+So the backend owns three of its own tables (`db/schema.sql` SECTION 3b):
+
+- `monitored_positions` — the **live stop-loss watch list**, written by
+  `PositionMonitorAgent` after every change and reloaded by `restore()`
+  from `backend/main.py`'s lifespan. This is the safety-critical one.
+  Rows are **deleted on close**: the table answers "what must be watched
+  right now?", and closed history already lives in `trades` /
+  `decisions` / `reflections`.
+- `agent_positions` / `agent_paper_account` — the backend paper book,
+  written through by `backend/services/portfolio_store.py` and reloaded
+  by `load_portfolio()`.
+
+`tests/test_post_trade_chain.py`'s two gap tests were **inverted, not
+deleted**, and keep their original reasoning; the round-trip coverage is
+`tests/test_position_persistence.py`.
+
+**What this still does not fix:** nothing watches while the process is
+**down**. Restore narrows the window from "forever, silently" to "the
+length of the restart, and we know what we were holding". Only a resting
+stop order at the exchange closes it, and `execution_agent` says plainly
+that it does not place one. Do not let a docstring here start implying
+otherwise.
+
+Two conventions this cost a real bug to learn:
+- `monitored_positions.opened_at` is `timestamptz`, so asyncpg returns an
+  **aware** datetime while the whole codebase is naive-UTC
+  (`utcnow()`). `position_store._as_naive_utc` converts at the storage
+  boundary. Without it `_close`'s `held = utcnow() - opened_at` raised
+  *after* the exchange had already filled the close, so the position
+  never left the watch list and was re-closed on every tick.
+- Persist **before** publishing `POSITION_CLOSED`, not after.
 
 ### Provider tree matters
 
@@ -197,9 +233,34 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; must all pass
+npm run test                        # vitest; 26 files / 406 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
+
+**Run these SEQUENTIALLY, not chained into one parallel invocation.**
+Vitest run alongside `tsc` or `next build` on a memory-constrained
+machine loses workers and prints `Test Files 20 passed (26)` — six files
+that never ran, on a line that reads as a pass. Run alone it is
+deterministic (26/26, 406/406, verified over five consecutive runs). The
+count in the header is there so a short run is recognisable as short.
+
+**`next.config.js` caps the build worker count, and that is load-bearing
+— do not delete it as noise.** The build used to compile and type-check
+clean and then die in *Collecting page data* with `worker exited with
+code: 3221226505`. That is `0xC0000409`, the Windows `__fastfail` code,
+which reads as a stack buffer overrun and sends you hunting for infinite
+recursion in a route module. It was not that: V8 raises the same
+fast-fail on a failed allocation, so on Windows an OOM worker and a
+corrupted stack look identical from the exit code.
+
+Next spawns one static worker per CPU and each loads the whole app (57
+routes, 22 providers, lightweight-charts). Sixteen did not fit in
+available memory. Bisected: 16 fails, 8 fails, 4 passes, 1 passes — so
+it is fan-out, not any one page. `experimental.cpus` is derived from
+free memory there, with the measurement written down. Two dead ends
+already checked, so nobody re-checks them: `workerThreads: false` is
+unnecessary, and removing `--max-old-space-size=4096` from the build
+script does NOT help even though every worker inherits it.
 
 `npx next lint` will try to run a first-time ESLint setup wizard (no
 config exists) — it is not part of the verification loop.

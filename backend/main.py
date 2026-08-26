@@ -11,6 +11,7 @@ from backend.agents.trading_agent import register_trading_agent
 from backend.agents.research_agent import register_research_agent
 from backend.agents.event_agent import register_event_agent
 from backend.services.live_market_data import start_live_data_feed
+from backend.services.portfolio_store import load_portfolio
 
 from backend.agents.market_intelligence import get_market_intelligence_agent
 from backend.agents.portfolio_agent import get_portfolio_agent
@@ -53,7 +54,19 @@ _active_base_agents = {}
 async def lifespan(app: FastAPI):
     # Initialize database pool
     await init_db()
-    
+
+    # Reload the backend paper book before any agent can read equity from it.
+    #
+    # Every sizing decision, drawdown check and exposure cap in the system reads
+    # `portfolio_store.get_portfolio()`. Starting from a fresh 25,000 while
+    # positions were actually open meant the CEO's drawdown killswitch and the
+    # CRO's exposure cap were both measuring against an equity figure that had
+    # nothing to do with the account — and they measured it confidently.
+    #
+    # A no-op without DATABASE_URL, which is the documented degraded mode rather
+    # than a failure: it logs at WARNING and the process continues.
+    await load_portfolio()
+
     # Register agents
     register_trading_agent()
     register_research_agent()
@@ -88,6 +101,27 @@ async def lifespan(app: FastAPI):
     # by pause/emergency-stop (CLAUDE.md invariant 4).
     monitor.attach_execution(_active_base_agents['execution'])
     _active_base_agents['position_monitor'] = monitor
+
+    # Reload what was open when this process last stopped.
+    #
+    # BEFORE THE SCHEDULER STARTS AND BEFORE THE LIVE FEED IS CREATED, which is
+    # the whole point of the ordering. Restore has to complete before the first
+    # tick can arrive: a tick reaching a monitor with an empty book finds nothing
+    # to compare against, so a position already through its stop would sail past
+    # the one event that could have closed it, and the next tick would look
+    # ordinary.
+    #
+    # `attach_execution` is above this for the same reason — a restored position
+    # whose stop is ALREADY breached closes on the first tick, and a monitor with
+    # no execution engine attached can only log that it cannot.
+    restored = await monitor.restore()
+    if restored:
+        logger.warning(
+            "%d position(s) restored from the previous run. Nothing enforced their stops "
+            "while this process was down; the first tick per symbol acts on the CURRENT "
+            "price, which may already be through the stop.",
+            restored,
+        )
 
     # Closes spec Section 12's pipeline. REFLECTION_COMPLETED was published and
     # consumed by nobody, so learning ended at "a lesson was written to a file".

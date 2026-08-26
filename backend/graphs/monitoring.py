@@ -351,6 +351,16 @@ async def _apply_modify(
         "MODIFY on %s: %s (%s)", position.symbol,
         "applied" if applied else "refused", reason,
     )
+
+    # Await the durable write here rather than leaving it to `tighten_stop`'s
+    # best-effort `_persist_soon()`. That helper exists for sync callers and
+    # schedules the write without waiting; this call site is already async, so
+    # it can guarantee the tightened stop is on disk before the run continues.
+    # A stale stop on disk is always the WIDER one — tighten_stop is a one-way
+    # ratchet — so the failure is "restores with less protection", which is
+    # worth one await to avoid.
+    if applied and hasattr(monitor_agent, "persist_watch_list"):
+        await monitor_agent.persist_watch_list()
     return {"applied": applied, "action": "MODIFY", "reason": reason,
             "newStopLoss": new_stop if applied else None}
 

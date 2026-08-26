@@ -26,8 +26,10 @@ ALSO PINS THE TWO FAILURE MODES THAT MATTER MORE THAN THE HAPPY PATH:
   * a fill with no matching approval must be logged as UNPROTECTED and left
     unmonitored rather than silently tracked with a guessed stop;
   * the position book must not be silently empty after a restart — see
-    `test_open_positions_do_not_survive_a_restart`, which documents the real
-    persistence gap rather than pretending it is closed.
+    `test_open_positions_survive_a_restart`. That test used to assert the
+    opposite, documenting the persistence gap rather than pretending it was
+    closed; it was INVERTED when the watch list became durable, which is why the
+    original reasoning is still in its docstring.
 """
 
 import asyncio
@@ -281,56 +283,107 @@ def test_the_chain_is_connected_end_to_end_by_contract():
 
 
 # ---------------------------------------------------------------------------
-# The persistence gap — documented, not papered over
+# The persistence gap — CLOSED. These two tests were inverted, not deleted.
+#
+# They used to assert the broken behaviour on purpose, so the gap was visible in
+# the suite rather than living only in a comment. They now assert the fix, and
+# keep the original reasoning so the next reader knows what this cost and why it
+# mattered. Round-trip coverage lives in tests/test_position_persistence.py.
 # ---------------------------------------------------------------------------
 
 
-def test_open_positions_do_not_survive_a_restart(monitor):
-    """DOCUMENTS A REAL GAP: the monitor's book is in-memory only.
+def test_open_positions_survive_a_restart(monitor, monkeypatch):
+    """A restarted monitor resumes the watch list instead of starting blank.
 
-    `_Tracked` lives in a dict on the agent and `services/portfolio_store.py` is a
-    module-level dict with no persistence of any kind, so a restart forgets every
-    open position. For paper trading that loses P&L continuity. For REAL trading
-    it is worse: the position still exists at the exchange, with a stop this
-    process was the only thing enforcing, and after a restart nothing is watching
-    it — the fill's own `_register_fill` path would not even know to call it
-    unprotected, because no fill is replayed.
+    THE GAP THIS REPLACES: `_Tracked` lived in a dict on the agent and nothing
+    persisted it, so a restart forgot every open position. For paper trading
+    that loses P&L continuity. For REAL trading it was worse — the position
+    still exists at the exchange, with a stop this process was the only thing
+    enforcing, and after a restart nothing was watching it. The fill's own
+    `_register_fill` path would not even know to call it unprotected, because no
+    fill is replayed.
 
-    This test asserts the CURRENT behaviour so the gap is visible in the suite
-    rather than living only in a comment. When positions are persisted, this test
-    should be inverted, not deleted.
+    The watch list is now mirrored to `monitored_positions` after every change
+    and reloaded by `restore()`. Storage is faked here because the suite has no
+    Postgres; what is under test is the agent's save/restore contract, not
+    asyncpg.
     """
     from backend.agents.position_monitor import PositionMonitorAgent
+    from backend.services import position_store
+
+    saved: list = []
+
+    async def fake_save(rows):
+        saved[:] = rows
+        return True
+
+    async def fake_load():
+        return list(saved)
+
+    monkeypatch.setattr(position_store, "save_watch_list", fake_save)
+    monkeypatch.setattr(position_store, "load_watch_list", fake_load)
 
     appr = approval()
     asyncio.run(monitor.handle_event(appr))
     asyncio.run(monitor.handle_event(fill(appr.tar_id)))
     assert monitor.open_position_count == 1
 
-    # A "restart" is just a fresh agent: there is nowhere for it to read from.
+    # A "restart" is a fresh agent — which now has somewhere to read from.
     restarted = PositionMonitorAgent()
-    assert restarted.open_position_count == 0, (
-        "positions now survive a restart — good; invert this test and delete the "
-        "gap note in the docstring"
-    )
+    assert restarted.open_position_count == 0, "a fresh agent starts empty until it restores"
+
+    resumed = asyncio.run(restarted.restore())
+
+    assert resumed == 1
+    assert restarted.open_position_count == 1
+    row = restarted.snapshot_open()[0]
+    assert row["symbol"] == "BTC/USDT"
+    # The STOP is what had to survive. A position restored without its approved
+    # stop is the same failure wearing a different hat.
+    assert float(row["stopLoss"]) == pytest.approx(68_000.0)
 
 
-def test_the_backend_portfolio_store_holds_no_persistence(monkeypatch):
-    """The same gap, at its source. Pinned so a fix is noticed here.
+def test_the_backend_portfolio_store_persists(monkeypatch):
+    """The same gap at its source, now closed.
 
-    `portfolio_store` is 79 lines of module-level dict. Postgres has a `positions`
-    table built for exactly this and NOTHING writes to it.
+    `portfolio_store` was 79 lines of module-level dict, so a restart reset paper
+    cash to the starting figure and forgot every position — while the CEO's
+    drawdown killswitch and the CRO's exposure cap both sized against that
+    figure, confidently.
+
+    IT DOES NOT WRITE THE `positions` TABLE, and that is asserted here rather
+    than only commented. CLAUDE.md pointed at `positions` as the place to fix
+    this, but `lib/portfolioStore.server.ts::saveBook` already writes it — with a
+    `DELETE FROM positions` that replaces the browser's whole book. A second
+    writer there would have the operator's next save delete every position the
+    agent holds. The agent owns `agent_positions` / `agent_paper_account`
+    instead; see db/schema.sql SECTION 3b.
     """
+    import ast
     import inspect
 
     from backend.services import portfolio_store
 
     source = inspect.getsource(portfolio_store)
-    code = "\n".join(
-        line for line in source.splitlines() if not line.strip().startswith("#")
-    )
-    persists = any(token in code for token in ("get_db_pool", "INSERT INTO", "json.dump", "open("))
-    assert not persists, (
-        "portfolio_store now persists — good. Update this test and the restart test "
-        "above, which both document the in-memory-only behaviour."
-    )
+
+    assert "get_db_pool" in source, "portfolio_store no longer persists — the gap has reopened"
+    assert "agent_positions" in source
+    assert "agent_paper_account" in source
+
+    # The MODULE DOCSTRING IS REMOVED BEFORE THIS CHECK, and that is not
+    # incidental: the docstring explains the bug by quoting the very statement
+    # (`DELETE FROM positions`) that must not appear in the code. A naive
+    # substring scan over the whole file flags the explanation as the offence,
+    # which would force the next person to delete the reasoning to get green.
+    tree = ast.parse(source)
+    docstring = ast.get_docstring(tree)
+    code = source.replace(docstring, "") if docstring else source
+    code = "\n".join(ln for ln in code.splitlines() if not ln.strip().startswith("#"))
+
+    for verb in ("INSERT INTO positions", "DELETE FROM positions", "UPDATE positions",
+                 "INSERT INTO paper_account", "DELETE FROM paper_account"):
+        assert verb not in code, (
+            f"portfolio_store writes `{verb}` — that table belongs to the browser "
+            f"(lib/portfolioStore.server.ts) and is replaced wholesale on every save, "
+            f"so a second writer there silently deletes the agent's book."
+        )

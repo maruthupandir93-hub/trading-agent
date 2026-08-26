@@ -36,8 +36,32 @@ ticks. It is NOT a resting order at the exchange. If the backend dies, nothing
 closes the position. That remains the single highest-value reliability gap in
 the system, and this agent narrows it (from "nothing watches at all" to
 "something watches while we're up") without closing it.
+
+THE WATCH LIST IS NOW DURABLE — AND WHAT THAT DOES AND DOES NOT FIX
+-------------------------------------------------------------------
+`_open` and `_pending` used to exist only on the instance, so a restart forgot
+every position. They are now mirrored to `monitored_positions`
+(`services/position_store.py`) after every mutation, and `restore()` reads them
+back at startup.
+
+Read the boundary precisely, because overstating it is worse than the gap:
+
+  * FIXED — the window between a restart and the next fill. The process comes
+    back up already knowing what is open and at what stop, and the first tick
+    after restore enforces it. Previously it came back empty and confident.
+  * FIXED — a restart between TAR_APPROVED and ORDER_FILLED. The pending
+    approval is persisted too, so the fill still joins to its approved stop
+    instead of being logged as an UNPROTECTED position.
+  * NOT FIXED — the process being DOWN. Nothing watches while it is not
+    running, restore or no restore. Only a resting stop order at the exchange
+    fixes that, and this system does not place one.
+
+So this narrows the outage window from "forever, silently" to "the length of the
+restart, and we know what we were holding". It is not a substitute for a resting
+order and the docstrings here must not start implying it is.
 """
 
+import asyncio
 import datetime
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -145,8 +169,9 @@ class PositionMonitorAgent(BaseAgent):
     @property
     def memory_ttl(self) -> str:
         return (
-            "Open positions held in-process only, for the life of the position. NOT persisted — "
-            "a restart loses the watch list, which is why this is a soft stop and not a "
+            "Open positions held in-process for the life of the position and mirrored to the "
+            "monitored_positions table after every change, so a restart resumes the watch. Still "
+            "a soft stop: nothing enforces it while the process is down, so it is not a "
             "substitute for a resting exchange order."
         )
 
@@ -164,7 +189,10 @@ class PositionMonitorAgent(BaseAgent):
 
     @property
     def database_tables(self) -> List[str]:
-        return []
+        # NOT `positions` — that table is the browser's book and is replaced
+        # wholesale by lib/portfolioStore.server.ts::saveBook. See db/schema.sql
+        # SECTION 3b.
+        return ["monitored_positions"]
 
     @property
     def metrics_reported(self) -> List[str]:
@@ -175,8 +203,9 @@ class PositionMonitorAgent(BaseAgent):
         return (
             "A failed close leaves the position tracked and retries on the next tick — it is NOT "
             "dropped from the watch list, because an untracked open position is the failure this "
-            "agent exists to prevent. A restart loses the watch list entirely; that limitation is "
-            "documented rather than hidden."
+            "agent exists to prevent. A restart reloads the watch list from monitored_positions "
+            "via restore(); with no database that reload is empty and the agent says so at "
+            "WARNING rather than starting up silently blank."
         )
 
     @property
@@ -192,6 +221,177 @@ class PositionMonitorAgent(BaseAgent):
     @property
     def open_position_count(self) -> int:
         return len(self._open)
+
+    # ------------------------------------------------------------------
+    # Durability
+    # ------------------------------------------------------------------
+
+    def _watch_rows(self) -> List[Dict[str, Any]]:
+        """The whole watch list as storable rows — pending approvals included.
+
+        Pending rows matter as much as open ones. A restart between TAR_APPROVED
+        and ORDER_FILLED would otherwise lose the approved stop, and the fill
+        arriving afterwards would land in `_register_fill` with no match and be
+        logged as an UNPROTECTED POSITION — a real, monitorable position
+        reported as unmonitorable purely because of the restart.
+        """
+        rows: List[Dict[str, Any]] = []
+
+        for tar_id, appr in self._pending.items():
+            rows.append({
+                "tar_id": tar_id,
+                "status": "pending",
+                "symbol": appr.get("symbol"),
+                "tab": appr.get("tab"),
+                "side": None,
+                "qty": None,
+                "entry_price": None,
+                "stop_loss": appr.get("stop_loss"),
+                "take_profit": appr.get("take_profit"),
+                "peak_price": None,
+                "opened_at": None,
+            })
+
+        for pos in self._open.values():
+            rows.append({
+                "tar_id": pos.tar_id,
+                "status": "open",
+                "symbol": pos.symbol,
+                "tab": pos.tab,
+                "side": pos.side,
+                "qty": pos.qty,
+                "entry_price": pos.entry_price,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "peak_price": pos.peak_price,
+                "opened_at": pos.opened_at,
+            })
+
+        return rows
+
+    async def persist_watch_list(self) -> bool:
+        """Mirror the current watch list to storage. Never raises.
+
+        Called after every mutation. Awaited rather than fired into a background
+        task on purpose: a task scheduled and not awaited can lose the race
+        against the very crash this exists to survive, which would make the
+        durability guarantee true only when it was not needed.
+        """
+        from backend.services.position_store import save_watch_list
+
+        return await save_watch_list(self._watch_rows())
+
+    def _persist_soon(self) -> None:
+        """Persist from a SYNCHRONOUS caller, best-effort.
+
+        Exists for exactly one caller: `tighten_stop`, which is sync and has nine
+        tests plus a graph node depending on that signature. Making it async to
+        get one awaited write would be a wide change to the most safety-critical
+        method in the file.
+
+        The compromise is stated honestly rather than hidden: this schedules the
+        write on the running loop and returns immediately, so a crash in the
+        microseconds before it lands leaves the OLD stop on disk. That old stop is
+        always WIDER than the new one (tighten_stop is a one-way ratchet), so the
+        failure mode is "restores with less protection than it had", never "more".
+        Callers already in async context should await `persist_watch_list()`
+        directly — `graphs/monitoring.py::_apply_modify` does.
+
+        With no running loop (a sync unit test) this is a no-op. That is correct:
+        there is no database in that context either.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.persist_watch_list())
+
+    async def restore(self) -> int:
+        """Reload the watch list at startup. Returns how many positions resumed.
+
+        WHAT THIS DOES NOT CLAIM: nothing was watching while the process was
+        down. Restoring means the stop is enforced again from the next tick
+        onward, not that it was enforced during the outage. Price may already be
+        far through it, in which case the first tick closes at whatever the
+        market is now — which is exactly what a stop-out after a gap looks like,
+        and is reported as `stop-loss` because that is what it is.
+
+        Safe to call on a live agent: restored entries never overwrite something
+        already tracked in memory, so a restore racing a live fill cannot revert
+        that fill's position to a stale snapshot.
+        """
+        from backend.services.position_store import load_watch_list
+
+        rows = await load_watch_list()
+        if not rows:
+            return 0
+
+        resumed = 0
+        pending = 0
+        for row in rows:
+            tar_id = row["tar_id"]
+
+            if row["status"] == "pending":
+                if tar_id not in self._pending and tar_id not in self._open:
+                    self._pending[tar_id] = {
+                        "stop_loss": row["stop_loss"],
+                        "take_profit": row["take_profit"],
+                        "tab": row["tab"],
+                        "symbol": row["symbol"],
+                    }
+                    pending += 1
+                continue
+
+            if tar_id in self._open:
+                continue
+
+            # A stored open position with no stop cannot be enforced. It is
+            # loaded anyway and flagged CRITICAL rather than dropped: an open
+            # position nobody is tracking is worse than one tracked without a
+            # level, and dropping it would hide it from every dashboard too.
+            if row["stop_loss"] is None:
+                logger.critical(
+                    "Restored position %s (%s) has NO stop-loss on record. It is being "
+                    "tracked so it stays visible, but no level can be enforced — close it "
+                    "manually or set a stop.",
+                    tar_id, row["symbol"],
+                )
+
+            self._open[tar_id] = _Tracked(
+                tar_id=tar_id,
+                symbol=row["symbol"],
+                side=row["side"],
+                tab=row["tab"],
+                qty=row["qty"],
+                entry_price=row["entry_price"],
+                stop_loss=row["stop_loss"],
+                take_profit=row["take_profit"],
+                opened_at=row["opened_at"] or datetime.datetime.utcnow(),
+                # Falls back to the entry price, not to 0 or None. peak_price
+                # feeds tighten_stop's "would this fire immediately?" guard, and
+                # a None there would disable that guard on every restored
+                # position. The entry is the one value guaranteed to have been
+                # reached, so it is the honest conservative floor.
+                peak_price=row["peak_price"] if row["peak_price"] is not None else row["entry_price"],
+            )
+            resumed += 1
+
+        if resumed or pending:
+            logger.warning(
+                "Restored %d open position(s) and %d pending approval(s) from storage. "
+                "NOTHING enforced these stops while this process was down — the first tick "
+                "for each symbol will act on the CURRENT price, which may already be through "
+                "the stop.",
+                resumed, pending,
+            )
+            self.record_decision(
+                "watch-list-restored",
+                f"Resumed monitoring {resumed} position(s) and {pending} pending approval(s) after a restart.",
+                {"resumed": resumed, "pending": pending},
+                acted=True,
+            )
+
+        return resumed
 
     # ------------------------------------------------------------------
     # Phase 30 / spec Section 13 — read and modify, for the monitoring graph
@@ -265,6 +465,7 @@ class PositionMonitorAgent(BaseAgent):
                 "_register_fill requires an approved stop.",
                 pos.symbol, new_stop,
             )
+            self._persist_soon()
             return True, f"position had no stop; set to {new_stop:.8g}"
 
         # 'buy' means a long: a HIGHER stop is tighter. 'sell' is the mirror.
@@ -306,6 +507,7 @@ class PositionMonitorAgent(BaseAgent):
             {"tarId": tar_id, "previousStop": current, "newStop": new_stop},
             acted=True,
         )
+        self._persist_soon()
         return True, f"stop tightened {current:.8g} -> {new_stop:.8g}"
 
     async def handle_event(self, event: BaseEvent) -> None:
@@ -314,11 +516,18 @@ class PositionMonitorAgent(BaseAgent):
                 "stop_loss": event.stop_loss,
                 "take_profit": event.take_profit,
                 "tab": event.tab,
+                # Carried so the pending row can be stored and restored. The
+                # fill supplies the symbol too, but not if the restart lands
+                # between the approval and the fill — which is the whole reason
+                # pending approvals are persisted.
+                "symbol": event.symbol,
             }
+            await self.persist_watch_list()
             return
 
         if isinstance(event, OrderFilledEvent):
             self._register_fill(event)
+            await self.persist_watch_list()
             return
 
         if isinstance(event, TickReceivedEvent):
@@ -438,6 +647,17 @@ class PositionMonitorAgent(BaseAgent):
             held = (datetime.datetime.utcnow() - pos.opened_at).total_seconds()
 
             self._open.pop(pos.tar_id, None)
+            # Persisted BEFORE POSITION_CLOSED is published. A crash between the
+            # two would otherwise leave a closed position on the watch list, and
+            # the restart would resume monitoring something that no longer
+            # exists — then "close" it again at the next stop touch, sending a
+            # second exit order for a position already flat.
+            #
+            # `peak_price` deliberately is NOT persisted on every tick; only real
+            # mutations write. A restored peak that lags the true one makes
+            # tighten_stop's would-fire-immediately guard STRICTER, never looser,
+            # so the stale value is safe in the only direction that matters.
+            await self.persist_watch_list()
 
             logger.info(
                 "Closed %s at %s (%s, triggered at %s): realized %+.2f after %.0fs. "
