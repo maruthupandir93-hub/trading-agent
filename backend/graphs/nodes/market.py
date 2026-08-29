@@ -141,6 +141,17 @@ async def validate_market_data(state: TradingState) -> Optional[Dict[str, Any]]:
         logger.warning("Market data validation produced nothing usable for %s: %s", symbol, problems)
         return {"unavailable": [f"market_data ({'; '.join(problems)})"]}
 
+    # Depth, tape and headlines, fetched HERE because this is the single fetch
+    # point (Section 39.4). Three specialists read them out of the snapshot and
+    # none of them touches the network, which is what keeps a replayed run
+    # reasoning over the same evidence as the original.
+    #
+    # Concurrent with each other and never fatal: `_fetch_specialist_feeds`
+    # returns whatever arrived plus a reason for whatever did not. A failure here
+    # must degrade three specialists, not fail the node that every other node
+    # depends on for candles.
+    book_bids, book_asks, tape, headlines, feed_problems = await _fetch_specialist_feeds(symbol)
+
     snapshot = MarketSnapshot(
         symbol=symbol,
         price=price if price > 0 else None,
@@ -149,12 +160,84 @@ async def validate_market_data(state: TradingState) -> Optional[Dict[str, Any]]:
         # inside a node returns a different value on replay.
         fetched_at=state["started_at"],
         source="websocket+rest",
+        order_book_bids=book_bids,
+        order_book_asks=book_asks,
+        trade_tape=tape,
+        headlines=headlines,
+        feed_problems=feed_problems,
     )
 
     out: Dict[str, Any] = {"market_data": snapshot}
     if problems:
         out["unavailable"] = [f"market_data partial ({'; '.join(problems)})"]
     return out
+
+
+async def _fetch_specialist_feeds(symbol: str):
+    """Depth, tape and headlines for the specialist panel. NEVER raises.
+
+    Returns `(bids, asks, tape, headlines, problems)`. Anything that could not be
+    fetched comes back empty with its reason in `problems`, keyed by the
+    specialist that will have to explain the absence.
+
+    WHY THIS SWALLOWS EVERYTHING
+    ----------------------------
+    `validate_market_data` is the node every other node depends on. If a slow RSS
+    feed could raise out of it, `wrap_node` would record the whole node as errored
+    and the run would lose its candles — trading a degraded news specialist for a
+    dead graph. The three feeds here are additive evidence; none of them is a
+    precondition for reasoning about price.
+    """
+    import asyncio as _asyncio
+
+    problems: Dict[str, str] = {}
+    bids: List[Dict[str, float]] = []
+    asks: List[Dict[str, float]] = []
+    tape: List[Dict[str, Any]] = []
+    headlines: List[Dict[str, Any]] = []
+
+    try:
+        from backend.services.microstructure_feed import fetch_headlines, fetch_microstructure
+
+        micro_result, news_result = await _asyncio.gather(
+            fetch_microstructure(symbol),
+            fetch_headlines(),
+            return_exceptions=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        reason = f"specialist feed fetch failed entirely: {type(exc).__name__}: {exc}"
+        logger.warning("%s (%s)", reason, symbol)
+        return [], [], [], [], {"orderflow": reason, "liquidity": reason, "news": reason}
+
+    if isinstance(micro_result, Exception):
+        reason = f"depth/tape fetch raised {type(micro_result).__name__}: {micro_result}"
+        problems["orderflow"] = reason
+        problems["liquidity"] = reason
+    else:
+        bids = list(micro_result.bids)
+        asks = list(micro_result.asks)
+        tape = list(micro_result.trades)
+        if micro_result.reason:
+            # A PARTIAL fetch still populates what arrived. The book and the tape
+            # fail independently, and refusing both because one failed would
+            # discard evidence that is sitting right there.
+            if not bids or not asks:
+                problems["liquidity"] = micro_result.reason
+            if not tape:
+                problems["orderflow"] = micro_result.reason
+
+    if isinstance(news_result, Exception):
+        problems["news"] = f"headline fetch raised {type(news_result).__name__}: {news_result}"
+    else:
+        headlines, failed_sources = news_result
+        if failed_sources and not headlines:
+            problems["news"] = "every headline feed failed: " + "; ".join(failed_sources)
+        elif failed_sources:
+            # Recorded but NOT a blocker. Some headlines arrived, and the
+            # specialist should say which sources are missing rather than refuse.
+            problems["news_partial"] = "; ".join(failed_sources)
+
+    return bids, asks, tape, headlines, problems
 
 
 def _validate_candles(

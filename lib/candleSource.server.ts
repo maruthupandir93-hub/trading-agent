@@ -1,29 +1,38 @@
-// Shared by /api/candles (live chart/indicator data) and /api/backtest
-// (historical replay, which needs a lot more bars than a live chart
-// ever does). Same upstreams as before this file existed — this is a
-// behavior-preserving extraction, not a new data source.
+// Historical candle fetching for the backtest routes and the candle providers.
+//
+// SERVER-SIDE ONLY, AND IT NO LONGER TALKS TO BINANCE OR YAHOO.
+//
+// Every function here now proxies to the FastAPI backend. The upstream calls,
+// the 1000-bar pagination and the Yahoo interval mapping all moved to
+// `backend/api/marketdata.py`, unchanged in behaviour.
+//
+// WHY: these ran inside Vercel serverless handlers, which execute in a
+// Vercel-chosen region. From a US region Binance answers 451 — "Service
+// unavailable from a restricted location" — so /api/backtest,
+// /api/backtest/optimize and /api/backtest/montecarlo were all exposed to the
+// same failure that broke /api/candles, and would have surfaced as an
+// unexplained 502 the first time anyone ran a backtest on the deployment.
+// See lib/api/backendProxy.server.ts for the full account.
+//
+// THE EXPORTED SIGNATURES ARE UNCHANGED so `lib/candleProviders/*` and the
+// backtest routes did not have to be touched. What changed is where the bytes
+// come from.
+
+import { fetchFromBackend } from './api/backendProxy.server';
 
 export type Candle = { t: number; o: number; h: number; l: number; c: number; v: number };
 
+// Kept here, and still the validation the callers use, even though the backend
+// validates too. A bad interval should be an immediate local error rather than a
+// network round trip that ends in one, and `lib/candleProviders/yahoo.ts` reads
+// YAHOO_INTERVAL_MAP directly to decide what it can offer before fetching.
 export const BINANCE_INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w']);
 
-const BINANCE_INTERVAL_MS: Record<string, number> = {
-  '1m': 60_000,
-  '5m': 5 * 60_000,
-  '15m': 15 * 60_000,
-  '1h': 60 * 60_000,
-  '4h': 4 * 60 * 60_000,
-  '1d': 24 * 60 * 60_000,
-  '1w': 7 * 24 * 60 * 60_000,
-};
-
-// Yahoo's intraday granularity is more restricted than Binance's, so
-// map our interval names to what Yahoo actually supports, and to a
-// sane history range for that granularity (Yahoo rejects requests for
-// too much history at fine granularity). This IS the honest ceiling on
-// equity backtest depth mentioned in Commit 16's roadmap note — there's
-// no deeper history to page through for equities the way there is for
-// Binance.
+// Yahoo's intraday granularity is more restricted than Binance's, and it rejects
+// a long range at a fine granularity. This IS the honest ceiling on equity
+// backtest depth — there is no deeper history to page through for equities the
+// way there is for Binance. Mirrored in backend/api/marketdata.py; both are the
+// same table and must stay in step.
 export const YAHOO_INTERVAL_MAP: Record<string, { interval: string; range: string }> = {
   '1m': { interval: '1m', range: '5d' },
   '5m': { interval: '5m', range: '1mo' },
@@ -34,112 +43,90 @@ export const YAHOO_INTERVAL_MAP: Record<string, { interval: string; range: strin
   '1w': { interval: '1wk', range: '5y' },
 };
 
-export async function fetchBinanceCandles(binanceSymbol: string, interval: string, limit: number): Promise<Candle[]> {
-  const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(binanceSymbol.toUpperCase())}&interval=${interval}&limit=${limit}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal candles fetch)' } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Binance klines ${res.status}: ${text.slice(0, 200)}`);
-  }
-  const rows: any[] = await res.json();
-  return rows.map((r) => ({ t: r[0], o: parseFloat(r[1]), h: parseFloat(r[2]), l: parseFloat(r[3]), c: parseFloat(r[4]), v: parseFloat(r[5]) }));
+type CandleResponse = { candles: Candle[]; sourceNote?: string };
+
+export async function fetchBinanceCandles(
+  binanceSymbol: string,
+  interval: string,
+  limit: number,
+): Promise<Candle[]> {
+  const json = await fetchFromBackend<CandleResponse>('/api/marketdata/candles', {
+    symbol: binanceSymbol.toUpperCase(),
+    type: 'crypto',
+    interval,
+    limit: String(limit),
+  });
+  return json.candles ?? [];
 }
 
-// Binance caps a single klines call at 1000 bars. For backtesting we
-// often want more than that, so this walks backward in time using the
-// `endTime` param, stitching pages together — real pagination, not a
-// bigger single request pretending the cap doesn't exist.
-const BINANCE_MAX_PER_CALL = 1000;
-const MAX_BINANCE_PAGES = 10; // hard ceiling: 10 * 1000 = 10,000 bars max per backtest fetch, keeps this bounded
-
-export async function fetchBinanceCandlesDeep(binanceSymbol: string, interval: string, totalBars: number): Promise<Candle[]> {
-  const intervalMs = BINANCE_INTERVAL_MS[interval];
-  if (!intervalMs) throw new Error(`Unsupported interval for crypto: ${interval}`);
-
-  const target = Math.min(totalBars, BINANCE_MAX_PER_CALL * MAX_BINANCE_PAGES);
-  let endTime: number | undefined = undefined;
-  const pages: Candle[][] = [];
-  let collected = 0;
-  let pageCount = 0;
-
-  while (collected < target && pageCount < MAX_BINANCE_PAGES) {
-    const pageLimit = Math.min(BINANCE_MAX_PER_CALL, target - collected);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(binanceSymbol.toUpperCase())}&interval=${interval}&limit=${pageLimit}${endTime ? `&endTime=${endTime}` : ''}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal candles fetch)' } });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Binance klines ${res.status}: ${text.slice(0, 200)}`);
-    }
-    const rows: any[] = await res.json();
-    if (rows.length === 0) break; // no more history available upstream
-    const page: Candle[] = rows.map((r) => ({ t: r[0], o: parseFloat(r[1]), h: parseFloat(r[2]), l: parseFloat(r[3]), c: parseFloat(r[4]), v: parseFloat(r[5]) }));
-    pages.unshift(page);
-    collected += page.length;
-    endTime = page[0].t - 1; // next page ends right before this page's first candle
-    pageCount += 1;
-    if (rows.length < pageLimit) break; // upstream ran out of history before hitting our target
-  }
-
-  // De-dupe on the (rare) chance of an overlap at a page boundary, then sort ascending.
-  const seen = new Set<number>();
-  const merged: Candle[] = [];
-  for (const page of pages) {
-    for (const c of page) {
-      if (seen.has(c.t)) continue;
-      seen.add(c.t);
-      merged.push(c);
-    }
-  }
-  merged.sort((a, b) => a.t - b.t);
-  return merged;
+/**
+ * More than 1000 bars.
+ *
+ * Binance caps a single klines call at 1000, so the backend walks backwards
+ * through time with `endTime`, stitching pages and de-duplicating the boundary.
+ * That pagination used to live here; it lives there now because that is where
+ * the request has to originate. The 10-page ceiling (10,000 bars) is unchanged.
+ */
+export async function fetchBinanceCandlesDeep(
+  binanceSymbol: string,
+  interval: string,
+  totalBars: number,
+): Promise<Candle[]> {
+  const json = await fetchFromBackend<CandleResponse>('/api/marketdata/candles/deep', {
+    symbol: binanceSymbol.toUpperCase(),
+    type: 'crypto',
+    interval,
+    bars: String(totalBars),
+  });
+  return json.candles ?? [];
 }
 
 export async function fetchYahooCandles(equitySymbol: string, interval: string): Promise<Candle[]> {
   const mapped = YAHOO_INTERVAL_MAP[interval];
   if (!mapped) throw new Error(`Unsupported interval for equities: ${interval}`);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(equitySymbol)}?interval=${mapped.interval}&range=${mapped.range}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal candles fetch)' } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Yahoo chart ${res.status}: ${text.slice(0, 200)}`);
-  }
-  const json = await res.json();
-  const result = json?.chart?.result?.[0];
-  if (!result) throw new Error('Yahoo chart returned no result');
-  const timestamps: number[] = result.timestamp ?? [];
-  const quote = result.indicators?.quote?.[0] ?? {};
-  const candles: Candle[] = [];
-  for (let i = 0; i < timestamps.length; i++) {
-    const o = quote.open?.[i];
-    const h = quote.high?.[i];
-    const l = quote.low?.[i];
-    const c = quote.close?.[i];
-    const v = quote.volume?.[i];
-    if ([o, h, l, c].some((x) => x === null || x === undefined)) continue;
-    candles.push({ t: timestamps[i] * 1000, o, h, l, c, v: v ?? 0 });
-  }
-  return candles;
+
+  // No `limit`: the caller slices. Yahoo's range is fixed per granularity, so
+  // "all of it" is the only thing that can be asked for, and the backend's
+  // /candles route with a large limit returns exactly that.
+  const json = await fetchFromBackend<CandleResponse>('/api/marketdata/candles', {
+    symbol: equitySymbol,
+    type: 'equity',
+    interval,
+    limit: '1000',
+  });
+  return json.candles ?? [];
 }
 
-// One entry point for "give me as much history as you honestly have,
-// up to N bars" — used by the backtest route. type/interval validation
-// mirrors /api/candles exactly so error messages stay consistent.
-export async function fetchDeepHistory(symbol: string, type: 'crypto' | 'equity', interval: string, totalBars: number): Promise<{ candles: Candle[]; sourceNote: string }> {
-  if (type === 'crypto') {
-    if (!BINANCE_INTERVALS.has(interval)) throw new Error(`Unsupported interval for crypto: ${interval}`);
-    const candles = await fetchBinanceCandlesDeep(symbol, interval, totalBars);
-    const sourceNote = candles.length < totalBars
-      ? `Binance returned ${candles.length} bars (fewer than the ${totalBars} requested — that's all the history available at this granularity).`
-      : `Binance, ${candles.length} bars.`;
-    return { candles, sourceNote };
+/**
+ * "Give me as much history as you honestly have, up to N bars."
+ *
+ * `sourceNote` comes from the backend, which is the only layer that knows
+ * whether the upstream ran out of history or the request was simply satisfied —
+ * the distinction a backtest needs in order to say whether its sample was the
+ * one asked for.
+ */
+export async function fetchDeepHistory(
+  symbol: string,
+  type: 'crypto' | 'equity',
+  interval: string,
+  totalBars: number,
+): Promise<{ candles: Candle[]; sourceNote: string }> {
+  if (type === 'crypto' && !BINANCE_INTERVALS.has(interval)) {
+    throw new Error(`Unsupported interval for crypto: ${interval}`);
   }
-  if (type === 'equity') {
-    const all = await fetchYahooCandles(symbol, interval);
-    const candles = all.slice(-totalBars);
-    const sourceNote = all.length < totalBars
-      ? `Yahoo returned ${all.length} bars total at this granularity (fewer than the ${totalBars} requested) — equities have a shorter available history at fine granularity than crypto. See Commit 16's documented limit.`
-      : `Yahoo, ${candles.length} of ${all.length} available bars used.`;
-    return { candles, sourceNote };
+  if (type !== 'crypto' && type !== 'equity') {
+    throw new Error('type must be "crypto" or "equity"');
   }
-  throw new Error('type must be "crypto" or "equity"');
+
+  const json = await fetchFromBackend<CandleResponse>('/api/marketdata/candles/deep', {
+    symbol,
+    type,
+    interval,
+    bars: String(totalBars),
+  });
+
+  return {
+    candles: json.candles ?? [],
+    sourceNote: json.sourceNote ?? `${json.candles?.length ?? 0} bars.`,
+  };
 }

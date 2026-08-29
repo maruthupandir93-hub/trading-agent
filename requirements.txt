@@ -48,3 +48,15 @@ pytest-asyncio
 langgraph
 langgraph-checkpoint-sqlite
 aiosqlite
+
+# ---------------------------------------------------------------------------
+# Used by services/ticker_stream.py, the Binance price relay that replaced the
+# socket components/MarketData.tsx used to open from the BROWSER.
+#
+# It was already installed transitively — uvicorn[standard] and ccxt.pro both
+# pull it in — which is exactly why it needs declaring. A transitive dependency
+# can vanish under a minor bump of whatever carried it, and the symptom here
+# would be a dashboard whose prices silently never tick: ticker_stream catches
+# the ImportError and reports it, so nothing crashes and nothing updates.
+# ---------------------------------------------------------------------------
+websockets

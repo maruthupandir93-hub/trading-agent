@@ -135,8 +135,20 @@ def test_no_websockets_dependency_is_needed():
             imported.update(a.name.split(".")[0] for a in node.names)
     assert "websockets" not in imported
 
-    requirements = pathlib.Path("requirements.txt").read_text(encoding="utf-8")
-    assert "websockets" not in requirements
+    # THE REQUIREMENTS ASSERTION THAT USED TO BE HERE HAS BEEN REMOVED, NOT
+    # WEAKENED, AND THE REASON MATTERS.
+    #
+    # It asserted `"websockets" not in requirements.txt`, which conflated two
+    # different claims: "the Polymarket worker does not need it" (still true, and
+    # asserted above from the AST) and "nothing in this backend needs it" (no
+    # longer true). `services/ticker_stream.py` uses it for the Binance price
+    # relay that replaced the socket the BROWSER used to open, so it is now a
+    # real, declared dependency.
+    #
+    # Keeping the old assertion would have forced a future reader to either
+    # delete a genuine dependency or delete this test. The claim this test
+    # actually exists to defend — that ccxt owns the Polymarket keepalive — is
+    # the AST check above and the ping check below.
 
     # And the keepalive really is ccxt's job.
     import inspect

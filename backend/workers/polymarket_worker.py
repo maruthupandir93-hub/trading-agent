@@ -66,6 +66,14 @@ POLL_INTERVAL_SECONDS = 300.0
 # reported rather than silently skipped.
 WATCH_SYMBOLS: Tuple[str, ...] = ("BTC/USDT", "ETH/USDT")
 
+# How often to re-run mapping DISCOVERY, as opposed to polling.
+#
+# Six hours. Discovery walks the venue's whole event list to classify a handful of
+# candidates, and the set it produces changes when Polymarket lists or resolves a
+# market — days, not minutes. Running it on the poll interval would spend this
+# worker's rate-limit budget re-deriving the same answer.
+DISCOVERY_INTERVAL_S = 6 * 3600.0
+
 # The ΔP window the trigger and the snapshot's z-score are measured over. 1 hour:
 # long enough that a single poll's noise cannot dominate, short enough to still be
 # about now.
@@ -81,6 +89,8 @@ NOT_APPLICABLE_NO_CONFIRMED = (
 
 class PolymarketWorker:
     def __init__(self, poll_interval: float = POLL_INTERVAL_SECONDS):
+        # None means discovery has never run in this process.
+        self._last_discovery_at = None
         self.poll_interval = poll_interval
         self._running = False
         self.cycles_run = 0
@@ -149,6 +159,33 @@ class PolymarketWorker:
             )
             return []
 
+        # DISCOVERY, before polling.
+        #
+        # WHY THIS IS HERE AND WAS NOT BEFORE
+        # -----------------------------------
+        # Discovery only ever ran from `POST /api/polymarket/discover/{symbol}`,
+        # and the dashboard has no control that calls it. So the third gate —
+        # "at least one HUMAN-CONFIRMED mapping" — could never be reached by an
+        # operator using the product: there was nothing to confirm, because
+        # nothing had discovered anything, because the only way to discover was a
+        # curl nobody would know to run. Every snapshot read
+        # `applicable: false, reason: no CONFIRMED mapping exists`, permanently,
+        # and the Polymarket page looked broken while every component of it
+        # worked.
+        #
+        # `api/polymarket.py`'s own module docstring makes exactly this argument
+        # about the confirm ROUTE: "a safety check that also happens to make the
+        # feature impossible is not a safety check, it is a bug." The same is
+        # true one step earlier.
+        #
+        # THIS DOES NOT WEAKEN THE HUMAN GATE. `discover_for_symbol` writes
+        # candidates as UNCONFIRMED and has no way to do otherwise —
+        # `confirm_mapping` refuses without `set_by_human=True`, which is passed
+        # by the confirm route and nowhere else in this codebase. Automating
+        # discovery makes candidates VISIBLE; a person still decides that a
+        # market is really about this instrument.
+        await self._discover_if_due()
+
         written: List[Dict[str, Any]] = []
         for symbol in WATCH_SYMBOLS:
             try:
@@ -163,6 +200,44 @@ class PolymarketWorker:
                 # make stale data look current.
                 logger.error("Polymarket poll failed for %s: %s", symbol, exc)
         return written
+
+    async def _discover_if_due(self) -> None:
+        """Refresh the mapping CANDIDATES for every watched symbol. Never raises.
+
+        Runs far less often than polling. Discovery walks Polymarket's whole event
+        list (16 events / 180 markets on the observed run) to classify a handful of
+        candidates, so doing it every poll cycle would spend most of this worker's
+        rate-limit budget re-deriving a set that changes on the order of days.
+
+        Failures are logged and swallowed. Discovery is how candidates APPEAR; it
+        is not a precondition for polling the mappings that already exist, and an
+        exception here must not stop the confirmed ones being read.
+        """
+        import time
+
+        now = time.monotonic()
+        if self._last_discovery_at is not None and (now - self._last_discovery_at) < DISCOVERY_INTERVAL_S:
+            return
+        # Stamped BEFORE the work, not after. A discovery pass that throws must
+        # not retry on the very next cycle and turn a persistent upstream failure
+        # into a hot loop against a rate-limited public venue.
+        self._last_discovery_at = now
+
+        from backend.services import polymarket_registry as _registry
+
+        for symbol in WATCH_SYMBOLS:
+            try:
+                result = await _registry.discover_for_symbol(symbol)
+                found = len(getattr(result, "directional", []) or []) + len(
+                    getattr(result, "event_risk", []) or []
+                )
+                logger.info(
+                    "Polymarket discovery for %s: %d candidate mapping(s), all "
+                    "UNCONFIRMED — an operator must confirm one before it feeds the panel.",
+                    symbol, found,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Polymarket discovery failed for %s: %s", symbol, exc)
 
     async def poll_symbol(self, symbol: str, client: Any) -> Optional[Dict[str, Any]]:
         """Fetch, record, compute and store one symbol's snapshot."""

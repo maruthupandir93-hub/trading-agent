@@ -36,7 +36,7 @@
 // ---------------------------------------------------------------------
 
 import { useCallback, useEffect, useState } from 'react';
-import { BACKEND_PATHS, backendUrl } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 
 type Status = {
   enabled: boolean;
@@ -78,8 +78,8 @@ export function PolymarketPanel() {
   const load = useCallback(async () => {
     try {
       const [s, snap] = await Promise.all([
-        fetch(backendUrl(BACKEND_PATHS.polymarket)),
-        fetch(backendUrl(BACKEND_PATHS.polymarketSnapshots)),
+        fetch(backendProxyPath(BACKEND_PATHS.polymarket)),
+        fetch(backendProxyPath(BACKEND_PATHS.polymarketSnapshots)),
       ]);
       if (!s.ok || !snap.ok) {
         setState('unreachable');

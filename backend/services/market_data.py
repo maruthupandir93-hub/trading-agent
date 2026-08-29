@@ -45,6 +45,21 @@ async def fetch_prices():
             await asyncio.sleep(wait_time)
             continue
 
+        # None means THE CALL FAILED, which is the case a retry is for. It used
+        # to be indistinguishable from an empty match, so this branch never ran
+        # and the loop below reported a filter mismatch for a network fault.
+        if new_prices is None:
+            wait_time = 2 ** attempt
+            logger.warning(
+                "Price fetch failed (attempt %d/%d) — the client reported a failed "
+                "call, not an empty result. Retrying in %ds...",
+                attempt + 1,
+                max_retries,
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
+            continue
+
         if new_prices:
             # Replace wholesale rather than merging. A merge would keep a stale
             # price for a symbol the exchange has stopped quoting, and a stale
@@ -63,18 +78,64 @@ async def fetch_prices():
         return
 
     logger.error(
-        "Failed to fetch prices via CCXT after %d attempts — every attempt raised. "
-        "The previous cache of %d price(s) is left in place and is now STALE.",
+        "Failed to fetch prices via CCXT after %d attempts — every attempt failed. "
+        "The previous cache of %d price(s) is left in place and is now STALE. "
+        "This IS a call failure (network, rate limit or a non-JSON body from the "
+        "exchange), not the symbol-filter mismatch that used to share this message.",
         max_retries,
         len(_prices),
     )
 
 def get_price(symbol: str) -> float:
-    # First try the live websocket feed
+    """Last known price for `symbol`, or 0.0 when none of the caches has one.
+
+    THREE SOURCES, IN FRESHNESS ORDER, AND THE THIRD WAS MISSING
+    ------------------------------------------------------------
+    This system keeps three independent price caches, and this function is what
+    every graph node and the operator trade panel read:
+
+      1. `live_market_data._live_prices`  the agent's own websocket feed
+      2. `ticker_stream`                  the dashboard's Binance combined stream
+      3. `_prices`                        the polled ccxt futures cache
+
+    Source 2 was NOT consulted, and the gap was visible rather than theoretical.
+    For the first stretch after startup 1 and 3 are both empty while 2 is already
+    connected and ticking, because the dashboard subscribed it. A graph run in
+    that window aborted at `data_validation` with
+
+        no live price for BTC/USDT (feed returned 0.0)
+
+    having produced nothing, while `/api/marketdata/ticks` was serving a live
+    price for that exact symbol at that exact moment. The operator trade panel
+    showed the same hole as a null price.
+
+    THIS IS NOT A FALLBACK TO SOMETHING WEAKER. Source 2 is the same Binance
+    ticker feed as source 1, over a socket this process already holds, and
+    `price_for` refuses a tick older than the stream's own staleness threshold
+    rather than handing back a price from minutes ago. It is ordered third only
+    because the first two are the agent's own feeds.
+
+    Returns 0.0 when nothing has a price — callers test `price <= 0` and report
+    the symbol unmeasurable rather than computing against it.
+    """
+    # 1. The agent's own websocket feed.
     live_price = get_live_price(symbol)
     if live_price > 0:
         return live_price
-    # Fallback to the old polled HTTP cache if WS doesn't have it
+
+    # 2. The dashboard's ticker stream. Fresh, and usually populated first.
+    try:
+        from backend.services.ticker_stream import get_ticker_stream
+
+        streamed = get_ticker_stream().price_for(symbol)
+        if streamed and streamed > 0:
+            return streamed
+    except Exception:  # noqa: BLE001
+        # Never let a price lookup raise into a node. A missing price is handled
+        # everywhere; an exception here is not.
+        pass
+
+    # 3. The polled ccxt cache.
     return _prices.get(symbol, 0.0)
 
 async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:

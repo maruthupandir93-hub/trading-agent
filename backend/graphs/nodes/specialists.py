@@ -296,38 +296,99 @@ def specialist_market(state: TradingState) -> Optional[Dict[str, Any]]:
 # 2. Orderflow specialist (directional) — NO FEED
 # ===========================================================================
 
+# Kept as the reason string for the case where the feed genuinely did not arrive.
+# It no longer describes the SYSTEM — `services/microstructure_feed` subscribes
+# Binance depth and aggTrades, and `data_validation` puts both on the snapshot —
+# so it is now what this specialist says when that fetch failed for this run,
+# which is a different and much rarer statement than the one it used to make.
 ORDERFLOW_BLOCKER = (
-    "no order-book or trade-tape feed is subscribed: aggressor side and bid/ask "
-    "imbalance require level-2 depth and per-trade taker flags, and this system "
-    "consumes only OHLCV candles and mark price"
+    "no order-book or trade-tape data reached this run: aggressor side and bid/ask "
+    "imbalance require level-2 depth and per-trade taker flags, and the fetch for "
+    "them did not return"
 )
 
 
 def specialist_orderflow(state: TradingState) -> Optional[Dict[str, Any]]:
-    """Order-book aggressor flow. Cannot run — and does not pretend to.
+    """Aggressor flow and resting-size imbalance, from the real book and tape.
 
-    Also writes `orderflow_analysis` so the state's own schema carries the same
-    refusal, rather than leaving a None that a later reader might interpret as
-    "not yet computed" and try to fill in.
+    WHAT CHANGED, AND WHY IT MATTERED MORE THAN IT LOOKED
+    -----------------------------------------------------
+    This node used to return `available=False` unconditionally, with a reason
+    stating that no depth or tape feed was subscribed. That was true of the graph
+    and untrue of the system: `api/marketdata.py` had been serving
+    `/api/v3/depth` and `/api/v3/aggTrades` to the dashboard the whole time,
+    including the per-trade `buyerIsMaker` flag the blocker said did not exist.
+
+    The cost was not one missing opinion. `run_debate` multiplies its verdict by
+    COVERAGE, and orderflow carries 1.5 of 7.0 directional weight. With this
+    specialist and the news specialist both dark, coverage was pinned at 0.57 and
+    every decision the agent ever made was scaled by it — a clean 0.35 read
+    arrived at the Supervisor as 0.20, against a 0.18 minimum. Live runs sat one
+    hundredth of a point either side of the threshold, so whether the agent traded
+    at all was decided by rounding.
+
+    The math is in `algorithms/microstructure` (pure, unit-tested); this node only
+    reads the snapshot and translates a reading into a finding. It performs no
+    I/O, which is what keeps it replay-safe under Section 39.4.
     """
+    from backend.algorithms.microstructure import (
+        analyse_order_book,
+        analyse_tape,
+        orderflow_stance,
+    )
+
+    snapshot = state.get("market_data")
+    if snapshot is None:
+        return {
+            "orderflow_analysis": OrderflowAnalysis(available=False, reason="no market data in state"),
+            "specialist_findings": [
+                _no_feed("orderflow", "directional", "no market data in state", [])
+            ],
+            "unavailable": ["orderflow specialist (no market data)"],
+        }
+
+    reason = (snapshot.feed_problems or {}).get("orderflow")
+    book = analyse_order_book(snapshot.order_book_bids, snapshot.order_book_asks)
+    tape = analyse_tape(snapshot.trade_tape)
+    stance, confidence, evidence = orderflow_stance(book, tape)
+
+    if stance is None:
+        blocker = reason or ORDERFLOW_BLOCKER
+        return {
+            "orderflow_analysis": OrderflowAnalysis(available=False, reason=blocker),
+            "specialist_findings": [
+                _no_feed("orderflow", "directional", blocker, evidence)
+            ],
+            "unavailable": [f"orderflow specialist ({blocker})"],
+        }
+
+    finding = SpecialistFinding(
+        specialist="orderflow",
+        role="directional",
+        available=True,
+        stance=stance,
+        confidence=confidence,
+        evidence=evidence,
+    )
+
+    logger.debug(
+        "Orderflow specialist on %s: %s @ %.2f (book %s, tape %s)",
+        state["symbol"], stance, confidence or 0.0, book.available, tape.available,
+    )
+
     return {
         "orderflow_analysis": OrderflowAnalysis(
-            available=False,
-            reason=ORDERFLOW_BLOCKER,
+            available=True,
+            reason=None,
+            imbalance=book.imbalance,
+            # The AGGRESSOR side from executed trades, not the resting-size side
+            # from the book. They frequently disagree — resting size can lean one
+            # way while every trade crosses the other — and reporting the book's
+            # lean under a field named `aggressor_side` would be a quiet lie in a
+            # field a later reader would take at face value.
+            aggressor_side=tape.aggressor_side,
         ),
-        "specialist_findings": [
-            _no_feed(
-                "orderflow",
-                "directional",
-                ORDERFLOW_BLOCKER,
-                [
-                    "would need: level-2 depth snapshots + trade tape with taker side",
-                    "candle body direction is NOT a substitute — it restates the "
-                    "market specialist's evidence under a different name",
-                ],
-            )
-        ],
-        "unavailable": [f"orderflow specialist ({ORDERFLOW_BLOCKER})"],
+        "specialist_findings": [finding],
     }
 
 
@@ -335,44 +396,106 @@ def specialist_orderflow(state: TradingState) -> Optional[Dict[str, Any]]:
 # 3. Liquidity specialist (constraint) — NO DEPTH FEED
 # ===========================================================================
 
+# As with ORDERFLOW_BLOCKER: this is now the reason for a FAILED FETCH on one
+# run, not a statement about the system. Level-2 quotes are subscribed.
 LIQUIDITY_BLOCKER = (
-    "no order-book depth feed is subscribed: executable depth and spread require "
+    "no order-book depth reached this run: executable depth and spread require "
     "level-2 quotes, and traded volume is not a substitute for them"
 )
 
 
 def specialist_liquidity(state: TradingState) -> Optional[Dict[str, Any]]:
-    """Executable depth and spread. Cannot run.
+    """Spread and visible resting depth, as a constraint on size.
 
-    A constraint, not a voter: thin depth is a reason to size down or skip, never
-    a reason to pick a side.
+    STILL A CONSTRAINT, NOT A VOTER. Thin depth is a reason to size down or wait;
+    it is never a reason to pick a side, and `SpecialistFinding.role` is what stops
+    the debate from reading it as one. This node produces a `concern` and never a
+    `stance`, exactly as before — what changed is that the concern is now measured
+    instead of unmeasurable.
 
-    It reports the volume proxy Phase 24 already computed as a POINTER, clearly
-    labelled as not being depth. Naming what exists and what it is not is more
-    useful to an operator than silence, and it is not the same as substituting one
-    for the other — the finding stays `available=False` and contributes no
-    concern value at all.
+    The volume proxy from `market_regime.liquidity` is still reported and still
+    labelled as not being depth. It is now a cross-check rather than the only
+    thing there was to say.
+
+    THE CONCERN IS SCORED AGAINST THE INTENDED SIZE WHEN ONE EXISTS.
+    `trade_thesis` runs before the panel, so the notional the system is actually
+    contemplating is usually available. Where it is not, the depth half of the
+    concern is SKIPPED rather than scored against an assumed order size — a
+    concern derived from a number nobody supplied is a fabricated constraint, and
+    this specialist's whole job is to bound a real one.
     """
+    from backend.algorithms.microstructure import analyse_order_book, liquidity_concern
+
+    snapshot = state.get("market_data")
+    if snapshot is None:
+        return {
+            "liquidity_analysis": LiquidityAnalysis(available=False, reason="no market data in state"),
+            "specialist_findings": [
+                _no_feed("liquidity", "constraint", "no market data in state", [])
+            ],
+            "unavailable": ["liquidity specialist (no market data)"],
+        }
+
+    book = analyse_order_book(snapshot.order_book_bids, snapshot.order_book_asks)
+
+    # What the system is actually thinking of trading, in quote currency. None
+    # when there is no thesis yet or it carries no entry price.
+    intended_notional: Optional[float] = None
+    thesis = state.get("trade_thesis")
+    if thesis is not None:
+        size = getattr(thesis, "size", None)
+        entry = getattr(thesis, "entry_price", None)
+        if isinstance(size, (int, float)) and isinstance(entry, (int, float)) and size > 0 and entry > 0:
+            intended_notional = float(size) * float(entry)
+
+    concern, evidence = liquidity_concern(book, intended_notional)
+
     regime = state.get("market_regime")
-    evidence = [
-        "would need: level-2 bid/ask depth for spread (bps) and executable size",
-    ]
     if regime is not None and regime.liquidity:
         evidence.append(
-            f"a traded-VOLUME proxy exists in market_regime.liquidity "
-            f"('{regime.liquidity}'); it is NOT order-book depth and cannot bound "
-            f"slippage or fillable size"
+            f"cross-check: the traded-VOLUME proxy in market_regime.liquidity reads "
+            f"'{regime.liquidity}'. It is NOT order-book depth and cannot bound "
+            f"slippage or fillable size — the spread and depth above are what do"
         )
+
+    if concern is None:
+        blocker = (snapshot.feed_problems or {}).get("liquidity") or book.reason or LIQUIDITY_BLOCKER
+        return {
+            "liquidity_analysis": LiquidityAnalysis(available=False, reason=blocker),
+            "specialist_findings": [
+                _no_feed("liquidity", "constraint", blocker, evidence)
+            ],
+            "unavailable": [f"liquidity specialist ({blocker})"],
+        }
+
+    finding = SpecialistFinding(
+        specialist="liquidity",
+        role="constraint",
+        available=True,
+        # No stance and no confidence, by role. A constraint that voted would be
+        # the modelling error `SpecialistFinding.role` documents at length.
+        stance=None,
+        confidence=None,
+        concern=concern,
+        evidence=evidence,
+    )
+
+    logger.debug(
+        "Liquidity specialist on %s: concern %.2f (spread %.2f bps)",
+        state["symbol"], concern, book.spread_bps or 0.0,
+    )
 
     return {
         "liquidity_analysis": LiquidityAnalysis(
-            available=False,
-            reason=LIQUIDITY_BLOCKER,
+            available=True,
+            reason=None,
+            # 1.0 = no obstacle, 0.0 = maximal obstacle. Inverted from `concern`
+            # because the field is named for a SCORE and a reader seeing
+            # depth_score=0.9 will assume that is good.
+            depth_score=round(1.0 - concern, 4),
+            spread_bps=book.spread_bps,
         ),
-        "specialist_findings": [
-            _no_feed("liquidity", "constraint", LIQUIDITY_BLOCKER, evidence)
-        ],
-        "unavailable": [f"liquidity specialist ({LIQUIDITY_BLOCKER})"],
+        "specialist_findings": [finding],
     }
 
 
@@ -380,38 +503,93 @@ def specialist_liquidity(state: TradingState) -> Optional[Dict[str, Any]]:
 # 4. News specialist (directional) — NO FEED
 # ===========================================================================
 
+# Now the reason for a FAILED FETCH, not for the absence of a feed. Four keyless
+# RSS sources are ingested by `services/microstructure_feed.fetch_headlines` and
+# put on the snapshot by `data_validation`.
 NEWS_BLOCKER = (
-    "no news, filing or social feed is ingested anywhere in this backend: there "
-    "is no headline source to score, so event risk around this symbol is unknown "
-    "rather than absent"
+    "no headlines reached this run: every configured RSS source failed, so event "
+    "risk around this symbol is unknown rather than absent"
 )
 
 
 def specialist_news(state: TradingState) -> Optional[Dict[str, Any]]:
-    """Headline and event risk. Cannot run.
+    """Headline lean and event risk, from the real RSS feeds.
 
-    The distinction the `reason` is careful about: "no news feed" must not be read
-    downstream as "no news". An unmeasured event risk is the most dangerous kind
-    of missing input, because a scheduled listing, unlock or regulatory
-    announcement invalidates a technical thesis entirely and leaves every other
-    specialist looking healthy.
+    THE DISTINCTION THIS NODE HAS ALWAYS BEEN CAREFUL ABOUT STILL HOLDS.
+    "No news feed" must never be read downstream as "no news". An unmeasured event
+    risk is the most dangerous kind of missing input, because a scheduled listing,
+    unlock or regulatory announcement invalidates a technical thesis entirely
+    while every other specialist still looks healthy. What changed is only that
+    the feed now exists, so the unavailable branch is a real failure rather than
+    the permanent state.
+
+    KEYWORD SCORING, AND CAPPED BECAUSE OF IT.
+    `algorithms/news_sentiment` is a transparent lexicon, not comprehension. Its
+    `MAX_CONFIDENCE` of 0.45 is the ceiling on what this specialist may ever
+    contribute, so headlines can shade a verdict and can never carry one. The
+    reasoning for keeping a model out of this path is in that module's docstring:
+    it runs on every graph run for every symbol, and a model asked "is this
+    bullish?" answers even when the headline is about something else entirely.
+
+    EVENT RISK IS REPORTED AS EVIDENCE, NOT AS A SECOND VOTE.
+    A pending Fed decision is a reason to be less certain, not a reason to be
+    short. It is surfaced in the evidence and in `sentiment_analysis` for the
+    Supervisor to read; turning it into a directional stance would manufacture a
+    bearish signal out of uncertainty.
     """
-    return {
-        "specialist_findings": [
-            _no_feed(
-                "news",
-                "directional",
-                NEWS_BLOCKER,
-                [
-                    "would need: a headline feed with symbol tagging and timestamps",
-                    "unknown event risk is not the same as no event risk — a "
-                    "scheduled unlock or listing would invalidate a technical "
-                    "thesis without any other specialist noticing",
-                ],
-            )
-        ],
-        "unavailable": [f"news specialist ({NEWS_BLOCKER})"],
-    }
+    from backend.algorithms.news_sentiment import score_headlines
+
+    snapshot = state.get("market_data")
+    if snapshot is None:
+        return {
+            "specialist_findings": [
+                _no_feed("news", "directional", "no market data in state", [])
+            ],
+            "unavailable": ["news specialist (no market data)"],
+        }
+
+    problems = snapshot.feed_problems or {}
+    reading = score_headlines(
+        snapshot.headlines,
+        state["symbol"],
+        # Section 39.4 again: the node must not read the clock. The run's own
+        # start time is stamped once by the runtime, so a replay scores the same
+        # headlines against the same "now" and reaches the same verdict.
+        now=state.get("started_at"),
+    )
+
+    evidence = list(reading.evidence)
+    if problems.get("news_partial"):
+        # Some sources answered and some did not. Named rather than hidden: a
+        # reading built on three of four feeds is still a reading, but an operator
+        # asking why the exchange-announcements source is missing deserves an answer.
+        evidence.append(f"source(s) unavailable this run: {problems['news_partial']}")
+
+    if not reading.available:
+        blocker = problems.get("news") or reading.reason or NEWS_BLOCKER
+        return {
+            "specialist_findings": [
+                _no_feed("news", "directional", blocker, evidence)
+            ],
+            "unavailable": [f"news specialist ({blocker})"],
+        }
+
+    finding = SpecialistFinding(
+        specialist="news",
+        role="directional",
+        available=True,
+        stance=reading.stance,
+        confidence=reading.confidence,
+        evidence=evidence,
+    )
+
+    logger.debug(
+        "News specialist on %s: %s @ %.2f from %d relevant headline(s), event risk %.2f",
+        state["symbol"], reading.stance, reading.confidence or 0.0,
+        reading.headlines_relevant, reading.event_risk or 0.0,
+    )
+
+    return {"specialist_findings": [finding]}
 
 
 # ===========================================================================
@@ -1287,9 +1465,13 @@ def register_specialist_nodes() -> None:
     register_node(
         NodeContract(
             name="specialist_orderflow",
-            reads=("symbol",),
+            # `market_data` was NOT in this tuple while the node returned a constant.
+            # It reads the book and tape off the snapshot now, and a contract that
+            # under-declares its reads is how a node quietly starts depending on
+            # state nobody knows it touches.
+            reads=("symbol", "market_data"),
             writes=("specialist_findings", "orderflow_analysis"),
-            purpose="Order-book aggressor flow — reports unavailable, no feed is subscribed",
+            purpose="Order-book aggressor flow and resting-size imbalance from level-2 depth and the trade tape",
             deterministic=True,
             phase=26,
         ),
@@ -1299,9 +1481,11 @@ def register_specialist_nodes() -> None:
     register_node(
         NodeContract(
             name="specialist_liquidity",
-            reads=("market_regime", "symbol"),
+            # `trade_thesis` is read to score depth against the size actually being
+            # contemplated; `market_data` carries the book itself.
+            reads=("market_regime", "symbol", "market_data", "trade_thesis"),
             writes=("specialist_findings", "liquidity_analysis"),
-            purpose="Executable depth and spread — reports unavailable, no depth feed is subscribed",
+            purpose="Spread and visible resting depth, as a constraint on size (never a direction)",
             deterministic=True,
             phase=26,
         ),
@@ -1311,9 +1495,11 @@ def register_specialist_nodes() -> None:
     register_node(
         NodeContract(
             name="specialist_news",
-            reads=("symbol",),
+            # `started_at` is read instead of the clock so headline ages are the same
+            # on a replay as on the original run (Section 39.4).
+            reads=("symbol", "market_data", "started_at"),
             writes=("specialist_findings",),
-            purpose="Headline and event risk — reports unavailable, no news feed is ingested",
+            purpose="Headline lean and event risk from four RSS sources, keyword-scored and confidence-capped",
             deterministic=True,
             phase=26,
         ),

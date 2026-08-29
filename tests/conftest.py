@@ -95,7 +95,24 @@ def block_network(request, monkeypatch):
     except ImportError:  # pragma: no cover - httpx is a declared dependency
         return
 
+    original_request = httpx.AsyncClient.request
+
     async def _blocked_request(self, method, url, *args, **kwargs):
+        # LOOPBACK IS ALLOWED HERE, matching the socket layer above.
+        #
+        # This guard used to block EVERY httpx request, including 127.0.0.1,
+        # while the socket layer three functions up deliberately allowed
+        # loopback. That inconsistency meant a test could not stand up a local
+        # fake server and exercise real HTTP against it — the only way to test
+        # an HTTP adapter's status handling, JSON parsing and timeout behaviour
+        # without mocking the very layer under test.
+        #
+        # The bug this fixture exists to prevent is unchanged and still caught:
+        # a test reaching api.binance.com. A test reaching a server it started
+        # itself on loopback is not that bug.
+        if str(url).split("//")[-1].split("/")[0].split(":")[0] in _LOOPBACK_HOSTS:
+            return await original_request(self, method, url, *args, **kwargs)
+
         raise _BlockedNetwork(
             f"This test attempted a real HTTP request: {method} {url}. Stub the client or the "
             f"function under test — see tests/conftest.py. Request `allow_network` if a live "
@@ -166,3 +183,149 @@ def make_correlated_candles(n: int = 120, base: float = 50.0, sign: float = 1.0)
 @pytest.fixture
 def candles():
     return make_candles()
+
+
+# ---------------------------------------------------------------------------
+# The test suite must not read the operator's real LLM configuration
+# ---------------------------------------------------------------------------
+#
+# THE FAILURE THIS PREVENTS, WHICH ACTUALLY HAPPENED
+# --------------------------------------------------
+# `backend/llm/provider.get_provider()` reads `LLM_PROVIDER` / `LLM_API_KEY` /
+# `LLM_MODEL` from the process environment, and `.env` is loaded at import. While
+# this project had no model configured, every test that called `reset_provider()`
+# and expected `NullProvider` passed for the wrong reason: there was nothing to
+# configure, not because the test had isolated anything.
+#
+# The moment a real NVIDIA key went into `.env`, two tests started building a live
+# provider and issuing real HTTP requests to integrate.api.nvidia.com:
+#
+#     tests/test_graph_contracts.py::test_no_provider_is_configured_by_default
+#     tests/test_opportunity_graph.py::test_an_unconfigured_provider_degrades_...
+#
+# The network guard above caught them, which is the only reason this surfaced as
+# a failure rather than as a test suite that quietly bills an API and passes or
+# fails depending on whose machine it runs on.
+#
+# `test_llm_provider.py` already had exactly this fixture locally. Its being
+# local was the bug: provider configuration is global state, so the isolation has
+# to be global too. That file keeps its own copy — it is harmless, and the
+# reasoning belongs next to the tests that deliberately set these variables.
+#
+# A test that WANTS a configured provider still gets one: `monkeypatch.setenv`
+# inside the test runs after this fixture, and `set_provider()` bypasses the
+# environment entirely.
+@pytest.fixture(autouse=True)
+def isolate_llm_configuration(monkeypatch):
+    from backend.llm.provider import reset_provider
+
+    for var in (
+        "LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
+        "LLM_MODEL_MECHANICAL", "LLM_MODEL_NARRATIVE", "LLM_MODEL_REASONING",
+        "OPENAI_API_KEY",
+        # The consultation panel reads its own variables and would otherwise let
+        # a configured second opinion reach the network from a test too.
+        "LLM_CONSULT_PANEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    # Reset BOTH SIDES of the singleton. Clearing the environment does nothing if
+    # an earlier test already cached a live provider — which is precisely how
+    # `test_no_provider_is_configured_by_default` passed alone and failed in a
+    # full run.
+    reset_provider()
+    yield
+    reset_provider()
+
+
+# ---------------------------------------------------------------------------
+# The test suite must not reach the operator's real database, or inherit
+# another test's agent singletons
+# ---------------------------------------------------------------------------
+#
+# WHY BOTH OF THESE BECAME NECESSARY AT THE SAME MOMENT
+# ------------------------------------------------------
+# For most of this project's life `DATABASE_URL` was wrong, so `init_db()` failed
+# and `get_db_pool()` returned None everywhere. `test_position_persistence.py`
+# says so in its own docstring: "There is no Postgres in this suite". Every test
+# that touches storage passes a fake pool, and the ones that do not were relying
+# on a real connection being IMPOSSIBLE rather than on being isolated.
+#
+# That stopped being true the moment the working credentials were restored. A
+# single test that starts the app (a TestClient triggers the lifespan, which
+# calls `init_db`) would now connect to the operator's live trading database and
+# apply the schema to it. That is the same class of accident as the LLM guard
+# above, where two tests began issuing real HTTP requests the day a real key
+# landed in `.env` — and the consequences here are worse than a billed token.
+#
+# Pointing DATABASE_URL at an unroutable address makes the failure mode the one
+# every storage path is already written and tested against: no pool, and a
+# stated reason.
+#
+# The singleton reset is the second half. `get_position_monitor` and
+# `get_execution_agent` used to construct a NEW agent per call — which was a bug,
+# and is now fixed — but the fix means one test's open positions would otherwise
+# be the next test's starting book.
+@pytest.fixture(autouse=True)
+def isolate_backend_state(monkeypatch):
+    # 192.0.2.0/24 is TEST-NET-1 (RFC 5737): reserved for documentation and
+    # guaranteed not to route. Chosen over localhost-with-a-bad-port so a
+    # developer running Postgres on a non-default port cannot be reached either.
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql://tests:tests@192.0.2.1:5432/does-not-exist"
+    )
+
+    from backend.agents.execution_agent import reset_execution_agent
+    from backend.agents.position_monitor import reset_position_monitor
+
+    reset_position_monitor()
+    reset_execution_agent()
+    yield
+    reset_position_monitor()
+    reset_execution_agent()
+
+
+# ---------------------------------------------------------------------------
+# The test suite must not reach the operator's real database or agent singletons
+# ---------------------------------------------------------------------------
+#
+# WHY THIS APPEARED ONLY NOW
+# --------------------------
+# Until the working DATABASE_URL was recovered, `init_db()` always failed and
+# `get_db_pool()` returned None for every test — so "there is no Postgres in this
+# suite" (tests/test_position_persistence.py says exactly that) was true by
+# accident rather than by design. The moment the credentials were fixed, any test
+# that drives the FastAPI app through its lifespan would connect to the
+# operator's live trading database and write to it.
+#
+# That is the same shape as the LLM-config leak above: a suite that passed for
+# the wrong reason, one config change away from doing real damage. Tests that
+# genuinely want a pool already inject a fake one with `monkeypatch.setattr(...,
+# get_db_pool, ...)`, which is unaffected by this.
+#
+# The URL is pointed at a port nothing listens on rather than deleted, because
+# `settings.DATABASE_URL` has a non-empty default and code paths that build a DSN
+# string should still get a well-formed one.
+@pytest.fixture(autouse=True)
+def isolate_database(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://test:test@127.0.0.1:1/tradingos_test_never_reachable",
+    )
+    yield
+
+
+# The agent accessors are process-wide singletons (`get_position_monitor`,
+# `get_execution_agent`). Without this, one test's open positions become the next
+# test's starting book — and the failure would show up as an unrelated assertion
+# about a position nobody opened.
+@pytest.fixture(autouse=True)
+def isolate_agent_singletons():
+    from backend.agents.execution_agent import reset_execution_agent
+    from backend.agents.position_monitor import reset_position_monitor
+
+    reset_position_monitor()
+    reset_execution_agent()
+    yield
+    reset_position_monitor()
+    reset_execution_agent()

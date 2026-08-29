@@ -26,6 +26,7 @@ import { LiveAgentInspectorModal } from '@/components/modals/LiveAgentInspectorM
 import { AgentSwarmViz, type SwarmLayer } from '@/components/viz/AgentSwarmViz';
 import { ExecCycleStepper } from '@/components/viz/ExecCycleStepper';
 import { LazyCandlestickChart as CandlestickChart, type Bar } from '@/components/ui/LazyCandlestickChart';
+import { Badge } from '@/components/ui/Badge';
 import { Card, Num, NotAvailable, SectionTitle, StatCard } from '@/components/ui/primitives';
 import { BACKEND_PATHS } from '@/lib/backendConfig';
 import type { NodeContract } from '@/lib/api/graphs';
@@ -33,9 +34,9 @@ import { equityCurve, maxDrawdownPct, realised, type Trade } from '@/lib/api/por
 import { useSameOrigin } from '@/lib/api/useSameOrigin';
 import {
   useBackend,
-  useCurrentNode,
   useLivePrices,
 } from '@/lib/realtime/useRealtime';
+import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
 import { stageForNode } from '@/lib/viz/flow';
 
 // Code-split. The operator panels sit below this page's real-data content, so
@@ -77,7 +78,12 @@ export default function HomePage() {
   );
 
   const prices = useLivePrices();
-  const currentNode = useCurrentNode();
+
+  // Seeded from the last completed run when nothing is streaming. Without this
+  // the Execution Cycle and the Agent Ensemble below sat permanently on their
+  // idle state, because the event stream gives a freshly loaded page NO backlog
+  // — so between cycles the page showed a system that looked switched off.
+  const pipeline = usePipeline();
   const [inspect, setInspect] = useState<string | null>(null);
 
   const rows = trades.data?.trades ?? [];
@@ -94,7 +100,35 @@ export default function HomePage() {
   const bars: Bar[] = candles.data?.candles ?? [];
 
   const specialists = (nodesApi.data?.nodes ?? []).filter((n) => n.name.startsWith('specialist_'));
-  const activeStage = stageForNode(currentNode);
+
+  // While a cycle is running this is the stage of the node the stream says is
+  // RUNNING. Between cycles it is the stage of the LAST node the previous run
+  // reached, so the stepper shows where the agent got to rather than resetting
+  // to nothing — the difference between "idle" and "finished" is the whole
+  // question an operator is asking when they look at it.
+  const lastNodeReached = useMemo(() => {
+    if (pipeline.currentNode) return pipeline.currentNode;
+    const nodes = pipeline.lastRun?.nodes ?? [];
+    return nodes.length > 0 ? nodes[nodes.length - 1].node : null;
+  }, [pipeline.currentNode, pipeline.lastRun]);
+
+  const activeStage = stageForNode(lastNodeReached);
+
+  // How many of the panel actually reported in the run being displayed. A count
+  // of nodes that RAN, not of nodes that exist — the ensemble picture is about
+  // work done, and drawing nine dots for a run where three specialists errored
+  // would overstate it.
+  const specialistsReported = useMemo(() => {
+    const ran = new Set(
+      (pipeline.lastRun?.nodes ?? [])
+        .filter((n) => n.node.startsWith('specialist_') && !n.error)
+        .map((n) => n.node),
+    );
+    for (const [name, state] of Object.entries(pipeline.nodes)) {
+      if (name.startsWith('specialist_') && state.status === 'COMPLETED') ran.add(name);
+    }
+    return ran.size;
+  }, [pipeline.lastRun, pipeline.nodes]);
 
   // Layers bound to REAL counts. See AgentSwarmViz — this is labelled illustrative
   // and denies being a multi-agent swarm.
@@ -106,8 +140,10 @@ export default function HomePage() {
       active: activeStage === 'trigger',
     },
     {
-      label: 'Specialist panel',
-      count: specialists.length || 7,
+      label: 'Specialists reported',
+      // The number that actually reported in the displayed cycle, falling back to
+      // the registered count only before any cycle has run.
+      count: specialistsReported || specialists.length || 7,
       color: 'var(--accent-2)',
       active: activeStage === 'analyse',
     },
@@ -247,7 +283,28 @@ export default function HomePage() {
 
       {/* ---- Execution cycle ---- */}
       <Card>
-        <SectionTitle>Execution cycle</SectionTitle>
+        <SectionTitle
+          action={
+            <Badge
+              state={pipeline.isRunning ? 'RUNNING' : pipeline.source === 'none' ? 'IDLE' : 'COMPLETED'}
+              label={
+                pipeline.isRunning
+                  ? 'Cycle running'
+                  : pipeline.source === 'none'
+                    ? 'No cycle yet'
+                    : 'Last cycle'
+              }
+            />
+          }
+        >
+          Execution cycle
+        </SectionTitle>
+        <div
+          className="text-[11px] mb-2 leading-relaxed"
+          style={{ color: pipeline.isRunning ? 'var(--accent)' : 'var(--text-muted)' }}
+        >
+          {pipelineSourceLabel(pipeline)}
+        </div>
         <div className="overflow-x-auto">
           <ExecCycleStepper activeKey={activeStage} />
         </div>
@@ -256,7 +313,17 @@ export default function HomePage() {
       {/* ---- Swarm ---- */}
       <Card>
         <SectionTitle>Agent ensemble</SectionTitle>
-        <AgentSwarmViz layers={swarmLayers} height={200} />
+        <AgentSwarmViz
+          layers={swarmLayers}
+          height={200}
+          note={
+            pipeline.isRunning
+              ? `A cycle is running now — ${pipeline.currentNode} is the active node.`
+              : pipeline.lastRun
+                ? `Counts are from the last completed cycle on ${pipeline.lastRun.symbol ?? 'an unknown symbol'}.`
+                : 'No cycle has run yet, so the counts are the registered structure rather than work done.'
+          }
+        />
       </Card>
 
       {/* ---- Polymarket pulse ---- */}

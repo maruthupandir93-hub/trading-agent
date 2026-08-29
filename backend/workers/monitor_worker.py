@@ -166,26 +166,7 @@ class ContinuousMonitorWorker:
 
         if concerns:
             logger.warning("Monitor cycle: %d concern(s): %s", len(concerns), "; ".join(concerns))
-            
-            # Fire a monitoring concern trigger for the LangGraph reasoner to catch
-            from backend.core.message_bus import get_message_bus
-            from backend.models.events import TriggerFiredEvent
-            
-            bus = get_message_bus()
-            event = TriggerFiredEvent(
-                symbol="PORTFOLIO",  # Or specific if it's one asset, but general for now
-                kind="monitoring_concern",
-                detail="; ".join(concerns),
-                acted=True,
-                observed_value=float(len(concerns)),
-                threshold=1.0,
-                suppressed_reason=None
-            )
-            # Ensure we publish asynchronously without blocking the loop completely if it fails
-            try:
-                await bus.publish("TRIGGER_FIRED", event)
-            except Exception as e:
-                logger.error("Failed to publish monitoring concern trigger: %s", e)
+            await self._publish_concerns(concerns, marked)
         else:
             logger.info("Monitor cycle: %s", "; ".join(observations) or "nothing to report")
 
@@ -197,6 +178,76 @@ class ContinuousMonitorWorker:
             logger.error("Failed to record monitoring cycle to working memory: %s", e)
             
         return cycle
+
+    async def _publish_concerns(self, concerns, marked) -> None:
+        """Raise a TRIGGER_FIRED per AFFECTED SYMBOL. Never raises.
+
+        WHY NOT ONE EVENT FOR "PORTFOLIO"
+        ---------------------------------
+        This used to publish a single trigger with `symbol="PORTFOLIO"` and a
+        comment conceding it was a placeholder. The analysis graph is subscribed
+        to TRIGGER_FIRED, so every monitoring concern started a full 23-node
+        reasoning run for an instrument that does not exist:
+
+            Error fetching OHLCV for PORTFOLIO: binance does not have market
+            symbol PORTFOLIO
+            Market data validation produced nothing usable for PORTFOLIO
+
+        Three network calls and a graph build, guaranteed to fail, repeated on
+        every cycle that had a concern — and concerns are common, because "no
+        live price for this position" is one. The run could never produce a
+        decision, so the cost was pure: rate-limit budget, log noise, and a run
+        trace that makes the trace store look like the agent keeps failing.
+
+        Concerns already name their symbol (`f"{symbol}: down {pnl_pct}%"`), so
+        the fix is to trigger on the real instrument. A run on BTC/USDT can
+        actually fetch candles and reach a conclusion about the position that
+        caused the concern.
+
+        CONCERNS WITH NO SYMBOL ARE NOT DROPPED — they are logged and not
+        triggered on. "Observation mode active" is a governance state, not a
+        market event, and there is no instrument for a graph to reason about; a
+        trigger for it would recreate exactly the bug above under a new name.
+        """
+        from backend.core.message_bus import get_message_bus
+        from backend.models.events import TriggerFiredEvent
+
+        known = {str(m.get("symbol")) for m in (marked or []) if m.get("symbol")}
+
+        by_symbol: dict = {}
+        unattributed = []
+        for concern in concerns:
+            # The format every position concern above uses is "SYMBOL: detail".
+            symbol = concern.split(":", 1)[0].strip() if ":" in concern else ""
+            if symbol in known:
+                by_symbol.setdefault(symbol, []).append(concern)
+            else:
+                unattributed.append(concern)
+
+        if unattributed:
+            logger.info(
+                "%d monitoring concern(s) name no tradeable symbol and did NOT start a "
+                "reasoning run: %s",
+                len(unattributed), "; ".join(unattributed),
+            )
+
+        bus = get_message_bus()
+        for symbol, items in by_symbol.items():
+            try:
+                await bus.publish("TRIGGER_FIRED", TriggerFiredEvent(
+                    symbol=symbol,
+                    kind="monitoring_concern",
+                    detail="; ".join(items),
+                    acted=True,
+                    observed_value=float(len(items)),
+                    threshold=1.0,
+                    suppressed_reason=None,
+                ))
+            except Exception as e:  # noqa: BLE001
+                # One symbol failing must not stop the others being raised.
+                logger.error(
+                    "Failed to publish monitoring concern trigger for %s: %s", symbol, e
+                )
 
 
 _worker: Optional[ContinuousMonitorWorker] = None

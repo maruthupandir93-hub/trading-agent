@@ -36,6 +36,7 @@ from backend.core.system_state import snapshot as system_state_snapshot
 from backend.core.auth import auth_required, ENV_VAR
 import os
 import hmac
+from backend.services.event_buffer import get_event_buffer
 from backend.services.portfolio_store import get_portfolio
 
 logger = logging.getLogger(__name__)
@@ -95,10 +96,24 @@ def _event_to_dict(payload: Any) -> Dict[str, Any]:
 
 
 async def _on_any_event(payload: Any) -> None:
-    """Wildcard subscriber: forward every bus event to all WebSocket clients."""
+    """Wildcard subscriber: buffer every bus event, then push to any WS clients.
+
+    BUFFERED UNCONDITIONALLY, broadcast only when someone is attached.
+
+    The early return used to cover both, which was correct while the WebSocket
+    was the only transport. It is not any more: the browser reaches this backend
+    through a Vercel proxy over https and CANNOT open `ws://` from an https page
+    (mixed content), so on this deployment the polling reader in
+    `GET /api/dashboard/events` is the ONLY consumer — and it reads the buffer.
+    Skipping the buffer when no socket is attached would have meant the polling
+    client received nothing, forever, on exactly the deployment that needs it.
+    """
+    event = _event_to_dict(payload)
+    get_event_buffer().append(event)
+
     if not manager.active_connections:
-        return  # nothing to serialize for
-    await manager.broadcast(_event_to_dict(payload))
+        return  # nothing to push to; the buffer already has it
+    await manager.broadcast(event)
 
 
 def start_event_bridge() -> None:
@@ -137,6 +152,53 @@ async def websocket_endpoint(websocket: WebSocket, api_key: str = None) -> None:
     except Exception as e:
         logger.debug("WebSocket closed with error: %s", e)
         manager.disconnect(websocket)
+
+
+@router.get("/events")
+async def poll_events(
+    cursor: Optional[int] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Bus events since `cursor` — the POLLING equivalent of the WebSocket above.
+
+    WHY THIS EXISTS ALONGSIDE THE SOCKET
+    ------------------------------------
+    The frontend is served from Vercel over https and this backend has no TLS
+    certificate. A browser on an https page refuses to open `ws://`, and a
+    WebSocket cannot be proxied through a Vercel serverless function either. So
+    on this deployment the socket above is unreachable from the browser and this
+    endpoint is what actually feeds the UI, through a same-origin Vercel proxy.
+
+    The socket is deliberately NOT removed: it still works for anything that can
+    reach this host directly (a local dev browser, a script), and it becomes the
+    better transport again the moment the backend has a TLS hostname.
+
+    CURSOR SEMANTICS
+    ----------------
+    Omit `cursor` on the first call. That returns NO events and the current
+    head — a new client should not be shown a ten-minute backlog as if it were
+    happening now. Pass the returned `cursor` back on each subsequent call.
+
+    `missed: true` means the client fell behind far enough that events were
+    evicted from the buffer. It is reported rather than hidden, because a
+    timeline with a silent gap is a timeline that misrepresents what the agent
+    did.
+    """
+    # Clamped rather than rejected: a caller asking for 10,000 events wants "as
+    # many as you have", and failing that request helps nobody.
+    limit = max(1, min(limit, 1000))
+    buffer = get_event_buffer()
+    events, next_cursor, missed = buffer.since(cursor, limit=limit)
+    return {
+        "events": events,
+        "cursor": next_cursor,
+        "missed": missed,
+        "count": len(events),
+        "buffer": buffer.stats(),
+        # So a client can tell "the backend is up and quiet" from "the backend
+        # is not answering" — the two look identical when events is empty.
+        "wsClients": len(manager.active_connections),
+    }
 
 
 @router.get("")

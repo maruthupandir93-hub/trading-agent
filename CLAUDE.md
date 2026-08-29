@@ -133,6 +133,65 @@ Two conventions this cost a real bug to learn:
   never left the watch list and was re-closed on every tick.
 - Persist **before** publishing `POSITION_CLOSED`, not after.
 
+### The browser talks ONLY to Next.js. Never to FastAPI, never to an exchange.
+
+```
+Browser --https--> Vercel (Next) --http--> FastAPI --> Binance / Yahoo / news / LLM
+        same-origin              server-to-server
+```
+
+Two independent constraints force this and **either one alone is
+sufficient**, so do not "simplify" it away:
+
+1. **Vercel's region is refused by Binance.** A route handler runs in a
+   Vercel-chosen region; from a US one, Binance returns `451 Unavailable
+   For Legal Reasons`. No retry, key or header fixes it — the caller's
+   *location* is refused. Every third-party market call therefore lives
+   in `backend/api/marketdata.py` and the Next route is a thin proxy.
+2. **Mixed content.** The site is https and the backend has no TLS
+   certificate. A browser on an https page refuses `http://` and `ws://`
+   outright. It is a browser policy — no CORS header or fetch option
+   permits it, and a WebSocket cannot be proxied through a Vercel
+   serverless function.
+
+That second one had broken far more than the market data: 18 pages via
+`useBackend`, pause/resume, the live-trading toggle, the Polymarket
+panel and **the emergency stop** were all firing requests the browser
+discarded, with no error anyone would find.
+
+Consequences to respect:
+
+- `backendUrl()` is now **`serverOnlyBackendUrl()`**, so a browser-side
+  call is a compile error rather than a silently blocked request.
+  Components use `backendProxyPath()`; `app/api/backend/[...path]/route.ts`
+  forwards anything to the backend and attaches `TRADES_API_KEY`
+  server-side, so the browser never holds the secret.
+- **There are no WebSockets in the frontend.** Live prices and agent
+  events are polled (`/api/ticks`, `/api/agent-events`, 2s). Only the
+  last hop is polled — the backend still holds a real-time Binance
+  socket and a cursor-based event buffer. The backend's WS endpoints are
+  kept for direct/local clients and are the transport to return to once
+  the backend has TLS. See `docs/DEPLOYMENT_NETWORKING.md`.
+- `/api/marketdata/*` is the DASHBOARD's spot data. `/api/market/*` is
+  the AGENT's ccxt **futures** view. They look interchangeable and are
+  not — pointing one at the other silently swaps the market.
+- **The operator's exchange path moved too**, to
+  `backend/api/operator_exchange.py` at `/api/operator/exchange`. Read
+  its docstring before touching it — it is the only HTTP route in the
+  system that places a real order.
+  `backend/api/exchange.py` stays read-only and its warning still
+  stands; the order route is a **separate module** so nobody finds order
+  placement while reading the read-only one. Two planes:
+  the AGENT's (Supervisor → CRO → `TAR_APPROVED` → ExecutionAgent,
+  `LIVE_TRADING`-gated, risk-checked, unreachable over HTTP) and the
+  OPERATOR's (a human's own keys, per request, unsupervised by
+  invariant 1). What makes the second acceptable: write auth on every
+  route, credentials never stored, no kernel/bus registration, listed in
+  `FORBIDDEN_IMPORTS`, and every order persisted as
+  `origin_tag='manual-click'`. `tests/test_api_surface.py` asserts the
+  separation and the auth — if a route there loses its auth dependency,
+  that test fails, and it is the most important assertion in the file.
+
 ### Provider tree matters
 
 `app/layout.tsx` nests providers in a specific order, and React context
@@ -163,6 +222,218 @@ it permanently reads mount-time values. See `components/Agent.tsx`'s
 `ticksRef`/`getCandlesRef` and copy that pattern.
 
 ---
+
+### The bus delivers an event to EVERYONE before the events it causes
+
+`MessageBus.publish` queues a publish made while a delivery is in flight, rather
+than recursing into it. That ordering is load-bearing, not tidiness.
+
+It used to deliver inline, so a subscriber publishing from inside its own handler
+ran that nested delivery to completion before the OUTER event reached the
+subscribers behind it. `main.py` builds `ExecutionAgent` before
+`PositionMonitorAgent`, so on every single approved trade:
+
+```
+publish(TAR_APPROVED)
+  -> ExecutionAgent      fills, publishes ORDER_FILLED inline
+       -> PositionMonitor sees the FILL with an empty pending map
+       -> "UNPROTECTED POSITION ... will NOT be monitored"
+  -> PositionMonitor     finally receives TAR_APPROVED. Too late.
+```
+
+Every position opened was recorded unprotected, no stop was enforceable on any
+of them, and the position never entered the watch list — which is also why the
+paper book and `/positions` stayed empty while the event log showed a completed
+fill.
+
+Do NOT "fix" a future instance of this by reordering construction in `main.py`.
+That works until the next reorder and no test can see it. `tests/test_bus_delivery_order.py`
+and the two ordering tests in `tests/test_post_trade_chain.py` pin it; all three
+fail against inline delivery, which was verified by reverting.
+
+One consequence to know: node events reach the buffer a beat AFTER the HTTP
+response that triggered the run. Nothing is lost — a poll issued in the same
+millisecond as the response will just miss them, which cost an hour of chasing a
+non-bug.
+
+### The specialists have real feeds now
+
+`orderflow`, `liquidity` and `news` used to be hardcoded `available=False` with
+reasons saying no depth/tape/news feed was subscribed. Those reasons were true of
+the GRAPH and false of the SYSTEM — `api/marketdata.py` had been serving Binance
+`/api/v3/depth`, `/api/v3/aggTrades` and four RSS feeds to the dashboard the whole
+time.
+
+That was not one missing opinion. `run_debate` scales its verdict by COVERAGE, and
+those two directional specialists carry 3.0 of 7.0 weight, so coverage was pinned
+at **0.57** and every decision the agent ever made was multiplied by it. Live runs
+landed on 0.159, 0.181, 0.196 against a 0.18 minimum — whether the agent traded at
+all was decided by rounding. Coverage is now 1.0.
+
+The fetch happens in `validate_market_data` (the single fetch point, Section 39.4)
+and lands on `MarketSnapshot`; the specialists are pure readers. Do not move the
+fetch into a specialist — a node that fetches its own data is not replay-safe, so
+a resumed checkpoint would reason over a different order book than the original run.
+
+Math lives in `algorithms/microstructure.py` and `algorithms/news_sentiment.py`,
+both with stated confidence ceilings: a seconds-long tape cannot carry full
+conviction about an hours-long position, and a keyword lexicon is not comprehension.
+
+### Reasoning models bill their scratchpad against `max_tokens`
+
+Every model this project is pointed at returns `reasoning_content` alongside
+`content`, and the thinking is charged first. A node asking for 400 tokens because
+it wants three sentences got `finish_reason="length"`, a full scratchpad and an
+EMPTY answer — a 200 OK that reads as "the model had nothing to say".
+
+Call sites pass `request_budget(n)` from `backend/llm/provider.py`, which adds
+headroom for the scratchpad on top of the answer length. Do not pass a bare answer
+length, and do not make `complete()` add the headroom invisibly — `max_tokens`
+must keep meaning `max_tokens` at the call site.
+
+Timeouts are PER TIER for the same class of reason. Measured on this account:
+`openai/gpt-oss-120b` 1.4s, `gpt-oss-20b` 2.6s, `moonshotai/kimi-k3` **68-85s**.
+The old single 90s ceiling made kimi-k3 lose the race on every real prompt, and
+every LLM node reported itself unavailable — which reads from outside as "the
+agent ignores the model".
+
+### "Empty result" and "the call failed" are different, and conflating them kills retries
+
+`ExchangeClient.fetch_usdt_perpetual_prices` returned `{}` for BOTH, so
+`market_data.fetch_prices`'s retry loop — which retries on exception — was dead
+code, because the callee swallowed every exception. A transient ccxt failure
+(`'str' object has no attribute 'keys'`, seen live when Binance returns a
+non-JSON body) was reported as:
+
+    Price refresh produced no usable symbols ... is now STALE
+
+which describes a symbol-FILTER mismatch and sends you to the wrong file. It now
+returns `None` for a failed call and `{}` for "answered, matched nothing"; only
+the first is retried. `tests/test_price_cache.py` pins both halves.
+
+### The Research Agent read a key that never existed
+
+`scan_market` did `mtf.get("overall", "Mixed")`, but
+`run_multi_timeframe_analysis` sets `features["multi_tf_trend"]`. The default was
+therefore always taken, `trend` was permanently `"Mixed"`, and both branches that
+set a setup were unreachable — the agent had never discovered a single setup, and
+said so in a line that reads like a market observation:
+*"Research Agent failed to find any setups."* With the key corrected the same five
+symbols immediately produced three "Strong Short Setup" rows.
+
+It now defaults to `"Unknown"` with a warning rather than `"Mixed"`, because
+"Mixed" is a real verdict this analysis returns and defaulting to it is what let
+the bug hide. The scan also goes through `services/upstream.fetch_json` now: it
+previously had `if resp.status_code == 200:` with no `else`, so a 451 or 429 fell
+through to `return []` with no log at all, and its one error line printed as
+`"Error scanning market: "` because several httpx exceptions stringify to empty.
+Both appeared in the live log. `tests/test_research_scan.py` covers all of it.
+
+### The test suite must not read the operator's real LLM config
+
+`tests/conftest.py` clears `LLM_*` / `OPENAI_API_KEY` for every test. Before that,
+tests asserting "no provider is configured" passed because nothing WAS configured,
+not because they had isolated anything — and the moment a real key went into
+`.env` two of them started issuing live HTTP requests. Only the network guard
+caught it.
+
+### `get_position_monitor()` and `get_execution_agent()` are singletons NOW
+
+Both used to `return Agent()` — a new, empty object on every call — while
+`main.py` built one at startup, subscribed it to the bus and treated it as the
+system's book. Every other caller got a different object, and two things broke
+silently:
+
+* `GET /api/graphs/positions`, whose docstring calls the monitor "the single
+  source of truth on what is open", constructed a fresh empty monitor and
+  returned `count: 0` FOREVER. The positions view was not showing an empty book;
+  it was showing a different book that could never fill.
+* `ExecutionAgent._last_prices` fills from TICK_RECEIVED, so a fresh instance had
+  seen no ticks and refused every simulated fill with "no observed price for X
+  yet" — which reads as a market-data fault.
+
+`reset_position_monitor()` / `reset_execution_agent()` exist for tests, and
+`tests/conftest.py` calls both around every test so one test's open positions
+cannot become the next one's starting book.
+
+### `simulation_mode` is a property, read at call time
+
+`ExecutionAgent.simulation_mode` was assigned once in `__init__` from
+`settings.LIVE_TRADING`, while `config.set_live_trading`'s docstring claimed the
+opposite ("reads it at call time, so the next trade attempt sees the new value").
+`main.py` builds the agent once, so the mode was frozen at process start and the
+Settings-page toggle changed nothing:
+
+    OFF -> ON   orders keep being simulated; the operator believes they hold
+                positions that do not exist.
+    ON -> OFF   the operator disables live trading, is told it worked, and REAL
+                ORDERS KEEP BEING PLACED until a restart.
+
+A safety control that reports success while doing nothing is worse than none.
+An explicit `simulation_mode=` argument still pins the value for the life of the
+agent — the backtest engine depends on that and must never follow a mid-run
+toggle. `tests/test_live_trading_toggle.py` pins both directions and the override.
+
+### The pipeline view is SEEDED from the last run, not just the live stream
+
+`lib/realtime/usePipeline.ts`. The event stream is a catch-up feed: it opens with
+no cursor and the backend deliberately answers that with the head and NO backlog,
+so a freshly loaded page knows nothing. Every node rendered IDLE under "No graph
+node is running" — true, and useless, because the agent may have finished a
+23-node cycle seconds earlier. Between cycles, which is most of the time, the
+operator's answer to "what is my agent doing?" was a blank pipeline.
+
+It now seeds from `/api/graphs/runs`, which stores each node's duration, what it
+wrote and any error, and the live stream overrides it per node. `source` and
+`ageSeconds` are surfaced so a finished run is never rendered as one in progress.
+
+**The run query MUST filter by graph.** The monitoring graph runs once per tick
+per open position, so an unfiltered `limit=1` returns a `position_monitoring`
+trace essentially always — twelve nodes whose names do not appear in Graph 2, so
+nothing matched and the diagram stayed exactly as empty. `/api/graphs/runs` takes
+a `graph` parameter for this.
+
+### The operator's manual trade panel
+
+`components/operator/TradePanel.tsx` -> `backend/api/operator_trade.py`. Paper
+trades go to `/api/operator/trade/paper`; with `LIVE_TRADING=true` that route
+REFUSES (a Buy pressed in live mode means a real order, and booking a simulated
+one instead would leave the operator believing they hold something they do not)
+and the panel posts to `/api/operator/exchange/order` with the operator's keys.
+
+`GET /context` answers price, balance, leverage ceiling and instrument rules in
+ONE call, and the authenticated balance behind it is cached 30s — a panel that
+re-read the balance per keystroke would spend the venue's rate limit on a form
+nobody had submitted.
+
+Registration with the stop-loss watcher goes through
+`PositionMonitorAgent.track_manual_position`, NOT through synthesised
+TAR_APPROVED / ORDER_FILLED events. Publishing those makes the AGENT's executor
+place a second order, its fill consumes the pending entry, and the hand-published
+one is then logged as an UNPROTECTED POSITION — a false alarm on every manual
+trade. A TAR also means "the CRO approved this", and minting one for a human's
+click would put a fabricated approval in the audit trail.
+
+### `get_price` reads three caches, and the third was missing
+
+`live_market_data` (agent socket), `ticker_stream` (dashboard socket), then the
+polled ccxt cache. Source 2 was not consulted, and for the first stretch after
+startup 1 and 3 are both empty while 2 is already ticking — so a graph run in
+that window aborted at `data_validation` with "no live price for BTC/USDT (feed
+returned 0.0)" while `/api/marketdata/ticks` served a price for the same symbol
+at the same moment. `price_for` refuses a tick past the stream's staleness
+threshold rather than handing back a minutes-old price.
+
+### One `.env`, and the password that was hiding in the second one
+
+There were three. `.env.backup-before-enable` was TRACKED IN GIT and held the
+real Postgres password — the only place it existed, so `.env` had the wrong one
+and the database had been failing to connect, which is what emptied the
+Decisions, History and Learning pages and reset the paper book every boot.
+`.env.example` had drifted and documented different variables. Both are gone and
+everything is folded into `.env`, which is gitignored.
+
+**That password is still in git history.** Deleting the file does not remove it.
 
 ## Safety invariants — never break these
 

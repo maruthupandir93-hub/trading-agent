@@ -39,6 +39,34 @@ EventType = Literal[
     # event carries no authority and nothing about it is an instruction to trade.
     # A graph may say "here is an approved plan"; only the CRO may say "execute".
     'EXECUTION_PLAN_READY',
+    # Phase 39.5 / LangGraph spec Section 39.5. One pair per graph NODE.
+    #
+    #     "LangGraph supports streaming state updates, node transitions ... For a
+    #      trading dashboard this matters more than in most agent applications —
+    #      'the AI is currently in multi_agent_analysis, 4 of 6 specialists
+    #      reporting' is exactly the kind of live visibility that makes a 24/7
+    #      autonomous system trustworthy to watch, versus a black box that
+    #      occasionally reports a trade after the fact."
+    #
+    # WHY THESE HAD TO EXIST AS BUS EVENTS AND NOT ONLY AS A STREAM.
+    # `graphs/runtime.stream_run` already yielded per-node progress, but it is an
+    # async generator with exactly one caller: the `/api/graphs/stream` WebSocket.
+    # The browser CANNOT open that socket (https page, no TLS on the backend —
+    # see CLAUDE.md), so on the real deployment nothing consumed it and the
+    # autonomous loop did not use it at all.
+    #
+    # Meanwhile `lib/realtime/store.ts` routes GRAPH_NODE_STARTED /
+    # GRAPH_NODE_COMPLETED / GRAPH_NODE_FAILED into its `nodes` slice and derives
+    # `currentNode` from them — and nothing in this backend had ever published
+    # one. So the Dashboard's "Agent status — decision pipeline", the home page's
+    # Execution Cycle stepper and the Agent Ensemble were wired to an event that
+    # did not exist, and sat frozen while 21 nodes ran.
+    #
+    # Published from `wrap_node`, which every graph's every node already goes
+    # through, so a new node is observable without remembering to instrument it.
+    'GRAPH_NODE_STARTED',
+    'GRAPH_NODE_COMPLETED',
+    'GRAPH_NODE_FAILED',
 ]
 
 class BaseEvent(BaseModel):
@@ -307,3 +335,62 @@ class ReflectionCompletedEvent(BaseEvent):
     pnl: float
     lesson_learned: str
     confidence_calibration_delta: float
+
+
+# ---------------------------------------------------------------------------
+# 10. GRAPH_NODE_* — per-node execution progress (Section 39.5)
+# ---------------------------------------------------------------------------
+#
+# THE FIELD NAMES ARE THE FRONTEND'S CONTRACT, NOT A CHOICE.
+# `lib/realtime/store.ts::route()` reads the base of each event with
+# `str(e, 'node', 'node_name', 'name')`, `str(e, 'status')`,
+# `num(e, 'duration_ms', 'durationMs')` and `str(e, 'detail', 'summary', 'out')`.
+# Renaming any of these silently empties the pipeline view again, with no error
+# anywhere — which is exactly the failure mode this event was added to fix. There
+# is a test pinning the names.
+#
+# `status` is carried explicitly even though the store can infer it from the
+# event type. The store prefers an explicit status when present, and stating it
+# means a future SKIPPED or WAITING state does not need a fourth event type.
+class GraphNodeStartedEvent(BaseEvent):
+    event_type: Literal['GRAPH_NODE_STARTED'] = 'GRAPH_NODE_STARTED'
+    node: str
+    status: Literal['RUNNING'] = 'RUNNING'
+    # The graph and run this node belongs to. Two graphs can run concurrently for
+    # two symbols, and a viewer needs to know which pipeline moved.
+    graph: str
+    run_id: str
+    symbol: Optional[str] = None
+
+
+class GraphNodeCompletedEvent(BaseEvent):
+    event_type: Literal['GRAPH_NODE_COMPLETED'] = 'GRAPH_NODE_COMPLETED'
+    node: str
+    status: Literal['COMPLETED'] = 'COMPLETED'
+    graph: str
+    run_id: str
+    symbol: Optional[str] = None
+    # Wall-clock milliseconds. Never None on a completion — the runtime measures
+    # it — but Optional so a future caller cannot be forced to invent one.
+    duration_ms: Optional[float] = None
+    # The state keys this node wrote, joined. The store shows it as the node's
+    # `detail` line. Keys, not values: the state carries candles and a portfolio
+    # snapshot, and pushing those through an event stream once per node would put
+    # megabytes on the wire for a 21-node run.
+    detail: Optional[str] = None
+    # Counts, not contents — the reasons are in the run trace.
+    unavailable_count: int = 0
+
+
+class GraphNodeFailedEvent(BaseEvent):
+    event_type: Literal['GRAPH_NODE_FAILED'] = 'GRAPH_NODE_FAILED'
+    node: str
+    status: Literal['FAILED'] = 'FAILED'
+    graph: str
+    run_id: str
+    symbol: Optional[str] = None
+    duration_ms: Optional[float] = None
+    # The exception text. Carried in `detail` because that is the field the store
+    # already renders for a node, so a failure explains itself in the same place a
+    # success does rather than needing its own display path.
+    detail: Optional[str] = None

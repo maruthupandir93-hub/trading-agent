@@ -35,7 +35,7 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
 import { Num } from '@/components/ui/primitives';
 import { ThemeToggle } from '@/components/ui/Theme';
-import { BACKEND_PATHS, backendUrl } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend, useRealtimeConnected, useStreamAge } from '@/lib/realtime/useRealtime';
 
 import { EmergencyStopModal } from './EmergencyStopModal';
@@ -117,7 +117,7 @@ export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
     if (busy) return;
     setBusy(true);
     try {
-      await fetch(backendUrl(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), {
+      await fetch(backendProxyPath(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${process.env.NEXT_PUBLIC_TRADES_API_KEY || ''}`

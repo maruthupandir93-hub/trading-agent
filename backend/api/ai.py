@@ -166,3 +166,150 @@ async def reason(req: ReasoningRequest) -> Dict[str, Any]:
             "one. Use POST /api/ai/route to resolve which agent owns a capability."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Chat completions proxy — replaces the upstream call in app/api/chat/route.ts
+# ---------------------------------------------------------------------------
+
+
+class ChatProxyRequest(BaseModel):
+    """One chat completion, forwarded verbatim to an OpenAI-compatible endpoint.
+
+    THE KEY IS SUPPLIED PER REQUEST AND NEVER STORED.
+
+    It arrives from the operator's browser, where the settings page keeps it, and
+    is used for the duration of this one call. It is not logged, not cached and
+    not written anywhere — the same contract the Next.js route it replaces had.
+    Note this DOES mean the key now transits one more machine than it used to;
+    both are the operator's own infrastructure, and it is stated here rather than
+    left to be discovered.
+    """
+
+    apiKey: str
+    baseUrl: Optional[str] = None
+    model: Optional[str] = None
+    messages: List[Dict[str, Any]]
+    temperature: Optional[float] = None
+    maxTokens: Optional[int] = None
+
+
+def _chat_completions_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/chat/completions"
+
+
+@router.post("/chat")
+async def chat_proxy(req: ChatProxyRequest):
+    """Stream a chat completion from an OpenAI-compatible provider.
+
+    WHY THIS IS HERE AT ALL
+    -----------------------
+    Every other third-party call moved to this backend because Vercel's region is
+    refused by Binance. THIS one is not geo-blocked — the LLM providers serve US
+    regions perfectly well, and Vercel is arguably the better place to call them
+    from. It moved because the operator asked for a single rule with no
+    exceptions: no Next.js route calls a third party.
+
+    That rule has a cost worth naming: the response crosses one extra hop
+    (provider -> here -> Vercel -> browser) before the first token lands. The
+    streaming below keeps that cost to latency rather than to behaviour.
+
+    STREAMING IS PRESERVED END TO END. `client.stream` plus a StreamingResponse
+    forwards bytes as they arrive. Buffering the body and returning it whole
+    would compile, pass a smoke test, and silently turn a token-by-token answer
+    into a long pause followed by a wall of text.
+
+    THE STATUS IS RESOLVED BEFORE THE STREAM STARTS, AND THAT IS LOAD-BEARING.
+    An upstream 4xx is returned as a real HTTP error, not as an SSE frame inside
+    a 200. The Next.js route in front of this inspects the status to detect the
+    "self-hosted server pointed at without /v1" signature and retry once against
+    the corrected URL — a 200 carrying an error in its body would make that
+    retry impossible and turn a one-character configuration mistake back into an
+    opaque failure.
+    """
+    import httpx
+    from fastapi.responses import StreamingResponse
+
+    if not req.apiKey:
+        raise HTTPException(status_code=400, detail="Missing API key")
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="Missing messages")
+
+    base_url = req.baseUrl or "https://integrate.api.nvidia.com/v1"
+    url = _chat_completions_url(base_url)
+    payload = {
+        "model": req.model or "z-ai/glm-5.2",
+        "messages": req.messages,
+        "temperature": req.temperature if req.temperature is not None else 0.2,
+        "top_p": 1,
+        "max_tokens": req.maxTokens or 1536,
+        "stream": True,
+    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {req.apiKey}"}
+
+    # A SEPARATE client from services/upstream's shared one, deliberately.
+    #
+    # That client has a 12s timeout tuned for market-data calls. A long completion
+    # legitimately takes minutes, and reusing it would cut answers off mid-sentence
+    # — which reads as the model stopping rather than as a timeout. `read=None`
+    # disables the per-read deadline while keeping a connect timeout, so an
+    # unreachable host still fails fast.
+    timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=15.0)
+
+    # Entered MANUALLY rather than with `async with`, because the response has to
+    # outlive this function: the body is consumed by the generator below, after
+    # this function has already returned. A context manager here would close the
+    # connection before the first chunk was read.
+    client = httpx.AsyncClient(timeout=timeout)
+    try:
+        request = client.build_request("POST", url, json=payload, headers=headers)
+        response = await client.send(request, stream=True)
+    except httpx.HTTPError as e:
+        await client.aclose()
+        logger.error("Chat proxy could not reach %s: %s", url, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach {url}: {type(e).__name__}: {e}",
+        )
+
+    if response.status_code >= 400:
+        body = (await response.aread()).decode("utf-8", "replace")[:500]
+        await response.aclose()
+        await client.aclose()
+        # The upstream's own status is propagated, not flattened to 502. The
+        # caller distinguishes a 401 (bad key) from a 404 (wrong base URL), and
+        # the 404 is the one it retries.
+        raise HTTPException(status_code=response.status_code, detail=body)
+
+    async def relay():
+        try:
+            async for chunk in response.aiter_raw():
+                if chunk:
+                    yield chunk
+        except httpx.HTTPError as e:
+            # The stream has already started, so the status is long since sent.
+            # An SSE error frame is the only way left to tell the browser why it
+            # stopped; closing silently would look like the model finishing.
+            logger.error("Chat proxy stream broke for %s: %s", url, e)
+            yield _sse_error(f"Stream interrupted: {type(e).__name__}: {e}").encode()
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        relay(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Tells any reverse proxy in front of this not to buffer. Without it
+            # nginx holds the whole response and the stream arrives at once.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse_error(message: str) -> str:
+    """An error the browser's SSE reader can surface instead of a silent stall."""
+    import json as _json
+
+    return f"data: {_json.dumps({'error': message})}\n\ndata: [DONE]\n\n"

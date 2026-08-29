@@ -754,6 +754,18 @@ def test_the_idempotency_basis_is_not_derived_from_a_thread_id():
 # ===========================================================================
 
 def test_the_gateway_runs_after_the_supervisor_and_before_the_narrative():
+    """The ORDERING is the invariant, not the edge shape.
+
+    This asserted `(RISK_GATEWAY_NODE, NARRATIVE_NODE) in cfg.edges` — a direct
+    edge. Phase 48 inserted `external_consultation` between them, so the direct
+    edge is gone while the property the test is named for is unchanged: the
+    gateway still runs after the supervisor, and the narrative still runs after
+    the gateway.
+
+    Rewritten to walk the chain instead, so inserting another node between them
+    later does not fail a test about ordering for a reason that has nothing to do
+    with ordering.
+    """
     from backend.graphs.analysis import (
         NARRATIVE_NODE,
         SUPERVISOR_NODE,
@@ -763,7 +775,20 @@ def test_the_gateway_runs_after_the_supervisor_and_before_the_narrative():
     cfg = analysis_config()
     assert RISK_GATEWAY_NODE in cfg.nodes
     assert (SUPERVISOR_NODE, RISK_GATEWAY_NODE) in cfg.edges
-    assert (RISK_GATEWAY_NODE, NARRATIVE_NODE) in cfg.edges
+
+    # Follow the linear tail from the gateway. Every node after the fan-in is a
+    # plain edge, so a simple walk is sufficient and does not need graph search.
+    successors = {src: dst for src, dst in cfg.edges}
+    chain, node, seen = [], RISK_GATEWAY_NODE, set()
+    while node in successors and node not in seen:
+        seen.add(node)
+        node = successors[node]
+        chain.append(node)
+
+    assert NARRATIVE_NODE in chain, (
+        f"the narrative must still run after the gateway; chain from the gateway "
+        f"was {chain}"
+    )
     cfg.validate()
 
 

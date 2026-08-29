@@ -31,9 +31,20 @@ type Agent = {
 };
 
 export default function SystemPage() {
+  // The `llm`, `consultationPanel`, `reasoning` and `autonomy` blocks were being
+  // RETURNED BY THE BACKEND AND NEVER DISPLAYED, because this type did not declare
+  // them. That made the one question this page exists to answer —
+  // "is my agent actually running, and can it reason?" — unanswerable from the UI.
   const monitoring = useBackend<{
     overall: string; scheduler_running: boolean;
     agents: Agent[]; checks: { label: string; ok: boolean }[];
+    llm?: { provider: string; available: boolean; baseUrl: string | null; models: Record<string, string>; note?: string };
+    consultationPanel?: { configured: boolean; providers: string[]; isPanel: boolean; note: string };
+    reasoning?: { nodesRegistered: number; deterministicNodes: number; llmNodes: number; graphBuilt: boolean; note: string };
+    autonomy?: {
+      liveTrading: boolean; graphExecutionEnabled: boolean;
+      positionMonitoringEnabled: boolean; tab: string; summary: string;
+    };
   }>(BACKEND_PATHS.monitoring, { intervalMs: 10_000 });
   const exchange = useBackend<Record<string, unknown>>(BACKEND_PATHS.exchangeStatus, { intervalMs: 30_000 });
   const graphs = useBackend<{ graphs: { name: string; available: boolean }[] }>(BACKEND_PATHS.graphs, { intervalMs: 60_000 });
@@ -61,6 +72,84 @@ export default function SystemPage() {
           mono={false}
         />
       </div>
+
+      {monitoring.data?.autonomy ? (
+        <Card>
+          <SectionTitle>Autonomy</SectionTitle>
+          {/* The three gates together, because they answer one question between
+              them and mean nothing apart: a reader seeing only LIVE_TRADING=false
+              may conclude nothing is happening, when the agent may be trading
+              paper on its own and monitoring positions. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+            <StatCard
+              label="Mode"
+              value={<Badge
+                state={monitoring.data.autonomy.liveTrading ? 'FAILED' : 'HEALTHY'}
+                label={monitoring.data.autonomy.liveTrading ? 'LIVE — REAL FUNDS' : 'Paper'}
+              />}
+              mono={false}
+            />
+            <StatCard
+              label="Can open positions"
+              value={<Badge state={monitoring.data.autonomy.graphExecutionEnabled ? 'RUNNING' : 'IDLE'}
+                             label={monitoring.data.autonomy.graphExecutionEnabled ? 'Yes' : 'No'} />}
+              mono={false}
+            />
+            <StatCard
+              label="Position monitoring"
+              value={<Badge state={monitoring.data.autonomy.positionMonitoringEnabled ? 'RUNNING' : 'IDLE'}
+                             label={monitoring.data.autonomy.positionMonitoringEnabled ? 'On' : 'Off'} />}
+              sub="stop-loss enforcement always runs"
+              mono={false}
+            />
+            <StatCard label="Book" value={monitoring.data.autonomy.tab} />
+          </div>
+          <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            {monitoring.data.autonomy.summary}
+          </p>
+        </Card>
+      ) : null}
+
+      {monitoring.data?.llm || monitoring.data?.reasoning ? (
+        <Card>
+          <SectionTitle>Reasoning layer</SectionTitle>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+            <StatCard
+              label="LLM provider"
+              value={<Badge
+                state={monitoring.data.llm?.available ? 'HEALTHY' : 'IDLE'}
+                label={monitoring.data.llm?.available ? monitoring.data.llm.provider : 'none'}
+              />}
+              mono={false}
+            />
+            <StatCard
+              label="Second-opinion panel"
+              value={<Badge
+                state={monitoring.data.consultationPanel?.isPanel ? 'HEALTHY' : 'IDLE'}
+                label={monitoring.data.consultationPanel?.providers.length
+                  ? monitoring.data.consultationPanel.providers.join(' + ')
+                  : 'none'}
+              />}
+              mono={false}
+            />
+            <StatCard
+              label="Deterministic nodes"
+              value={<Num value={monitoring.data.reasoning?.deterministicNodes ?? null} digits={0} />}
+              sub="cannot call a model"
+            />
+            <StatCard
+              label="LLM nodes"
+              value={<Num value={monitoring.data.reasoning?.llmNodes ?? null} digits={0} />}
+              sub="explain only, never decide"
+            />
+          </div>
+          {/* Stated plainly so "no LLM" is not read as an outage: the agent
+              trades on its deterministic nodes either way. */}
+          <p className="text-[11.5px]" style={{ color: 'var(--text-muted)' }}>
+            {monitoring.data.reasoning?.note ?? monitoring.data.llm?.note}
+          </p>
+        </Card>
+      ) : null}
 
       <Card>
         <SectionTitle>Checks</SectionTitle>

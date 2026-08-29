@@ -393,7 +393,15 @@ def test_a_component_actually_fetches_the_declared_paths():
 
     assert "@/lib/backendConfig" in panel, "the panel must not hardcode a host"
     assert "BACKEND_PATHS.polymarket" in panel
-    assert "backendUrl(" in panel
+    # `backendProxyPath`, not the old `backendUrl`. The browser cannot reach the
+    # FastAPI host directly on an https deployment (mixed content), so every
+    # component call now goes through the same-origin proxy route. See
+    # docs/DEPLOYMENT_NETWORKING.md.
+    assert "backendProxyPath(" in panel
+    assert "backendUrl(" not in panel, (
+        "backendUrl() builds an absolute http:// URL — from a component that is a "
+        "mixed-content request the browser discards silently"
+    )
 
     # No hardcoded host — the class of bug backendConfig was created to remove.
     #

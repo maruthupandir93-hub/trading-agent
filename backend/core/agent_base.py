@@ -183,6 +183,36 @@ class BaseAgent(ABC):
             self.bus.subscribe(event_type, self.handle_event)
             logger.info(f"{self.name} subscribed to {event_type}")
 
+    def detach(self) -> None:
+        """Unsubscribe this agent from its bus. The inverse of `_setup_subscriptions`.
+
+        WHY THIS HAD TO EXIST
+        ---------------------
+        `__init__` subscribes the agent to every event in `events_consumed`, and
+        until now nothing ever undid that. Dropping the last reference to an agent
+        does NOT unsubscribe it: the bus holds `self.handle_event`, a bound method
+        that keeps the agent alive and keeps delivering to it.
+
+        `MessageBus.subscribe` is idempotent per CALLABLE, and a new instance has a
+        new bound method, so instances accumulate rather than replace. That turned
+        the singleton reset helpers into a leak: every test that built an agent
+        left another live subscriber on the global bus, and by a third of the way
+        through the suite a single publish was fanning out to hundreds of dead
+        agents. The visible symptom was not an error — it was the test run
+        appearing to hang, with no failure and no output.
+
+        Called by `reset_position_monitor()` / `reset_execution_agent()`, which is
+        where the leak was.
+        """
+        for event_type in self.events_consumed:
+            try:
+                self.bus.unsubscribe(event_type, self.handle_event)
+            except Exception:  # noqa: BLE001
+                # Never raise out of teardown. A bus that cannot unsubscribe is a
+                # worse problem than a leaked subscription, but failing here would
+                # mask whatever the caller was actually doing.
+                logger.debug("Could not unsubscribe %s from %s", self.name, event_type)
+
     def rebind_bus(self, bus: Any) -> Any:
         """Point this agent at a different message bus. Returns the previous one.
 

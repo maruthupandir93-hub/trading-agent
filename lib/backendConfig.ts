@@ -1,61 +1,64 @@
-﻿// ---------------------------------------------------------------------
-// Where the FastAPI backend lives, and which paths it actually serves.
+// ---------------------------------------------------------------------
+// How the browser reaches the FastAPI backend: THROUGH THIS APP, never directly.
 //
-// WHY THIS FILE EXISTS
+// THE RULE, AND WHY IT IS ABSOLUTE
 //
-// Six components had `http://localhost:8000` (or `http://127.0.0.1:8000`)
-// hardcoded, with two different spellings of localhost between them. That
-// breaks in any deployment that isn't the developer's own machine, and it made
-// the next problem invisible: several of those URLs pointed at paths the
-// FastAPI backend does not serve.
+// The frontend is served from Vercel over https. The backend has no TLS
+// certificate, so it speaks plain http. A browser on an https page REFUSES to
+// issue http:// requests from it — mixed content. That is a browser policy: no
+// CORS header, no backend setting and no fetch option can permit it.
 //
-// The mismatches, all of which returned 404:
+// So a browser fetch to the backend's own origin cannot succeed on the real
+// deployment, and it fails in the worst way — the request never leaves the page,
+// so the UI sees a network error indistinguishable from "the server is down".
+// That is exactly what happened: eighteen pages using `useBackend`, the
+// pause/resume button, the Polymarket panel and the EMERGENCY STOP all silently
+// did nothing while the backend was running perfectly.
 //
-//   frontend called                      FastAPI actually serves
-//   ---------------------------------    -----------------------------------
-//   /api/health                          /api/monitoring
-//   /api/trades                          /api/execution
-//   /api/ws/agent-events   (WebSocket)   /api/dashboard/agent-events
-//
-// The first two are subtle rather than obvious typos: `/api/health` and
-// `/api/trades` are real routes â€” of the NEXT.JS app, at its own origin. So the
-// components were using Next route names against the FastAPI host. Both servers
-// existed, both had a route by that name in one of them, and the request 404'd.
+// Everything therefore goes to `/api/backend/<path>` on THIS origin, which
+// `app/api/backend/[...path]/route.ts` forwards server-to-server. Mixed-content
+// rules govern browsers, not servers, so that second hop is unrestricted — and
+// it is why the backend needs no certificate for any of this to work.
 //
 // WHICH SERVER OWNS WHAT
 //
 // Next.js route handlers under `app/api/` read the JSON stores in `.data/` and
-// work with no external dependency. The FastAPI equivalents read Postgres.
-// Since Postgres is not required to run this app, anything the Next.js layer
-// already serves is fetched from the SAME ORIGIN with a relative URL â€” no host,
-// no CORS, no config. Only capabilities that exist *solely* in FastAPI (today:
-// the agent-event WebSocket) go to BACKEND_BASE.
+// work with no external dependency. The FastAPI equivalents read Postgres and
+// run the agent. Anything the Next.js layer already serves is fetched from the
+// same origin with a plain relative URL. Anything that exists ONLY in FastAPI
+// goes through the proxy path below.
+//
+// This distinction has bitten before, so it is worth restating: `/api/health`
+// and `/api/trades` are real routes of BOTH servers, and they are different
+// routes. Using a Next path against the FastAPI host returns a 404 that reads as
+// missing data rather than as a wrong address.
 // ---------------------------------------------------------------------
 
-/** FastAPI origin. Override with NEXT_PUBLIC_BACKEND_URL at build time. */
+/**
+ * FastAPI origin — SERVER-SIDE USE ONLY.
+ *
+ * Kept for the proxy route and for `lib/api/backendProxy.server.ts`, which run
+ * on Vercel's servers where http is fine. DO NOT call this from a component or
+ * a hook: the resulting request is mixed content and will be blocked. Use
+ * `backendProxyPath()` instead.
+ */
 export const BACKEND_BASE =
-  process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, '') || 'http://localhost:8000';
+  process.env.BACKEND_INTERNAL_URL?.replace(/\/$/, '') ||
+  process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, '') ||
+  'http://localhost:8000';
 
 /**
- * WebSocket URL for the agent-event stream.
+ * The same-origin path the BROWSER should fetch for a given backend path.
  *
- * Derived from BACKEND_BASE rather than written out separately, so the host can
- * never drift between the HTTP and WS config â€” and http/https is mapped to
- * ws/wss so an https deployment doesn't try to open an insecure socket, which
- * browsers block outright.
+ *   backendProxyPath('/api/admin/pause')  ->  '/api/backend/admin/pause'
+ *
+ * The `/api` prefix is stripped because the proxy route re-adds it — its own
+ * path already contains one, and `/api/backend/api/admin/pause` would forward to
+ * `/api/api/admin/pause`.
  */
-export function agentEventsWsUrl(): string {
-  const base = BACKEND_BASE.replace(/^http/, 'ws');
-  // The real path. It is `/api/dashboard/agent-events` because the WebSocket is
-  // declared in `backend/api/dashboard.py` and that router is mounted at
-  // `/api/dashboard`. It was previously written as `/api/ws/agent-events`,
-  // which nothing serves.
-  let url = `${base}/api/dashboard/agent-events`;
-  const key = process.env.NEXT_PUBLIC_TRADES_API_KEY;
-  if (key) {
-    url += `?api_key=${encodeURIComponent(key)}`;
-  }
-  return url;
+export function backendProxyPath(path: string): string {
+  const withoutApi = path.replace(/^\/api\//, '/');
+  return `/api/backend${withoutApi.startsWith('/') ? withoutApi : `/${withoutApi}`}`;
 }
 
 /** Paths on the FastAPI backend, so a rename is a one-line change here. */
@@ -128,28 +131,49 @@ export const BACKEND_PATHS = {
 } as const;
 
 /**
- * WebSocket URL for live node-by-node graph progress (spec Section 39.5).
+ * The same-origin path for the agent-event stream.
  *
- * Derived from BACKEND_BASE for the same reason `agentEventsWsUrl` is: the host
- * cannot drift between HTTP and WS, and http/https maps to ws/wss so an https
- * deployment does not open an insecure socket that browsers block outright.
+ * THIS USED TO BE `agentEventsWsUrl()`, RETURNING A `ws://` URL, AND IT COULD
+ * NEVER CONNECT ON THE DEPLOYED SITE — an https page may not open a `ws://`
+ * socket, and a WebSocket cannot be proxied through a Vercel serverless
+ * function either. The agent terminal, the debate visualizer and the trade
+ * history table sat permanently empty with no error shown.
  *
- * Send `{ symbol }` after opening. Each message is one NODE, carrying counts
- * rather than the state itself â€” the state holds candles, seven specialist
- * findings and a portfolio snapshot, and streaming it per node would push
- * megabytes over the socket for a 20-node run.
+ * `lib/agentEventStream.ts` now polls this route, which reads the backend's
+ * cursor-based event buffer. The backend's WebSocket still exists and still
+ * works for any client that can reach the host directly — it is the transport
+ * to return to once the backend has a TLS hostname, and nothing but that is
+ * stopping it.
  */
-export function graphStreamWsUrl(): string {
-  const base = BACKEND_BASE.replace(/^http/, 'ws');
-  let url = `${base}/api/graphs/stream`;
-  const key = process.env.NEXT_PUBLIC_TRADES_API_KEY;
-  if (key) {
-    url += `?api_key=${encodeURIComponent(key)}`;
-  }
-  return url;
+export const AGENT_EVENTS_PATH = '/api/agent-events';
+
+/**
+ * Live node-by-node graph progress (spec Section 39.5).
+ *
+ * The backend serves this as a WebSocket at `/api/graphs/stream`, which the
+ * browser cannot open for the reason above. Exposed as a proxied HTTP path so a
+ * consumer polls it instead of opening a socket that will be blocked.
+ *
+ * Each message is one NODE, carrying counts rather than the state itself — the
+ * state holds candles, seven specialist findings and a portfolio snapshot, and
+ * shipping it per node would push megabytes for a 20-node run.
+ */
+export function graphStreamPath(symbol: string): string {
+  return `${backendProxyPath('/api/graphs/stream')}?symbol=${encodeURIComponent(symbol)}`;
 }
 
-export function backendUrl(path: string): string {
+/**
+ * Absolute backend URL — SERVER-SIDE ONLY.
+ *
+ * Renamed from the old `backendUrl()` so that a browser-side call site is a
+ * COMPILE ERROR rather than a request that is silently blocked at runtime. Every
+ * former caller was in a component or a hook, and every one of them was broken
+ * on the deployed site; they now use `backendProxyPath()`.
+ *
+ * If you are writing a component and reach for this, you want
+ * `backendProxyPath()`.
+ */
+export function serverOnlyBackendUrl(path: string): string {
   return `${BACKEND_BASE}${path}`;
 }
 

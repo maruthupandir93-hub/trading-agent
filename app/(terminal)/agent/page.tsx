@@ -33,7 +33,8 @@ import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/co
 import { BACKEND_PATHS } from '@/lib/backendConfig';
 import type { GraphRun, GraphSummary, NodeContract } from '@/lib/api/graphs';
 import { runNodeStatuses } from '@/lib/api/graphs';
-import { useBackend, useCurrentNode, useGraphNodes } from '@/lib/realtime/useRealtime';
+import { useBackend } from '@/lib/realtime/useRealtime';
+import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
 import { mergeNodeStates } from '@/lib/viz/flow';
 
 // Code-split. The operator panels sit below this page's real-data content, so
@@ -92,8 +93,11 @@ export default function AgentBrainPage() {
     { intervalMs: 15_000 },
   );
 
-  const liveNodes = useGraphNodes();
-  const currentNode = useCurrentNode();
+  // Live where the stream has spoken, seeded from the last completed run
+  // otherwise. This page previously defaulted to the live stream alone, which is
+  // empty on a fresh load, so "Agent Brain" opened on twenty-three IDLE boxes and
+  // told the operator to go and select a run to see anything at all.
+  const pipeline = usePipeline();
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [inspectSymbol, setInspectSymbol] = useState<string | null>(null);
@@ -112,12 +116,12 @@ export default function AgentBrainPage() {
   // Live stream by default; a selected historical run replaces it. Showing a past
   // run's nodes with the live edge animation would imply it is still executing.
   const flowNodes = useMemo(() => {
-    const statuses = selectedRun ? runNodeStatuses(selectedRun) : liveNodes;
+    const statuses = selectedRun ? runNodeStatuses(selectedRun) : pipeline.nodes;
     return mergeNodeStates(
       graph2Contracts.map((c) => ({ name: c.name, mayCallLlm: c.mayCallLlm })),
       statuses,
     );
-  }, [graph2Contracts, liveNodes, selectedRun]);
+  }, [graph2Contracts, pipeline.nodes, selectedRun]);
 
   const llmNodes = nodesApi.data?.llmNodes ?? [];
   const deterministicCount = contracts.filter((c) => c.deterministic).length;
@@ -198,11 +202,21 @@ export default function AgentBrainPage() {
         >
           Trade Decision pipeline — Graph 2
         </SectionTitle>
-        <FlowDiagram nodes={flowNodes} currentNode={selectedRun ? null : currentNode} />
+        {/* Where this picture came from. A selected historical run is labelled as
+            one; otherwise `pipelineSourceLabel` distinguishes live from seeded. */}
+        <div
+          className="text-[11px] mb-2 leading-relaxed"
+          style={{ color: pipeline.isRunning && !selectedRun ? 'var(--accent)' : 'var(--text-muted)' }}
+        >
+          {selectedRun
+            ? `Showing a selected past run (${selectedRun.symbol ?? 'unknown symbol'}). Not live.`
+            : pipelineSourceLabel(pipeline)}
+        </div>
+        <FlowDiagram nodes={flowNodes} currentNode={selectedRun ? null : pipeline.currentNode} />
         {flowNodes.length > 0 && flowNodes.every((n) => n.status === 'IDLE') && !selectedRun ? (
           <div className="text-[11px] mt-2" style={{ color: 'var(--text-muted)' }}>
-            Every node is idle — no run is in progress. Select a run below to see how a past
-            cycle executed.
+            Every node is idle and no run has been recorded in this backend process yet.
+            Trigger one from the dashboard, or select a run below once some exist.
           </div>
         ) : null}
       </Card>

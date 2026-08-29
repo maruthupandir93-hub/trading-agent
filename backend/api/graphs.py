@@ -159,18 +159,44 @@ async def list_nodes() -> Dict[str, Any]:
 
 
 @router.get("/runs")
-async def list_runs(limit: int = Query(50, ge=1, le=200)) -> Dict[str, Any]:
+async def list_runs(
+    limit: int = Query(50, ge=1, le=200),
+    graph: Optional[str] = Query(
+        None,
+        description="Only runs of this graph, e.g. 'trade_analysis'. Omit for all.",
+    ),
+) -> Dict[str, Any]:
     """Recent graph runs from the trace store (spec Section 39.7).
 
     Tracing is observability, not recovery — 39.7 is explicit about that, and the
     durable state lives in the checkpointer instead.
+
+    WHY `graph` EXISTS
+    ------------------
+    The monitoring graph runs once per tick per open position, so it OUTNUMBERS
+    every other graph by orders of magnitude. A caller asking for "the last run"
+    to seed a Trade Decision pipeline view got a `position_monitoring` trace every
+    single time — twelve nodes with names that do not appear in Graph 2 at all, so
+    the view stayed empty and looked exactly like a system that had never run.
+
+    Filtering server-side rather than over-fetching and filtering in the browser:
+    the caller would otherwise have to guess how many runs to request to be sure
+    of finding one, and the honest answer is that there is no such number.
     """
     from backend.graphs.tracing import list_recent_runs
 
-    runs = list_recent_runs(limit=limit)
+    # Over-fetch before filtering so `limit` means "give me this many of the graph
+    # I asked for", not "look at this many and keep whatever matches".
+    if graph:
+        pool = list_recent_runs(limit=200)
+        runs = [r for r in pool if r.get("graph") == graph][:limit]
+    else:
+        runs = list_recent_runs(limit=limit)
+
     return {
         "runs": runs,
         "count": len(runs),
+        "graphFilter": graph,
         "tracingMeaning": (
             "spec Section 39.7: tracing tells you what a run DID — every node, every "
             "unavailable input, every error. It is not a substitute for the "

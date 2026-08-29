@@ -84,9 +84,50 @@ async def init_db() -> asyncpg.Pool:
 
         return _db_pool
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        # Not throwing an exception to allow the app to boot even if DB is down (graceful degradation)
-        # But we log it as an error.
+        # NAMES THE FIX, NOT JUST THE FAULT.
+        #
+        # This used to log `Failed to initialize database: password authentication
+        # failed for user "postgres"` and nothing else. That one line is the root
+        # cause of a whole page of symptoms that look unrelated to a database:
+        #
+        #   * /decisions is empty            nothing writes to `decisions`
+        #   * /history and the timeline are empty   nothing writes to `trades`
+        #   * /learning is empty             nothing writes to `reflections`
+        #   * open positions vanish on restart      the watch list cannot reload
+        #   * the paper book resets to its starting cash every boot
+        #   * every graph run reports "risk_events could not be read"
+        #
+        # An operator seeing those six things does not think "database"; they
+        # think the agent is broken. So the log line has to carry the connection
+        # it tried, the fix, and the blast radius.
+        #
+        # STILL NON-FATAL, DELIBERATELY. Refusing to boot over a database problem
+        # would take down the process that enforces stop-losses on open positions,
+        # which is a strictly worse outcome than running without persistence. The
+        # degradation is loud instead.
+        from urllib.parse import urlsplit
+
+        try:
+            parts = urlsplit(settings.DATABASE_URL)
+            where = f"{parts.hostname}:{parts.port or 5432}{parts.path or ''} as user {parts.username!r}"
+        except Exception:  # noqa: BLE001
+            where = "the configured DATABASE_URL"
+
+        logger.error(
+            "DATABASE UNAVAILABLE — could not connect to %s: %s\n"
+            "  Fix: set DATABASE_URL in .env to a reachable Postgres, e.g.\n"
+            "       DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/tradingos\n"
+            "  The database and its 31 tables are created automatically on the next\n"
+            "  start once the credentials are right (schema.sql is idempotent).\n"
+            "  Until then this process runs WITHOUT PERSISTENCE, which means:\n"
+            "    - decisions, trades and reflections are not recorded, so the\n"
+            "      Decisions, History and Learning pages stay empty\n"
+            "    - the monitored-position watch list cannot be restored, so a\n"
+            "      restart while holding a position leaves nothing enforcing its stop\n"
+            "    - the paper book resets to its starting cash on every boot\n"
+            "  Reasoning, market data and live trading gates are unaffected.",
+            where, e,
+        )
         return None
 
 def get_db_pool() -> asyncpg.Pool:

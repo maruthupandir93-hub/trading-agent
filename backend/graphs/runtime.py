@@ -187,6 +187,42 @@ class RunContext:
     trace: RunTrace
 
 
+async def _emit_node_event(event: Any) -> None:
+    """Publish one GRAPH_NODE_* event. NEVER raises, never blocks the node.
+
+    WHY THIS SWALLOWS EVERYTHING
+    ----------------------------
+    This is observability on the critical path of every node of every graph. A
+    bus subscriber that throws, or a message bus that is not initialised in a
+    unit test, must not be able to fail a reasoning run — a dashboard that goes
+    dark is a nuisance, a decision that does not happen is a fault.
+
+    So the failure is logged at DEBUG, not WARNING. A test that builds a graph
+    without a bus is the normal case, and a warning per node across a 21-node run
+    would train everyone to ignore the log.
+    """
+    try:
+        from backend.core.message_bus import get_message_bus
+
+        await get_message_bus().publish(event.event_type, event)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not publish %s: %s", getattr(event, "event_type", "?"), exc)
+
+
+def _symbol_of(state: Any) -> Optional[str]:
+    """`state['symbol']`, defensively.
+
+    A node may be handed a plain dict in a test, and `.get` on a non-mapping
+    would raise inside the observability path — which is the one place that must
+    not be able to break a run.
+    """
+    try:
+        value = state.get("symbol")
+    except Exception:  # noqa: BLE001
+        return None
+    return value if isinstance(value, str) else None
+
+
 def wrap_node(
     contract: NodeContract,
     fn: Callable[[TradingState], Any],
@@ -209,6 +245,21 @@ def wrap_node(
         started = time.monotonic()
         node_trace = NodeTrace(node=contract.name, started_at=time.time(), duration_ms=0.0)
 
+        # Section 39.5 — live node transitions on the bus. Emitted HERE rather
+        # than in each node so a node added tomorrow is observable without anyone
+        # remembering to instrument it, and so the started/completed pair cannot
+        # drift apart.
+        from backend.models.events import (
+            GraphNodeCompletedEvent,
+            GraphNodeFailedEvent,
+            GraphNodeStartedEvent,
+        )
+
+        symbol = _symbol_of(state)
+        await _emit_node_event(GraphNodeStartedEvent(
+            node=contract.name, graph=ctx.graph, run_id=ctx.run_id, symbol=symbol,
+        ))
+
         try:
             result = fn(state)
             # Support both sync and async node functions. Nodes wrapping existing
@@ -224,6 +275,16 @@ def wrap_node(
             node_trace.duration_ms = (time.monotonic() - started) * 1000.0
             ctx.trace.nodes.append(node_trace)
 
+            # `detail` is the KEYS this node wrote, never their values. The state
+            # holds candles and a portfolio snapshot; shipping those once per node
+            # would push megabytes through the event buffer for one run.
+            await _emit_node_event(GraphNodeCompletedEvent(
+                node=contract.name, graph=ctx.graph, run_id=ctx.run_id, symbol=symbol,
+                duration_ms=node_trace.duration_ms,
+                detail=(", ".join(node_trace.wrote) or "no state written"),
+                unavailable_count=len(delta.get("unavailable") or []),
+            ))
+
             # Appended by the runtime, not the node: a node should not have to
             # remember to record that it ran, and one that crashed still needs
             # to appear in the visited list.
@@ -233,10 +294,19 @@ def wrap_node(
 
             return delta
 
-        except NodeContractViolation:
+        except NodeContractViolation as violation:
             node_trace.duration_ms = (time.monotonic() - started) * 1000.0
             node_trace.error = "contract violation"
             ctx.trace.nodes.append(node_trace)
+            # Emitted BEFORE the re-raise. A contract violation aborts the run, so
+            # this is the last thing a watcher will hear about this pipeline — if
+            # it were emitted after, it would never be emitted at all and the view
+            # would show the node stuck on RUNNING forever.
+            await _emit_node_event(GraphNodeFailedEvent(
+                node=contract.name, graph=ctx.graph, run_id=ctx.run_id, symbol=symbol,
+                duration_ms=node_trace.duration_ms,
+                detail=f"contract violation: {violation}",
+            ))
             # Re-raised deliberately — see the docstring.
             raise
 
@@ -250,6 +320,10 @@ def wrap_node(
                 "Graph node '%s' failed in run %s: %s. The run continues degraded.",
                 contract.name, ctx.run_id, e,
             )
+            await _emit_node_event(GraphNodeFailedEvent(
+                node=contract.name, graph=ctx.graph, run_id=ctx.run_id, symbol=symbol,
+                duration_ms=node_trace.duration_ms, detail=str(e),
+            ))
             # Degrade, don't abort.
             return {
                 "errors": [NodeError(node=contract.name, error=str(e))],

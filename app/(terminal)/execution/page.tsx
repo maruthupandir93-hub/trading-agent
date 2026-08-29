@@ -20,7 +20,8 @@ import { Badge } from '@/components/ui/Badge';
 import { ExecCycleStepper } from '@/components/viz/ExecCycleStepper';
 import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/components/ui/primitives';
 import { BACKEND_PATHS } from '@/lib/backendConfig';
-import { useBackend, useCurrentNode, useEventFeed } from '@/lib/realtime/useRealtime';
+import { useBackend, useEventFeed } from '@/lib/realtime/useRealtime';
+import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
 import { stageForNode } from '@/lib/viz/flow';
 
 // Code-split. The operator panels sit below this page's real-data content, so
@@ -57,7 +58,18 @@ export default function ExecutionPage() {
     BACKEND_PATHS.exchangeStatus,
     { intervalMs: 30_000 },
   );
-  const currentNode = useCurrentNode();
+  // Same seeding as every other pipeline view. Reading `useCurrentNode()` alone
+  // left this stepper on its first stage forever between cycles, because a
+  // freshly loaded page gets no event backlog.
+  const pipeline = usePipeline();
+
+  // Live node while a cycle runs; the last node the previous cycle reached
+  // otherwise — "where did it get to" rather than "nothing is happening".
+  const lastNodeReached =
+    pipeline.currentNode ??
+    (pipeline.lastRun?.nodes?.length
+      ? pipeline.lastRun.nodes[pipeline.lastRun.nodes.length - 1].node
+      : null);
   const execEvents = useEventFeed({
     types: ['EXECUTION_PLAN_READY', 'TAR_SUBMITTED', 'TAR_APPROVED', 'TAR_REJECTED', 'ORDER_FILLED'],
     limit: 25,
@@ -79,7 +91,13 @@ export default function ExecutionPage() {
       <Card>
         <SectionTitle>Pipeline</SectionTitle>
         <div className="overflow-x-auto">
-          <ExecCycleStepper activeKey={stageForNode(currentNode)} />
+          <ExecCycleStepper activeKey={stageForNode(lastNodeReached)} />
+          <div
+            className="text-[11px] mt-2 leading-relaxed"
+            style={{ color: pipeline.isRunning ? 'var(--accent)' : 'var(--text-muted)' }}
+          >
+            {pipelineSourceLabel(pipeline)}
+          </div>
         </div>
       </Card>
 

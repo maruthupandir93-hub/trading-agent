@@ -132,8 +132,45 @@ class MarketSnapshot:
     fetched_at: Optional[float] = None
     source: Optional[str] = None  # "websocket" | "polled-http-cache"
 
+    # -- Level-2 depth and the trade tape -----------------------------------
+    #
+    # Added so the Orderflow and Liquidity specialists can stop reporting
+    # themselves feed-blocked. They live HERE, on the write-once snapshot, rather
+    # than being fetched inside the specialist nodes, for the reason the class
+    # docstring already gives: Section 39.4 makes a node that fetches its own data
+    # non-replayable, so a resumed checkpoint would reason over a different book
+    # than the original run did and produce a different decision from the same
+    # state.
+    #
+    # Empty list means NOT FETCHED OR FETCH FAILED, and `feed_problems` says
+    # which. It never means "the book was empty" — an empty book is not a thing a
+    # live venue returns, and a specialist must not read absence as balance.
+    order_book_bids: List[Dict[str, float]] = field(default_factory=list)
+    order_book_asks: List[Dict[str, float]] = field(default_factory=list)
+    trade_tape: List[Dict[str, Any]] = field(default_factory=list)
+
+    # -- Headlines ----------------------------------------------------------
+    #
+    # For the News specialist, same reasoning. Cached upstream with a 120s TTL
+    # (`services/microstructure_feed`), so this is cheap per run.
+    headlines: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Why any of the above is missing, phrased for a specialist to quote. Kept
+    # separate from the run-level `unavailable` list because a specialist needs
+    # the reason for ITS OWN feed, not the union of every problem in the run.
+    feed_problems: Dict[str, str] = field(default_factory=dict)
+
     def candle_count(self, timeframe: str = "15m") -> int:
         return len(self.candles.get(timeframe, []))
+
+    def has_book(self) -> bool:
+        return bool(self.order_book_bids) and bool(self.order_book_asks)
+
+    def has_tape(self) -> bool:
+        return bool(self.trade_tape)
+
+    def has_headlines(self) -> bool:
+        return bool(self.headlines)
 
 
 @dataclass
@@ -521,13 +558,59 @@ class ExecutionResult:
 
 @dataclass
 class TradeReflection:
+    """The DETERMINISTIC half of a post-trade reflection (Phase 33).
+
+    Every field here is computed or measured. The written lesson lives in
+    `LessonDraft` under a separate state key — see `TradingState.reflection_lesson`
+    for why that split is load-bearing rather than tidy.
+    """
+
     trade_id: Optional[str] = None
     realized_pnl: Optional[float] = None
     prediction_correct: Optional[bool] = None
     entry_quality: Optional[str] = None
+    # 'Good' | 'Fair' | 'Poor' | 'unavailable'. NEVER defaults to a grade:
+    # 'unavailable' is not 'Poor'. A fill with no reference price is not a bad
+    # fill, and this field once read "Good" unconditionally for every trade in
+    # the system's history.
     execution_quality: Optional[str] = None
+    execution_quality_detail: Optional[str] = None
+    # 'Success' | 'Failure', from realized P&L.
+    outcome: Optional[str] = None
+    # Deterministic, reproducible attribution — what the rules say went wrong.
+    # Kept alongside the model's lesson so a reviewer can see whether the model
+    # added insight or restated the rule.
+    attribution: List[str] = field(default_factory=list)
     lesson: Optional[str] = None
     confidence_calibration_delta: Optional[float] = None
+
+
+@dataclass
+class LessonDraft:
+    """The one thing a model may write during reflection: the lesson text.
+
+    Split out of `TradeReflection` for exactly the reason `thesis_narrative` is
+    split out of `trade_thesis`: a node writing `TradeReflection` writes the WHOLE
+    object, including `realized_pnl` and `confidence_calibration_delta`. That
+    delta feeds confidence calibration, which feeds POSITION SIZING — so a model
+    able to write the reflection object would be able to change how much capital
+    the system risks, through a field it was only asked to add prose to.
+
+    `NodeContract` enforces permissions at the granularity of the state key, so
+    splitting the field is what makes "a model may write the lesson; it may not
+    touch the numbers" enforceable rather than merely intended.
+
+    `source` and `detail` are set by OUR code from the call's outcome, not by the
+    model, so a rules-written lesson can never present itself as reasoned.
+    """
+
+    text: Optional[str] = None
+    # 'model' | 'rules'
+    source: str = "rules"
+    # Why that source: the model and token count, or why the model was not used.
+    detail: Optional[str] = None
+    # The deterministic lesson, always present even when a model wrote `text`.
+    rule_based: Optional[str] = None
 
 
 @dataclass
@@ -726,6 +809,30 @@ class TradingState(TypedDict, total=False):
     confidence: Optional[float]
     decision: Optional[TradeDecision]
 
+    # --- External consultation (spec Section 31 / Phase 48) -----------
+    #
+    # ADDED DELIBERATELY. `services/ai_consultation.py` documented that it was
+    # imported by nothing in `graphs/` precisely so that wiring it in would have
+    # to be an explicit, reviewable change rather than something that crept in —
+    # this is that change.
+    #
+    # A PLAIN DICT, holding `ConsultationResult.aggregate()`. Not the dataclass,
+    # and that is not laziness: `aggregate()` is the shape that deliberately
+    # contains nothing a gate can read — no `approved`, no `size`, no aggregate
+    # confidence — and it carries its own `authorityMeaning` string explaining
+    # that. Storing the richer object would put fields in state that a future node
+    # could reach for.
+    #
+    # NOTHING READS THIS. The Risk Gateway, the Supervisor's action branches and
+    # position sizing all ignore it, and the node that writes it runs AFTER both
+    # the decision and the gateway — so it is structurally incapable of
+    # influencing either, not merely forbidden from doing so. Spec Section 31:
+    # "the external AI response is advisory evidence, not authority."
+    #
+    # If a future change makes any gate read this field, that is the change that
+    # turns advice into authority, and it should be obvious in review.
+    consultation: Optional[Dict[str, Any]]
+
     # --- Portfolio ---------------------------------------------------
     portfolio_state: Optional[PortfolioStateSnapshot]
 
@@ -737,7 +844,16 @@ class TradingState(TypedDict, total=False):
     execution_result: Optional[ExecutionResult]
 
     # --- Reflection --------------------------------------------------
+    # --- Reflection (Phase 33) ---------------------------------------
+    #
+    # The CLOSED TRADE this run is reflecting on. Injected by the runner rather
+    # than loaded by a node, so the graph has one source of truth for which trade
+    # it is reflecting on and cannot pick a different one mid-run — the same
+    # reasoning as `monitored_position` in the monitoring graph.
+    closed_trade: Optional[Dict[str, Any]]
     reflection: Optional[TradeReflection]
+    # The ONLY field the reflection LLM node may write. See `LessonDraft`.
+    reflection_lesson: Optional[LessonDraft]
 
     # --- Memory ------------------------------------------------------
     memory_context: Optional[MemoryContext]
@@ -792,11 +908,14 @@ def new_state(
         thesis_narrative=None,
         confidence=None,
         decision=None,
+        consultation=None,
         portfolio_state=None,
         risk_assessment=None,
         execution_plan=None,
         execution_result=None,
+        closed_trade=None,
         reflection=None,
+        reflection_lesson=None,
         memory_context=None,
         approval_status=ApprovalStatus(),
         errors=[],
@@ -834,6 +953,15 @@ DETERMINISTIC_ONLY_FIELDS: frozenset = frozenset({
     # decision for no gain — and, unlike a model, the weighting is reproducible,
     # which is what makes a past decision auditable and backtestable.
     "debate_verdict",
+    # Phase 33. `TradeReflection` holds the measured execution grade, the outcome
+    # classification and `confidence_calibration_delta` — which feeds confidence
+    # calibration and therefore POSITION SIZING. A model writes `reflection_lesson`
+    # instead, exactly as it writes `thesis_narrative` rather than `trade_thesis`.
+    "reflection",
+    # The closed trade's receipt is the ground truth the whole reflection is
+    # about. A model able to rewrite it could change the P&L it was asked to
+    # explain.
+    "closed_trade",
     # A specialist's finding IS its evidence. Letting a model write this key
     # would let it invent an order-book imbalance for a feed that is not
     # subscribed — invariant 6, in the one place it would be least visible.

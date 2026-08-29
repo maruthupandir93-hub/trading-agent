@@ -27,12 +27,11 @@ import { equity, type PortfolioResponse, realised, type Trade } from '@/lib/api/
 import { useSameOrigin } from '@/lib/api/useSameOrigin';
 import {
   useBackend,
-  useCurrentNode,
   useEventFeed,
-  useGraphNodes,
   useLivePrices,
   useRealtimeConnected,
 } from '@/lib/realtime/useRealtime';
+import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
 import { mergeNodeStates } from '@/lib/viz/flow';
 
 const GRAPH2_FLOW = [
@@ -64,10 +63,14 @@ export default function DashboardPage() {
   const trades = useSameOrigin<{ trades?: Trade[] }>('/api/trades', { intervalMs: 30_000 });
 
   const livePrices = useLivePrices();
-  const liveNodes = useGraphNodes();
-  const currentNode = useCurrentNode();
   const connected = useRealtimeConnected();
   const events = useEventFeed({ limit: 12 });
+
+  // Seeded from the last completed run when nothing is streaming, so opening
+  // this page between cycles shows what the agent actually just did instead of
+  // twenty-three IDLE boxes. See `usePipeline` for why the stream alone cannot
+  // answer that.
+  const pipeline = usePipeline();
 
   const [inspect, setInspect] = useState<string | null>(null);
 
@@ -91,9 +94,9 @@ export default function DashboardPage() {
           name: n,
           mayCallLlm: nodesApi.data?.nodes.find((c) => c.name === n)?.mayCallLlm,
         })),
-        liveNodes,
+        pipeline.nodes,
       ),
-    [liveNodes, nodesApi.data],
+    [pipeline.nodes, nodesApi.data],
   );
 
   const marketRows: MarketCardData[] = useMemo(
@@ -204,7 +207,10 @@ export default function DashboardPage() {
         <SectionTitle
           action={
             <div className="flex items-center gap-2">
-              <Badge state={connected ? 'HEALTHY' : 'DOWN'} label={connected ? 'Stream live' : 'Stream offline'} />
+              <Badge
+                state={pipeline.isRunning ? 'RUNNING' : connected ? 'HEALTHY' : 'DOWN'}
+                label={pipeline.isRunning ? 'Cycle running' : connected ? 'Stream live' : 'Stream offline'}
+              />
               <button type="button" className="btn-live" onClick={() => setInspect('BTC/USDT')}>
                 <span className="live-dot" aria-hidden /> Watch Live
               </button>
@@ -213,7 +219,18 @@ export default function DashboardPage() {
         >
           Agent status — decision pipeline
         </SectionTitle>
-        <FlowDiagram nodes={flowNodes} currentNode={currentNode} />
+
+        {/* WHERE THE DISPLAY CAME FROM, stated rather than implied. A finished
+            run rendered without this line reads as one in progress, which is the
+            same fabrication as animating the diagram on a timer. */}
+        <div
+          className="text-[11px] mb-2 leading-relaxed"
+          style={{ color: pipeline.isRunning ? 'var(--accent)' : 'var(--text-muted)' }}
+        >
+          {pipelineSourceLabel(pipeline)}
+        </div>
+
+        <FlowDiagram nodes={flowNodes} currentNode={pipeline.currentNode} />
       </Card>
 
       {/* ---- Recent events ---- */}

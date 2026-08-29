@@ -72,24 +72,108 @@ def test_the_four_previously_stubbed_apis_now_have_routes():
 # The chokepoint rule
 # ---------------------------------------------------------------------------
 
-def test_no_http_route_can_place_an_order():
+# The ONE prefix permitted to place an order over HTTP. See the test below for
+# what makes it permissible; adding a second entry here requires the same.
+OPERATOR_EXCHANGE_PREFIX = "/api/operator/exchange"
+
+
+def test_the_agent_plane_exposes_no_order_placement_route():
     """Spec Section 8: *"the Execution API is a hard chokepoint — no agent talks
     to an exchange directly, ever."*
 
     An HTTP endpoint that placed an order would be a path to the exchange that
     bypasses the Supervisor, the CRO and the leverage ceiling, reachable by
     anything that can reach the port.
+
+    NARROWED, NOT RELAXED — AND THE DIFFERENCE IS THE WHOLE POINT.
+
+    This used to assert that NO route anywhere could place an order. That was
+    right while the operator's manual path lived in Next.js
+    (`app/api/exchange/route.ts`), signing orders from Vercel with the operator's
+    own keys.
+
+    That path had to move: Vercel's region is refused by Binance with a 451, so a
+    real order would fail exactly when real money was on the line. It now lives at
+    `/api/operator/exchange` — see docs/DEPLOYMENT_NETWORKING.md.
+
+    So the claim worth defending changed shape. It is NOT "no order route
+    exists"; it is "no order route exists in the AGENT's plane, and the single
+    operator route is authenticated and clearly separated". Both halves are
+    asserted — here and in
+    `test_the_operator_exchange_path_is_authenticated_and_alone`.
+
+    The two planes, kept distinct:
+      AGENT     Supervisor -> CRO -> TAR_APPROVED -> ExecutionAgent. Risk-checked,
+                leverage-capped, LIVE_TRADING-gated. No HTTP route reaches it.
+      OPERATOR  A human clicking a button with their own keys. CLAUDE.md
+                invariant 1 puts manual clicks outside the Supervisor's scope on
+                purpose.
     """
     order_like = []
     for path in _schema()["paths"]:
         if not path.startswith("/api"):
             continue
+        if path.startswith(OPERATOR_EXCHANGE_PREFIX):
+            continue  # the documented operator path, asserted separately below
         methods = _methods_for(path)
         if methods & {"POST", "PUT", "PATCH"}:
             lowered = path.lower()
             if any(word in lowered for word in ("order", "buy", "sell", "trade/execute", "position/open")):
                 order_like.append(f"{sorted(methods)} {path}")
-    assert not order_like, f"routes that look like order placement: {order_like}"
+    assert not order_like, (
+        f"routes that look like order placement outside {OPERATOR_EXCHANGE_PREFIX}: {order_like}"
+    )
+
+
+def test_the_operator_exchange_path_is_authenticated_and_alone():
+    """The exception above is only acceptable while these three things hold.
+
+    1. EVERY route under it requires write auth. The Next.js route it replaced
+       had no credential of its own, so this closes the "reachable by anything
+       that can reach the port" exposure rather than relocating it.
+    2. It is the ONLY prefix carrying an order route, so the exception cannot
+       quietly spread.
+    3. It is unreachable from the reasoning layer — `graphs/contracts` forbids
+       importing it, which `tests/test_graph_contracts.py` enforces by AST.
+
+    If a route here ever loses its auth dependency, this fails. That is the
+    single most important assertion in this file.
+    """
+    from backend.api import operator_exchange
+    from backend.core.auth import require_write_auth
+
+    routes = list(operator_exchange.router.routes)
+    assert routes, "the operator exchange router has no routes"
+
+    unauthenticated = []
+    for route in routes:
+        deps = [getattr(d, "dependency", None) for d in getattr(route, "dependencies", [])]
+        if require_write_auth not in deps:
+            unauthenticated.append(route.path)
+    assert not unauthenticated, (
+        f"operator exchange routes with NO write auth: {unauthenticated}. These place real "
+        f"orders with the operator's keys and must never be open."
+    )
+
+    # The exception has not spread to a second prefix. `[:4]` takes the first
+    # three path segments — "/api/operator/exchange" for every route here.
+    order_prefixes = {
+        "/".join(path.split("/")[:4])
+        for path in _schema()["paths"]
+        if path.startswith("/api")
+        and "order" in path.lower()
+        and _methods_for(path) & {"POST", "PUT", "PATCH"}
+    }
+    assert order_prefixes <= {OPERATOR_EXCHANGE_PREFIX}, (
+        f"order placement appeared outside the one permitted prefix "
+        f"({OPERATOR_EXCHANGE_PREFIX}): {sorted(order_prefixes - {OPERATOR_EXCHANGE_PREFIX})}"
+    )
+
+    # And the reasoning layer still cannot import it.
+    from backend.graphs.contracts import FORBIDDEN_IMPORTS
+
+    assert "place_order" in FORBIDDEN_IMPORTS
+    assert "operator_exchange" in FORBIDDEN_IMPORTS
 
 
 def test_exchange_api_exposes_no_write_routes():

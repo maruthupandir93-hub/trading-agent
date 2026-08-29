@@ -159,9 +159,37 @@ def test_ticker_without_market_metadata_is_skipped_not_guessed():
     assert run(client_with(fake).fetch_usdt_perpetual_prices()) == {}
 
 
-def test_returns_empty_dict_on_exception_rather_than_raising():
+def test_returns_none_on_exception_rather_than_raising_or_returning_empty():
+    """A FAILED CALL is None; an empty match is {}. They are different facts.
+
+    This used to assert `== {}` for both, and that conflation made
+    `market_data.fetch_prices`'s retry loop dead code: it retries on the failure
+    path, but nothing could ever reach it because every exception was swallowed
+    into an empty dict. A transient upstream fault was then reported as
+
+        Price refresh produced no usable symbols ... is now STALE
+
+    which describes a symbol-FILTER mismatch and sends you to the wrong file. The
+    real cause, seen live, was `'str' object has no attribute 'keys'` raised
+    inside ccxt on a non-JSON body from Binance.
+
+    Still does not raise — the caller must never have to wrap this in a try.
+    """
     fake = FakeCcxt(raises=RuntimeError("connection reset"))
-    assert run(client_with(fake).fetch_usdt_perpetual_prices()) == {}
+    assert run(client_with(fake).fetch_usdt_perpetual_prices()) is None
+
+
+def test_an_empty_match_is_still_an_empty_dict_not_none():
+    """The other half of the distinction, pinned so it cannot collapse back.
+
+    The exchange answered and nothing passed the filters. That is NOT retryable,
+    and returning None here would make `fetch_prices` retry a non-match three
+    times and then report a network failure — exactly the behaviour the empty
+    result was separated out to avoid.
+    """
+    fake = FakeCcxt(tickers={"WEIRD/USDT:USDT": {"last": 5.0}}, markets={})
+    result = run(client_with(fake).fetch_usdt_perpetual_prices())
+    assert result == {} and result is not None
 
 
 def test_empty_result_does_not_burn_the_retry_budget():

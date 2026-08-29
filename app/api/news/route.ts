@@ -1,76 +1,47 @@
-// Browsers can't fetch these RSS feeds directly (no CORS headers on the
-// feed hosts), so this route fetches + parses them server-side and hands
-// back plain JSON. Same zero-dependency regex parser as the original
-// server.js version.
+// Crypto/markets headlines: RSS feeds from the BACKEND, plus optional keyed
+// aggregator APIs from here.
 //
-// Commit 14 adds: more free RSS sources, plus an optional layer of free
-// news-aggregator APIs (APITube/GNews/NewsX/NewsData.io) that rotate
-// automatically when one hits its daily free-tier limit — see
-// lib/newsProviders.ts for the rotation logic and lib/newsProviderUsage.server.ts
-// for the persistence. None of the aggregators require this app to work
-// at all: with zero API keys configured, this route still returns the
-// full RSS feed list, which has no key and no rate limit.
+// WHY THE RSS HALF MOVED TO THE BACKEND
+//
+// The feed list includes `www.binance.com/en/support/announcement/rss`. A Binance
+// host refuses a restricted region with the same 451 that broke /api/candles, so
+// on Vercel this route carried the identical latent failure — and in its harder
+// form: a dead feed returned `[]`, so the panel showed FEWER headlines rather
+// than an error. Nobody would have filed a bug for that.
+//
+// The backend fetches and parses all seven feeds from a served region and reports
+// each one's outcome separately, so a missing source is visible as a missing
+// source. See backend/api/marketdata.py::get_news.
+//
+// WHY THE KEYED AGGREGATORS DID NOT MOVE
+//
+// APITube / GNews / NewsX / NewsData are not geo-restricted, their API keys live
+// in this deployment's environment, and the daily-usage counter that rotates
+// between them is a `.data/` store on this side (lib/newsProviderUsage.server.ts).
+// Moving them would mean migrating a secret and splitting that store across two
+// deployments — a separate and deliberate operation from fixing a geo-block, and
+// one with no benefit here.
+//
+// None of them are required: with zero keys configured this route returns the
+// full RSS list, which is the current state of this deployment.
+//
+// Response shape is unchanged: { items, aggregatorUsed, aggregatorNote }.
 
 import { NEWS_AGGREGATOR_PROVIDERS, pickAvailableProvider, type NewsProviderMeta } from '@/lib/newsProviders';
 import { getUsageToday, incrementUsage } from '@/lib/newsProviderUsage.server';
+import { fetchFromBackend } from '@/lib/api/backendProxy.server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 type NewsItem = { title: string; link: string; source: string; pubDate: string | null };
 
-const NEWS_FEEDS = [
-  { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'CoinDesk' },
-  { url: 'https://cointelegraph.com/rss', source: 'Cointelegraph' },
-  { url: 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml', source: 'WSJ Markets' },
-  // Added in Commit 14 — all free, no key, no rate limit.
-  { url: 'https://www.binance.com/en/support/announcement/rss', source: 'Binance Announcements' },
-  { url: 'https://blog.coinbase.com/feed', source: 'Coinbase Blog' },
-  { url: 'https://blog.kraken.com/feed', source: 'Kraken Blog' },
-  { url: 'https://cryptoslate.com/feed/', source: 'CryptoSlate' },
-  // The Block doesn't appear to expose a public RSS feed as of this
-  // writing — omitted rather than guessing a URL that might not exist.
-  // If they add one, it slots in the same way as everything else here.
-];
-
-function stripCdata(s: string | undefined): string {
-  return (s ?? '').replace(/^<!\[CDATA\[/, '').replace(/\]\]>$/, '').trim();
-}
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'");
-}
-
-function parseRss(xml: string, source: string): NewsItem[] {
-  const items: NewsItem[] = [];
-  const itemRe = /<item\b[\s\S]*?<\/item>/gi;
-  const matches = xml.match(itemRe) ?? [];
-  for (const block of matches.slice(0, 8)) {
-    const titleM = block.match(/<title>([\s\S]*?)<\/title>/i);
-    const linkM = block.match(/<link>([\s\S]*?)<\/link>/i);
-    const dateM = block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i);
-    const title = decodeEntities(stripCdata(titleM?.[1]));
-    const link = decodeEntities(stripCdata(linkM?.[1]));
-    if (!title || !link) continue;
-    items.push({ title, link, source, pubDate: dateM ? dateM[1].trim() : null });
-  }
-  return items;
-}
-
-async function fetchFeed(feed: { url: string; source: string }): Promise<NewsItem[]> {
-  try {
-    const res = await fetch(feed.url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal news fetch)' } });
-    if (!res.ok) return [];
-    const xml = await res.text();
-    return parseRss(xml, feed.source);
-  } catch {
-    return [];
-  }
-}
+type BackendNews = {
+  items: NewsItem[];
+  sources: { source: string; available: boolean; error: string | null; count: number }[];
+  availableCount: number;
+  totalCount: number;
+};
 
 // Each aggregator has its own request shape and response shape — this
 // is the one place that translates "some provider, some API key" into
@@ -140,9 +111,26 @@ export async function GET(req: Request) {
   // don't support server-side filtering by keyword.
   const query = searchParams.get('q') ?? 'crypto';
 
+  let feedSources: BackendNews['sources'] = [];
+
   try {
-    const rssResults = await Promise.all(NEWS_FEEDS.map(fetchFeed));
-    let items = rssResults.flat();
+    // RSS via the backend. A failure here is NOT fatal: the aggregator half may
+    // still have something, and an empty news panel is a worse answer than a
+    // partial one as long as the shortfall is reported in `feedSources`.
+    let items: NewsItem[] = [];
+    try {
+      const backendNews = await fetchFromBackend<BackendNews>('/api/marketdata/news', { limit: '40' });
+      items = backendNews.items ?? [];
+      feedSources = backendNews.sources ?? [];
+    } catch (err) {
+      feedSources = [{
+        source: 'RSS (backend)',
+        available: false,
+        error: err instanceof Error ? err.message : 'backend unreachable',
+        count: 0,
+      }];
+    }
+
     let aggregatorUsed: string | null = null;
     let aggregatorNote: string;
 
@@ -175,7 +163,10 @@ export async function GET(req: Request) {
       return tb - ta;
     });
 
-    return Response.json({ items, aggregatorUsed, aggregatorNote });
+    // `feedSources` is additive — existing consumers read `items` and are
+    // unaffected. It exists so a panel can say WHICH feed is missing instead of
+    // silently rendering a shorter list.
+    return Response.json({ items, aggregatorUsed, aggregatorNote, feedSources });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error';
     return Response.json({ error: `Could not fetch news: ${message}` }, { status: 502 });

@@ -21,7 +21,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { BACKEND_PATHS, backendUrl } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 // The arming rule and the failure wording live in a `.ts` module so they can be
 // asserted — vitest here cannot parse JSX. See lib/ui/emergencyStop.ts.
 import { CONFIRM_WORD, isArmed, stopFailureMessage } from '@/lib/ui/emergencyStop';
@@ -67,7 +67,7 @@ export function EmergencyStopModal({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(backendUrl(BACKEND_PATHS.emergencyStop), {
+      const res = await fetch(backendProxyPath(BACKEND_PATHS.emergencyStop), {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${process.env.NEXT_PUBLIC_TRADES_API_KEY || ''}`

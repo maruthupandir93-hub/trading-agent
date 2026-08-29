@@ -1,41 +1,37 @@
-// Equities (unlike crypto) don't have a free public WebSocket we can hit
-// straight from the browser, and quote providers generally don't send
-// CORS headers either, so this route fetches server-side and hands back
-// plain JSON — same reasoning as /api/chat and /api/news.
+// Equity quotes. Equities have no free public WebSocket, so MarketData.tsx polls
+// this route.
+//
+// PROXIES TO THE BACKEND, for two independent reasons:
+//
+//  1. Vercel's region. Same structural problem as /api/candles — a serverless
+//     handler runs wherever Vercel puts it, and providers can and do refuse
+//     regions.
+//  2. Yahoo killed the endpoint this used to call. `/v7/finance/quote` now
+//     answers 401 Unauthorized to unauthenticated clients; it needs a
+//     crumb+cookie pair. The backend uses `/v8/finance/chart` instead, which is
+//     still keyless and open, and reads the price out of its `meta` block.
+//
+// That second reason matters when reading old bug reports: this route returned
+// 502 for a cause that had NOTHING to do with the Binance geo-block, and both
+// looked identical from the browser.
+//
+// Response shape unchanged: { quotes: [{ symbol, price, prevClose }] }.
+
+import { proxyToBackend } from '@/lib/api/backendProxy.server';
 
 export const runtime = 'nodejs';
-
-type Quote = { symbol: string; price: number | null; prevClose: number | null };
+export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const symbolsParam = searchParams.get('symbols') || '';
   const symbols = [...new Set(symbolsParam.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))];
 
+  // Answered locally: asking the backend for nothing is a round trip to be told
+  // nothing, and the empty case is common (a watchlist with no equities in it).
   if (symbols.length === 0) {
     return Response.json({ quotes: [] });
   }
 
-  try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal quote fetch)' } });
-    if (!res.ok) throw new Error(`upstream ${res.status}`);
-    const json = await res.json();
-    const results: any[] = json?.quoteResponse?.result ?? [];
-
-    const bySymbol = new Map(results.map((r) => [String(r.symbol).toUpperCase(), r]));
-    const quotes: Quote[] = symbols.map((s) => {
-      const r = bySymbol.get(s);
-      return {
-        symbol: s,
-        price: typeof r?.regularMarketPrice === 'number' ? r.regularMarketPrice : null,
-        prevClose: typeof r?.regularMarketPreviousClose === 'number' ? r.regularMarketPreviousClose : null,
-      };
-    });
-
-    return Response.json({ quotes });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'unknown error';
-    return Response.json({ error: `Could not fetch quotes: ${message}` }, { status: 502 });
-  }
+  return proxyToBackend('/api/marketdata/quote', { symbols: symbols.join(',') });
 }

@@ -18,7 +18,7 @@ import { useState, useCallback } from 'react';
 import { useAppState } from '@/components/AppState';
 import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
-import { BACKEND_PATHS, backendUrl } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
 interface TradingModeData {
@@ -66,7 +66,7 @@ export default function SettingsPage() {
 
     setToggling(true);
     try {
-      const url = backendUrl(live ? BACKEND_PATHS.liveTradingDisable : BACKEND_PATHS.liveTradingEnable);
+      const url = backendProxyPath(live ? BACKEND_PATHS.liveTradingDisable : BACKEND_PATHS.liveTradingEnable);
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

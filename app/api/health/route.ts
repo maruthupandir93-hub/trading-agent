@@ -1,5 +1,6 @@
 import { ping } from '@/lib/db.server';
 import { listTrades } from '@/lib/tradeStore.server';
+import { proxyToBackend } from '@/lib/api/backendProxy.server';
 
 // ---------------------------------------------------------------------
 // Real, server-side active health checks — distinct from
@@ -63,28 +64,71 @@ async function checkTradeStore(): Promise<HealthCheckResult> {
   }
 }
 
-async function checkBinance(): Promise<HealthCheckResult> {
+// Asks the BACKEND what it can reach, instead of probing Binance from here.
+//
+// THIS CHECK USED TO LIE ON VERCEL, AND IT LIED IN THE MOST EXPENSIVE DIRECTION.
+//
+// It pinged api.binance.com from this handler. On Vercel that runs in a
+// Vercel-chosen region, so what it measured was "can this particular serverless
+// invocation reach Binance" — which is no longer how any market data is fetched.
+// A green tick here meant nothing about whether the dashboard's data would load,
+// and a red one sent the operator to check an exchange that was fine.
+//
+// The question worth answering now is whether the BACKEND's region is served,
+// because that is the machine making the calls. `/api/marketdata/upstream-health`
+// answers exactly that and names a geo-block explicitly when it sees one.
+async function checkUpstreams(): Promise<HealthCheckResult[]> {
   const started = Date.now();
   try {
-    const res = await fetch('https://api.binance.com/api/v3/ping', {
-      signal: AbortSignal.timeout(4000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal health check)' },
-    });
+    const res = await proxyToBackend('/api/marketdata/upstream-health');
     const latencyMs = Date.now() - started;
-    if (!res.ok) return { label: 'Binance API', ok: false, detail: `HTTP ${res.status}`, latencyMs };
-    return { label: 'Binance API', ok: true, detail: 'reachable', latencyMs };
+    const json = await res.json();
+
+    if (!res.ok) {
+      return [{ label: 'Trading backend', ok: false, detail: json?.error ?? `HTTP ${res.status}`, latencyMs }];
+    }
+
+    // The backend is reachable — that is itself a check worth reporting, and it
+    // is the one that distinguishes "Vercel cannot reach Oracle" from "Oracle
+    // cannot reach Binance". Those are different outages with different fixes
+    // and they used to be indistinguishable from this page.
+    const checks: HealthCheckResult[] = [
+      { label: 'Trading backend', ok: true, detail: 'reachable from Vercel', latencyMs },
+    ];
+
+    const upstreams: Record<string, { reachable: boolean; status: number | null; geoBlocked: boolean; error: string | null }> =
+      json?.upstreams ?? {};
+
+    for (const [name, state] of Object.entries(upstreams)) {
+      checks.push({
+        label: `${name} (from backend)`,
+        ok: state.reachable,
+        detail: state.reachable
+          ? `reachable${state.status ? ` (HTTP ${state.status})` : ''}`
+          : state.geoBlocked
+            ? `REGION BLOCKED (HTTP ${state.status}) — the backend host's location is refused by this provider`
+            : (state.error ?? 'unreachable'),
+        latencyMs,
+      });
+    }
+    return checks;
   } catch (err) {
-    return { label: 'Binance API', ok: false, detail: err instanceof Error ? err.message : 'unreachable', latencyMs: Date.now() - started };
+    return [{
+      label: 'Trading backend',
+      ok: false,
+      detail: err instanceof Error ? err.message : 'unreachable',
+      latencyMs: Date.now() - started,
+    }];
   }
 }
 
 export async function GET() {
-  const [database, tradeStore, binance] = await Promise.all([
+  const [database, tradeStore, upstreams] = await Promise.all([
     checkDatabase(),
     checkTradeStore(),
-    checkBinance(),
+    checkUpstreams(),
   ]);
-  const checks = [database, tradeStore, binance];
+  const checks = [database, tradeStore, ...upstreams];
   const failing = checks.filter((c) => !c.ok).length;
   const overall = failing === 0 ? 'healthy' : failing === checks.length ? 'unhealthy' : 'degraded';
   return Response.json({ overall, checks, checkedAt: Date.now() });

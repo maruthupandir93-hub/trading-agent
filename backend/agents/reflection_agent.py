@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import os
 from backend.core.agent_base import BaseAgent
 from backend.models.events import (
@@ -20,29 +20,43 @@ logger = logging.getLogger(__name__)
 # Kept so existing callers (`services/ai_memory`, and this module's own
 # `_reflect_on_close`) keep working, but modified to invoke the graph.
 async def analyze_mistake(receipt: Dict[str, Any]) -> str:
-    from backend.graphs.reflection_graph import get_reflection_graph
+    """Run the reflection graph over one closed trade and return its lesson.
 
-    # Compiled ONCE and reused. It was rebuilt per call, which costs a full LangGraph
-    # compile each time — the same waste that made `vote_strategies` 78% compile
-    # overhead before it was measured. Rarer here (once per closed trade) but free to
-    # fix.
-    app = get_reflection_graph()
+    THE SIGNATURE IS UNCHANGED ON PURPOSE. `services/ai_memory.py` and
+    `_reflect_on_close` below both call this and want a lesson string; the Phase 33
+    migration onto `TradingState` is invisible to them.
 
-    # NO thread_id is passed, and that is a correction rather than a simplification.
-    #
-    # It used to pass `config={"configurable": {"thread_id": f"reflection_{trade_id}"}}`
-    # with the comment "ensures we don't cross-contaminate state across trades". That
-    # is not what a thread_id does. It selects a CHECKPOINT thread — and this graph is
-    # compiled with no checkpointer, so the id was inert. Every `ainvoke` already
-    # starts from the state passed in, so isolation came from that, not from the
-    # config.
-    #
-    # A comment claiming a safety property the code does not provide is worse than no
-    # comment: it stops the next reader from checking.
-    final_state = await app.ainvoke({"trade_receipt": receipt})
-    
-    lesson = final_state.get("lesson", "No lesson generated.")
-    logger.info(f"Reflection Graph generated note for {receipt.get('symbol')}: {lesson}")
+    What changed underneath: the graph now runs through `build_graph`, so every
+    node is contract-checked and the run is traced. It also builds and invokes per
+    call rather than reusing a module-level compiled app.
+
+    THAT IS A DELIBERATE TRADE, NOT A REGRESSION. The previous version cached the
+    compiled graph to avoid a LangGraph compile per call. Compiling per run is what
+    `run_reflection_graph` does for every other graph in the system, because a run
+    needs its own `RunContext` — the tracing, the budget and the contract wrapper
+    are all bound to it, and a shared compiled app would share one run's context
+    across every trade. This runs once per CLOSED TRADE, so the compile cost is
+    paid at a rate measured in trades per day.
+
+    A failed run returns the deterministic lesson rather than raising: the caller
+    publishes `ReflectionCompletedEvent`, and an exception here would end the
+    learning pipeline for that trade instead of degrading it.
+    """
+    from backend.graphs.reflection_graph import run_reflection_graph
+
+    result = await run_reflection_graph(receipt)
+
+    if not result.get("ok"):
+        logger.error(
+            "Reflection graph failed for %s: %s", receipt.get("symbol"), result.get("error")
+        )
+        return "No lesson generated — the reflection run failed. See the run trace."
+
+    lesson = result.get("lesson") or "No lesson generated."
+    logger.info(
+        "Reflection produced a %s lesson for %s: %s",
+        result.get("lessonSource", "rules"), receipt.get("symbol"), lesson,
+    )
     return lesson
 
 
@@ -220,7 +234,26 @@ class ReflectionAgent(BaseAgent):
             "held_seconds": event.held_seconds,
         }
 
-        note = await analyze_mistake(receipt)
+        # The GRAPH is called directly here rather than through
+        # `analyze_mistake`, which returns only the lesson string.
+        #
+        # `_persist_reflection` now records WHO wrote the lesson, and that fact
+        # only exists in the graph's full result. Squeezing it back out of a bare
+        # string was the alternative, and a parser over prose to recover a field
+        # the producer already had is how provenance silently becomes wrong.
+        #
+        # `analyze_mistake` keeps its string signature for `services/ai_memory.py`,
+        # which genuinely only wants the text.
+        from backend.graphs.reflection_graph import run_reflection_graph
+
+        result = await run_reflection_graph(receipt)
+        note = result.get("lesson") or "No lesson generated."
+        lesson_source = result.get("lessonSource")
+        lesson_detail = result.get("lessonDetail")
+        if not result.get("ok"):
+            logger.error(
+                "Reflection graph failed for %s: %s", event.symbol, result.get("error")
+            )
 
         # Extracted to `calibration_delta` below and shared with
         # `graphs/reflection_graph.py`, which had copied the expression verbatim.
@@ -234,7 +267,10 @@ class ReflectionAgent(BaseAgent):
         )
         self.record_decision("reflected", rationale, receipt, acted=True)
 
-        await self._persist_reflection(event.trade_id, event.symbol, note)
+        await self._persist_reflection(
+            event.trade_id, event.symbol, note,
+            lesson_source=lesson_source, lesson_detail=lesson_detail,
+        )
 
         await self.publish(
             ReflectionCompletedEvent(
@@ -245,19 +281,44 @@ class ReflectionAgent(BaseAgent):
             )
         )
 
-    async def _persist_reflection(self, trade_id: str, symbol: str, content: str):
+    async def _persist_reflection(
+        self,
+        trade_id: str,
+        symbol: str,
+        content: str,
+        lesson_source: Optional[str] = None,
+        lesson_detail: Optional[str] = None,
+    ):
+        """Write the reflection, INCLUDING who wrote the lesson.
+
+        `lesson_source` distinguishes a model-written lesson from one of the three
+        deterministic templates. The Evaluation layer and the learning dashboard
+        both read this table, and without the column they would average a canned
+        string and a reasoned finding together as if they were the same kind of
+        observation.
+
+        NULL is left as NULL rather than defaulted to 'rules': rows written before
+        the column existed have genuinely unknown provenance, and asserting one
+        would be a fabricated fact about the system's own history.
+        """
         pool = get_db_pool()
         if not pool: return
-        
+
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO reflections (trade_id, ts, symbol, content, exit_context_used)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (trade_id) DO UPDATE SET content = $4
+                    INSERT INTO reflections
+                        (trade_id, ts, symbol, content, exit_context_used,
+                         lesson_source, lesson_detail)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (trade_id) DO UPDATE SET
+                        content = $4,
+                        lesson_source = $6,
+                        lesson_detail = $7
                     """,
-                    trade_id, datetime.datetime.utcnow(), symbol, content, "Auto-generated reflection"
+                    trade_id, datetime.datetime.utcnow(), symbol, content,
+                    "Auto-generated reflection", lesson_source, lesson_detail,
                 )
         except Exception as e:
             logger.error(f"Failed to persist reflection for {trade_id}: {e}")

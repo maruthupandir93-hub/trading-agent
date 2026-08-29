@@ -1,33 +1,43 @@
 // ---------------------------------------------------------------------
-// One shared WebSocket to the agent-event stream, for any number of consumers.
+// One shared agent-event stream, for any number of consumers.
 //
-// THE BUG THIS FIXES
+// WHY THIS IS POLLING AND NOT A WEBSOCKET ANY MORE
 //
-// There were two near-identical hooks — `lib/useAgentOS.ts` and
-// `lib/useAgentWebSocket.ts` — and each opened its OWN WebSocket inside a
-// `useEffect`. Five components use them (AgentTerminal, AgentActivityTerminal,
-// DebateVisualizer, TradeHistoryTable, TradeLogPanel), so the app opened
-// **five simultaneous connections** to the same endpoint, each maintaining a
-// separate copy of the same event buffer.
+// It used to open `ws://<backend>:8000/api/dashboard/agent-events` directly from
+// the browser. On the real deployment that connection NEVER OPENS:
 //
-// That is worse than wasteful. Each socket independently reconnects on drop, so
-// a backend restart produced a reconnect storm; and because each buffer was
-// filled independently, two panels could disagree about what had just happened,
-// which is confusing in a UI whose job is to explain what the system did.
+//   * the frontend is served from Vercel over https;
+//   * the backend has no TLS certificate (no domain), so it speaks plain http/ws;
+//   * a browser on an https page refuses `ws://` outright — mixed content. It is
+//     a browser policy, so nothing in this file could have worked around it;
+//   * and a WebSocket cannot be proxied through a Vercel serverless function, so
+//     there was no tunnel to build either.
 //
-// This module keeps ONE connection at module scope, reference-counted by
-// subscriber. The last consumer to unmount closes it.
+// The visible symptom was the worst kind: no error anywhere, just an agent
+// terminal, a debate visualizer and a trade history table that stayed empty
+// forever while the backend was running perfectly and publishing events.
 //
-// A RECONNECT BUG ALSO FIXED HERE
+// So the browser now polls `/api/agent-events`, a SAME-ORIGIN https route that
+// proxies to the backend server-to-server, where no browser rules apply. The
+// backend buffers events with a monotonic cursor
+// (`backend/services/event_buffer.py`) precisely so that polling can ask "what
+// happened since?" rather than only catching what fires mid-request.
 //
-// The old `useAgentWebSocket` reconnected with `setTimeout(connect, 3000)` and,
-// on unmount, set `ws.onclose = null` to prevent a reconnect. But a timer
-// already scheduled was never cleared — so unmounting during the 3-second
-// window still reconnected afterwards, to a socket nobody was listening to.
-// The timer handle is tracked and cleared here.
+// THE BACKEND'S WEBSOCKET IS STILL THERE and still works for anything that can
+// reach the host directly. To go back to it, point this module at
+// `agentEventsWsUrl()` again — but only once the backend has a TLS hostname,
+// because that, and nothing in this file, is what actually blocks it.
+//
+// WHAT IS UNCHANGED
+//
+// This module still keeps ONE connection at module scope, reference-counted by
+// subscriber, because five components consume it (AgentTerminal,
+// AgentActivityTerminal, DebateVisualizer, TradeHistoryTable, TradeLogPanel) and
+// each used to open its own socket — five connections, five independently filled
+// buffers, and two panels able to disagree about what had just happened. The
+// last consumer to unsubscribe stops the loop. The public API is byte-identical
+// so no consumer had to change.
 // ---------------------------------------------------------------------
-
-import { agentEventsWsUrl } from './backendConfig';
 
 export type AgentStreamEvent = {
   event_type: string;
@@ -44,20 +54,34 @@ export type StreamState = {
 
 const MAX_BUFFERED_EVENTS = 200;
 
-// Backoff rather than a fixed 3s retry: a backend that is down stays down for a
-// while, and five-per-second reconnect attempts from a browser tab achieve
-// nothing except filling the console.
-const RECONNECT_BASE_MS = 1_000;
-const RECONNECT_MAX_MS = 30_000;
+/** How often to ask for new events while the backend is answering. */
+const POLL_INTERVAL_MS = 2_000;
+
+// Backoff rather than a fixed retry: a backend that is down stays down for a
+// while, and hammering it from every open tab achieves nothing except filling
+// the console. Applied only to FAILED polls; a successful one resets it.
+const RETRY_BASE_MS = 2_000;
+const RETRY_MAX_MS = 30_000;
 
 type Listener = (state: StreamState) => void;
 
-let socket: WebSocket | null = null;
 let listeners = new Set<Listener>();
 let buffer: AgentStreamEvent[] = [];
 let connected = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempts = 0;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let failedAttempts = 0;
+let running = false;
+
+// The server-side sequence number of the last event received. `null` means "I
+// have never polled" — the backend answers that with the current head and NO
+// backlog, so a freshly opened tab does not replay ten minutes of history as
+// though it were happening now.
+let cursor: number | null = null;
+
+// Guards against two loops running at once. `useEffect` runs twice per mount
+// under React 18 Strict Mode, which is exactly how a "shared" connection quietly
+// becomes two — the same hazard the WebSocket version had to guard against.
+let inFlight = false;
 
 function snapshot(): StreamState {
   // A fresh array each time: handing out the internal buffer would let a
@@ -70,97 +94,105 @@ function emit(): void {
   listeners.forEach((fn) => fn(state));
 }
 
-function clearReconnectTimer(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
+function clearPollTimer(): void {
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
   }
 }
 
-function scheduleReconnect(): void {
-  clearReconnectTimer();
-  // No consumers left — do not reconnect. Without this check a drop that
-  // coincides with the last unmount would reopen a socket nobody reads.
-  if (listeners.size === 0) return;
-
-  const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
-  reconnectAttempts += 1;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    openSocket();
-  }, delay);
+function scheduleNextPoll(delayMs: number): void {
+  clearPollTimer();
+  // No consumers left — do not reschedule. Without this a poll in flight when
+  // the last consumer unmounts would restart the loop for nobody.
+  if (listeners.size === 0 || !running) return;
+  pollTimer = setTimeout(() => {
+    pollTimer = null;
+    void poll();
+  }, delayMs);
 }
 
-function openSocket(): void {
-  // Guard against opening a second socket: `useEffect` runs twice per mount
-  // under React 18 Strict Mode, which is exactly how a "shared" connection
-  // quietly becomes two.
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-  if (typeof window === 'undefined') return; // no sockets during SSR
+async function poll(): Promise<void> {
+  if (inFlight || !running) return;
+  inFlight = true;
 
-  let ws: WebSocket;
   try {
-    ws = new WebSocket(agentEventsWsUrl());
-  } catch {
-    // Constructor throws on a malformed URL. Treated as a failed connection so
-    // the backoff applies rather than the stream silently never starting.
-    scheduleReconnect();
-    return;
-  }
-  socket = ws;
+    const query = cursor === null ? '' : `?cursor=${cursor}`;
+    const res = await fetch(`/api/agent-events${query}`, { cache: 'no-store' });
+    const json = await res.json();
 
-  ws.onopen = () => {
-    connected = true;
-    reconnectAttempts = 0; // reset backoff only after a real connection
-    emit();
-  };
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data) as AgentStreamEvent;
-      // Newest first, matching what both old hooks did.
-      buffer = [data, ...buffer].slice(0, MAX_BUFFERED_EVENTS);
-      emit();
-    } catch {
-      // A malformed frame is dropped rather than throwing inside the handler,
-      // which would tear down the socket for every consumer.
+    if (!res.ok || json?.error) {
+      throw new Error(json?.error ?? `agent-events returned ${res.status}`);
     }
-  };
 
-  ws.onclose = () => {
-    connected = false;
-    socket = null;
+    if (typeof json.cursor === 'number') cursor = json.cursor;
+
+    const incoming: AgentStreamEvent[] = Array.isArray(json.events) ? json.events : [];
+    if (incoming.length > 0) {
+      // Newest first, matching what the socket version delivered. The backend
+      // returns them oldest-first (sequence order), so the batch is reversed
+      // before prepending — without that, a batch of five would appear in the
+      // terminal upside down.
+      buffer = [...incoming.reverse(), ...buffer].slice(0, MAX_BUFFERED_EVENTS);
+    }
+
+    // `missed` means the client fell far enough behind that the backend's ring
+    // buffer evicted events. Surfaced as a synthetic entry rather than ignored:
+    // a timeline with a silent gap misrepresents what the agent did, which is
+    // the one thing this panel exists not to do.
+    if (json.missed) {
+      buffer = [
+        {
+          event_type: 'STREAM_GAP',
+          timestamp: new Date().toISOString(),
+          agent: 'event-stream',
+          detail: 'Some events were missed — this client fell behind the backend buffer.',
+        },
+        ...buffer,
+      ].slice(0, MAX_BUFFERED_EVENTS);
+    }
+
+    connected = true;
+    failedAttempts = 0;
     emit();
-    scheduleReconnect();
-  };
-
-  ws.onerror = () => {
-    // `onclose` always follows `onerror`, so reconnection is handled there.
-    // Closing here would double-fire it.
-    if (ws.readyState === WebSocket.OPEN) ws.close();
-  };
+    scheduleNextPoll(POLL_INTERVAL_MS);
+  } catch {
+    // A failed poll is not fatal and not logged per-attempt — a backend that is
+    // down would otherwise produce one console error every two seconds per tab.
+    // `isConnected: false` is how consumers learn about it, and every panel
+    // already renders that state.
+    if (connected) {
+      connected = false;
+      emit();
+    }
+    const delay = Math.min(RETRY_BASE_MS * 2 ** failedAttempts, RETRY_MAX_MS);
+    failedAttempts += 1;
+    scheduleNextPoll(delay);
+  } finally {
+    inFlight = false;
+  }
 }
 
 /** Subscribe to the shared stream. Returns an unsubscribe function. */
 export function subscribeToAgentEvents(listener: Listener): () => void {
   listeners.add(listener);
   listener(snapshot()); // deliver current state immediately
-  openSocket();
+
+  if (typeof window !== 'undefined' && !running) {
+    running = true;
+    void poll();
+  }
 
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) {
-      clearReconnectTimer();
-      reconnectAttempts = 0;
-      if (socket) {
-        // Detach the handler first so closing doesn't schedule a reconnect.
-        socket.onclose = null;
-        socket.close();
-        socket = null;
-      }
+      running = false;
+      clearPollTimer();
+      failedAttempts = 0;
       connected = false;
+      // The cursor is deliberately KEPT. A panel that unmounts and remounts —
+      // switching routes, say — resumes where it left off instead of resetting
+      // to the head and appearing to lose everything that happened in between.
     }
   };
 }
@@ -221,11 +253,28 @@ export function eventString(event: AgentStreamEvent, key: string): string | null
   return typeof value === 'string' && value.trim() !== '' ? value : null;
 }
 
-/** Test/debug helper: how many sockets are open (0 or 1, never more). */
+/** Test/debug helper: how many streams are active (0 or 1, never more).
+ *
+ *  Kept under its original name so existing tests and callers do not change.
+ *  It counts the shared POLLING loop now rather than a socket — the invariant
+ *  it guards is the same one it always guarded: five consumers must share one
+ *  connection to the backend, not open five. */
 export function _activeSocketCount(): number {
-  return socket ? 1 : 0;
+  return running ? 1 : 0;
 }
 
 export function _listenerCount(): number {
   return listeners.size;
+}
+
+/** Test helper: reset module state between cases. */
+export function _resetStream(): void {
+  listeners = new Set();
+  buffer = [];
+  connected = false;
+  running = false;
+  inFlight = false;
+  failedAttempts = 0;
+  cursor = null;
+  clearPollTimer();
 }

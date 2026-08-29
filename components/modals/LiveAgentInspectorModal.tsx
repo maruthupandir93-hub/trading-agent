@@ -37,7 +37,9 @@ import { Gauge } from '@/components/ui/Gauge';
 import { NotAvailable } from '@/components/ui/primitives';
 import { BACKEND_PATHS } from '@/lib/backendConfig';
 import { NODE_LEVEL_ONLY } from '@/lib/realtime/store';
-import { useBackend, useEventFeed, useGraphNodes } from '@/lib/realtime/useRealtime';
+import { useBackend, useEventFeed } from '@/lib/realtime/useRealtime';
+import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
+import { useSameOrigin } from '@/lib/api/useSameOrigin';
 
 const STAGES = ['Ingest', 'News', 'Polymarket', 'Indicators', 'Regime', 'Signal', 'Risk', 'Decision'] as const;
 
@@ -109,9 +111,22 @@ export function LiveAgentInspectorModal({
   strategy?: string | null;
   onClose: () => void;
 }) {
-  const nodes = useGraphNodes();
+  // Seeded from the last completed cycle when nothing is streaming.
+  //
+  // This read `useGraphNodes()` — the raw live stream — which a freshly loaded
+  // page has NO backlog of, because the event feed opens with no cursor and the
+  // backend deliberately answers that with the head and no history. So opening
+  // "Watch Live" between cycles showed "No node has reported yet" and every
+  // stage grey, seconds after the agent had finished a full 23-node run.
+  const pipeline = usePipeline();
+  const nodes = pipeline.nodes;
   const feed = useEventFeed({ limit: 40 });
-  const news = useBackend<{ items?: NewsItem[] }>(symbol ? '/api/news' : null);
+  // `useSameOrigin`, NOT `useBackend`. `/api/news` is a route of THIS app; the
+  // FastAPI backend has no such path, so `useBackend` was sending it to the
+  // Python host and getting a 404 that rendered as "no news" rather than as a
+  // wrong address. This is the exact confusion lib/backendConfig.ts was written
+  // to prevent, and it had one instance left.
+  const news = useSameOrigin<{ items?: NewsItem[] }>(symbol ? '/api/news' : null);
   const snapshots = useBackend<{ snapshots?: Record<string, unknown>[] }>(
     symbol ? BACKEND_PATHS.polymarketSnapshots : null,
     { intervalMs: 30_000 },
@@ -191,7 +206,7 @@ export function LiveAgentInspectorModal({
               <span className="text-[14px] font-semibold">Live Agent Activity — {symbol}</span>
             </div>
             <div className="text-[11.5px] mt-1" style={{ color: 'var(--text-secondary)' }}>
-              {strategy ?? 'No strategy selected'} · stages below track real graph nodes
+              {strategy ?? 'No strategy selected'} · {pipelineSourceLabel(pipeline)}
             </div>
           </div>
           <button type="button" className="chip" onClick={onClose} aria-label="Close">
@@ -295,7 +310,7 @@ export function LiveAgentInspectorModal({
                 ))}
               {Object.keys(nodes).length === 0 ? (
                 <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                  No node has reported yet. This panel fills in from the live stream.
+                  {pipelineSourceLabel(pipeline)}
                 </div>
               ) : null}
             </div>

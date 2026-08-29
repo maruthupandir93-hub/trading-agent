@@ -75,3 +75,105 @@ export function stageForNode(node: string | null): ExecStageKey | null {
   if (node === 'risk_gateway') return 'validate';
   return 'analyse';
 }
+
+/* ===================================================================== */
+/* Seeding the pipeline from the LAST COMPLETED RUN                      */
+/* ===================================================================== */
+
+/** One node as `/api/graphs/runs` reports it in a finished run's trace. */
+export type RunTraceNode = {
+  node: string;
+  started_at?: number | null;
+  duration_ms?: number | null;
+  wrote?: string[] | null;
+  llm_calls?: number | null;
+  error?: string | null;
+  unavailable?: boolean | null;
+};
+
+export type RunTrace = {
+  run_id: string;
+  graph: string;
+  symbol?: string | null;
+  trigger?: string | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+  outcome?: string | null;
+  nodes: RunTraceNode[];
+};
+
+/** Convert a finished run's trace into the same shape the live stream produces.
+ *
+ *  WHY THIS EXISTS — THE PIPELINE LOOKED PERMANENTLY DEAD
+ *  ------------------------------------------------------
+ *  The event stream is a CATCH-UP feed, not a history: `agentEventStream` opens
+ *  with `cursor = null`, and the backend answers that with the current head and
+ *  NO backlog, deliberately — a new tab must not be shown ten minutes of old
+ *  events as though they were happening now.
+ *
+ *  The consequence nobody had accounted for is that a FRESHLY LOADED PAGE knows
+ *  nothing. Every node renders IDLE and the diagram says "No graph node is
+ *  running", which is literally true and completely misleading: the agent may
+ *  have completed a full 23-node cycle four seconds earlier. Between cycles —
+ *  which is most of the time — the operator's answer to "what is my agent doing?"
+ *  was a blank pipeline.
+ *
+ *  `/api/graphs/runs` already stores the whole trace of every run: per node, its
+ *  duration, what it wrote, whether it errored and whether it reported itself
+ *  unavailable. That is strictly MORE than the live stream carries. So the
+ *  pipeline is seeded from the last completed run and the live stream overrides
+ *  it the moment a new cycle starts.
+ *
+ *  IT IS LABELLED AS HISTORY, NOT PASSED OFF AS LIVE. The caller renders
+ *  "last completed cycle, Ns ago" whenever the display is seeded rather than
+ *  streaming. Showing a finished run as though it were in progress would be the
+ *  same class of lie as the animated-on-a-timer diagram this whole module was
+ *  written to replace.
+ */
+export function nodesFromRunTrace(run: RunTrace | null | undefined): Record<string, GraphNodeState> {
+  if (!run || !Array.isArray(run.nodes)) return {};
+
+  const out: Record<string, GraphNodeState> = {};
+  for (const n of run.nodes) {
+    if (!n || typeof n.node !== 'string') continue;
+
+    // A node that raised is FAILED. A node that ran but reported an input it
+    // could not measure still COMPLETED — "degraded" and "broken" are different
+    // facts and the run trace is careful to keep them apart, so this must be too.
+    const status: NodeStatus = n.error ? 'FAILED' : 'COMPLETED';
+
+    const wrote = Array.isArray(n.wrote) ? n.wrote.filter((w) => typeof w === 'string') : [];
+    const detail = n.error
+      ? n.error
+      : wrote.length > 0
+        ? wrote.join(', ')
+        : 'no state written';
+
+    out[n.node] = {
+      name: n.node,
+      status,
+      durationMs: typeof n.duration_ms === 'number' ? Math.round(n.duration_ms) : null,
+      detail,
+      at: typeof n.started_at === 'number' ? n.started_at * 1000 : Date.now(),
+    };
+  }
+  return out;
+}
+
+/** Live states win over seeded ones, per node.
+ *
+ *  Merged per NODE rather than all-or-nothing: a run in progress has reported
+ *  three nodes and the previous run reported twenty-three, and the useful display
+ *  is the three live ones over the twenty-three historical. Taking the whole live
+ *  object only when it is non-empty would blank out the other twenty for the
+ *  duration of every run — replacing a stale-but-complete picture with a fresh
+ *  and nearly empty one.
+ */
+export function mergeSeededAndLive(
+  seeded: Record<string, GraphNodeState>,
+  live: Record<string, GraphNodeState>,
+): Record<string, GraphNodeState> {
+  if (Object.keys(live).length === 0) return seeded;
+  if (Object.keys(seeded).length === 0) return live;
+  return { ...seeded, ...live };
+}

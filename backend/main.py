@@ -5,6 +5,9 @@ from backend.api import (
     market, exchange, ai, knowledge, memory, research, execution, monitoring,
     dashboard, admin, agents as agents_api, missions, graphs as graphs_api,
     polymarket as polymarket_api, catalog as catalog_api,
+    marketdata as marketdata_api,
+    operator_exchange as operator_exchange_api,
+    operator_trade as operator_trade_api,
 )
 from backend.core.agent_os import get_agent_os
 from backend.agents.trading_agent import register_trading_agent
@@ -12,6 +15,8 @@ from backend.agents.research_agent import register_research_agent
 from backend.agents.event_agent import register_event_agent
 from backend.services.live_market_data import start_live_data_feed
 from backend.services.portfolio_store import load_portfolio
+from backend.services.ticker_stream import get_ticker_stream
+from backend.services.upstream import close_client as close_upstream_client
 
 from backend.agents.market_intelligence import get_market_intelligence_agent
 from backend.agents.portfolio_agent import get_portfolio_agent
@@ -148,6 +153,26 @@ async def lifespan(app: FastAPI):
 
     # Start the live market data feed
     live_data_task = asyncio.create_task(start_live_data_feed())
+
+    # The dashboard's price relay. A SEPARATE feed from `start_live_data_feed`
+    # above, and the distinction is not redundancy:
+    #
+    #   live_market_data  — three hardcoded symbols (BTC/ETH/SOL) that the AGENT
+    #                       reasons about, published onto the message bus as
+    #                       TICK_RECEIVED so the position monitor sees them.
+    #   ticker_stream     — whatever is on the OPERATOR's watchlist right now,
+    #                       cached for HTTP reads. Publishes nothing and decides
+    #                       nothing.
+    #
+    # The second exists because `components/MarketData.tsx` used to open its own
+    # Binance socket from the BROWSER. That made live prices depend on the
+    # viewer's location: an operator in a region Binance blocks saw a price grid
+    # that silently never ticked, from the same build that worked elsewhere.
+    #
+    # Starts with zero subscriptions and opens no socket until a symbol is
+    # actually requested, so it costs nothing when nobody is watching.
+    ticker_stream = get_ticker_stream()
+    ticker_stream.start()
 
     # Spec Sections 14 and 15. Both workers existed with fully mocked cycle
     # bodies AND were never started from here, so neither loop ran at all.
@@ -324,6 +349,14 @@ async def lifespan(app: FastAPI):
         task.cancel()
     live_data_task.cancel()
 
+    # Awaited, not just cancelled: the relay owns an upstream socket and its own
+    # inner tasks, and an un-awaited cancel leaves them logging
+    # "Task exception was never retrieved" during an otherwise clean shutdown.
+    await ticker_stream.stop()
+
+    # Release the shared outbound HTTP pool used by every third-party call.
+    await close_upstream_client()
+
     # Release the Polymarket HTTP session. Unconditional: the client is a lazily
     # built singleton, so closing when it was never opened is a no-op, and skipping
     # it on the disabled path would leak a session if anything else had touched it.
@@ -437,5 +470,58 @@ app.include_router(polymarket_api.router, prefix="/api/polymarket", tags=["Polym
 # strategies and replay. The data was already in the process with no route to it.
 # Nothing here decides anything and no endpoint accepts a write.
 app.include_router(catalog_api.router, prefix="/api/catalog", tags=["Catalog API"])
+
+# Every third-party market-data call the DASHBOARD makes.
+#
+# These used to run inside Next.js route handlers on Vercel, which execute in a
+# Vercel-chosen region — and from a US region Binance answers 451, "Unavailable
+# For Legal Reasons". The dashboard showed 502s on candles, order flow and
+# quotes while every local route worked. No retry or header fixes a 451; the
+# request has to originate somewhere the provider serves, so it originates here
+# and the Next routes proxy to it server-to-server.
+#
+# Distinct from /api/market, which is the AGENT's normalized ccxt view of
+# FUTURES. This serves the SPOT shapes the charts have always used. Collapsing
+# them would silently swap one market for the other.
+app.include_router(marketdata_api.router, prefix="/api/marketdata", tags=["Market Data API"])
+
+# THE OPERATOR'S OWN EXCHANGE PATH. It places REAL orders.
+#
+# Mounted under /api/operator, NOT under /api/exchange, and the separation is
+# deliberate: `api/exchange.py` documents at length why it has no
+# order-placement route, and that file stays read-only. Putting order placement
+# beside it would make the next reader believe that warning had been abandoned.
+#
+# This is the HUMAN's path — their own API keys, sent per request from their own
+# browser, for a button they clicked. CLAUDE.md invariant 1 places manual clicks
+# outside the Supervisor's scope on purpose. The AGENT's path to an exchange is
+# unchanged and untouched: Supervisor -> CRO -> TAR_APPROVED -> ExecutionAgent,
+# gated by LIVE_TRADING and risk-checked at every step.
+#
+# It moved here from `app/api/exchange/route.ts` for one reason: Vercel's region
+# is refused by Binance with a 451, so signed orders sent from there would fail
+# exactly when real money was on the line. See docs/DEPLOYMENT_NETWORKING.md.
+#
+# EVERY ROUTE REQUIRES WRITE AUTH — the Next.js route it replaces had no
+# credential of its own, so this closes the "reachable by anything that can reach
+# the port" exposure rather than relocating it. It is registered with no agent
+# and reachable by no event, and `graphs/contracts.FORBIDDEN_IMPORTS` fails the
+# build if anything under graphs/ imports it.
+app.include_router(
+    operator_exchange_api.router,
+    prefix="/api/operator/exchange",
+    tags=["Operator Exchange API"],
+)
+
+# The operator's MANUAL TRADE PANEL. Separate from operator_exchange above for
+# the reason that module's docstring gives: this one is mostly the credential-less
+# paper book, and putting it beside the real-order path would make "which of these
+# can move money?" a question you answer by reading carefully rather than by
+# looking at the import.
+app.include_router(
+    operator_trade_api.router,
+    prefix="/api/operator/trade",
+    tags=["Operator Trade Panel"],
+)
 
 # Original fallback health check removed, using dedicated router above

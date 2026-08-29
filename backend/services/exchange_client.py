@@ -2,6 +2,7 @@ import ccxt.async_support as ccxt
 import os
 import logging
 from dotenv import load_dotenv
+from typing import Optional
 
 load_dotenv()
 
@@ -131,7 +132,7 @@ class ExchangeClient:
             logger.error(f"Error fetching tickers: {e}")
             return {}
 
-    async def fetch_usdt_perpetual_prices(self) -> dict:
+    async def fetch_usdt_perpetual_prices(self) -> Optional[dict]:
         """`{'BTC/USDT': 77240.5, ...}` for USDT-settled PERPETUALS only.
 
         WHY THIS EXISTS — A SILENT TOTAL FAILURE OF THE PRICE CACHE
@@ -159,8 +160,28 @@ class ExchangeClient:
         different price (basis), so whichever iterated last would win at random.
         Several are also `active: False`.
 
-        Returns `{}` on failure or when nothing matched — never a partial cache
-        presented as complete. The caller distinguishes the two cases.
+        RETURNS None WHEN THE CALL FAILED AND {} WHEN IT SUCCEEDED AND MATCHED
+        NOTHING. Those are different facts and the caller must act on them
+        differently, which it could not do while both were `{}`:
+
+            None  the exchange did not answer usefully. RETRYABLE — a later
+                  attempt may succeed.
+            {}    the exchange answered and no ticker passed the filters. NOT
+                  retryable; asking again returns the same non-match.
+
+        This distinction was missing and it made `market_data.fetch_prices`'s
+        retry loop dead code. That function catches an exception to retry with
+        backoff — but this method swallowed every exception and returned `{}`,
+        so nothing ever raised, no retry ever happened, and a transient upstream
+        hiccup was reported as:
+
+            Price refresh produced no usable symbols. The previous cache of 569
+            price(s) is left in place and is now STALE.
+
+        which reads as a FILTER problem and sends you to look at symbol
+        formatting. The actual cause, observed live, was
+        `'str' object has no attribute 'keys'` raised inside ccxt when Binance
+        returned a non-JSON body. Never a partial cache presented as complete.
         """
         try:
             # Needed for the metadata this filters on. ccxt caches it, so the
@@ -168,8 +189,14 @@ class ExchangeClient:
             await self.exchange.load_markets()
             tickers = await self.exchange.fetch_tickers()
         except Exception as e:
-            logger.error("Error fetching perpetual prices: %s", e)
-            return {}
+            # None, not {}. See the docstring: `{}` would be read downstream as
+            # "answered, matched nothing" and would not be retried.
+            logger.error(
+                "Error fetching perpetual prices (%s: %s). This is a FAILED CALL, "
+                "not an empty result — the caller will retry.",
+                type(e).__name__, e,
+            )
+            return None
 
         prices: dict = {}
         skipped_no_market = 0

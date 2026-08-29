@@ -44,7 +44,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from backend.llm.provider import DEFAULT_TEMPERATURE, LLMProvider, ModelTier
+from backend.llm.provider import (
+    DEFAULT_TEMPERATURE,
+    LLMProvider,
+    ModelTier,
+    request_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +249,7 @@ async def consult(
                 system=system,
                 user=user,
                 tier=ModelTier.REASONING,
-                max_tokens=MAX_TOKENS_PER_OPINION,
+                max_tokens=request_budget(MAX_TOKENS_PER_OPINION),
                 temperature=DEFAULT_TEMPERATURE,
             )
         except Exception as exc:  # noqa: BLE001

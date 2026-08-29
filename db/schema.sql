@@ -12,6 +12,34 @@
 --
 -- Gating a whole schema on one table's existence is not a migration. Keep every
 -- statement here idempotent and `init_db` will pick up anything added later.
+--
+-- ---------------------------------------------------------------------
+-- THIS IS NOT THE ONLY DATABASE. THERE ARE THREE SQLITE FILES TOO.
+--
+-- Found by auditing every table the code writes against this file. They are
+-- deliberate, they are NOT declared here, and they must not be "consolidated"
+-- into Postgres without a real migration — each is created by its own module at
+-- runtime, so adding a Postgres table with the same name produces two stores
+-- with one name and no error.
+--
+--   audit.db                     backend/core/audit.py — `audit_logs`, the
+--                                LLM prompt/response/decision trail. Plain
+--                                sqlite3, created inline on first write.
+--
+--   db/knowledge_graph.db        backend/services/semantic_memory.py —
+--                                `entities` and `relationships`. aiosqlite.
+--                                NOTE the Postgres tables `kg_nodes` /
+--                                `kg_edges` below are the BROWSER's knowledge
+--                                graph and are a different store with a
+--                                different shape. Same idea, two owners.
+--
+--   .data/graph_checkpoints.sqlite
+--                                LangGraph's own checkpointer (see
+--                                backend/graphs/runtime.py). Its schema belongs
+--                                to the library, not to this file.
+--
+-- CLAUDE.md's "two data stores" note predates these. The rule it states still
+-- holds and applies to all of them: two actors must not write one book.
 -- ---------------------------------------------------------------------
 
 -- ============================================================================
@@ -116,7 +144,23 @@ CREATE TABLE IF NOT EXISTS reflections (
   sections             jsonb,           -- parsed {WHY, FAILED_SIGNAL, EARLIER_EXIT, CONFIDENCE, LESSON}; null if the model didn't follow the labeled format
   entry_context_used   text,
   exit_context_used    text NOT NULL,
-  finish_reason        text
+  finish_reason        text,
+  -- WHO WROTE `content`: 'model' or 'rules'.
+  --
+  -- Added when the reflection graph gained an LLM node (Phase 33). Before that
+  -- every lesson came from the same three template strings, so provenance was
+  -- implicit. Now a row can hold either a template or real model analysis, and
+  -- those carry very different weight as evidence — the Evaluation layer and the
+  -- learning dashboard both read this table, and without this column they would
+  -- average a canned string and a reasoned finding together as if they were the
+  -- same observation.
+  --
+  -- Nullable: rows written before this existed genuinely have unknown
+  -- provenance, and defaulting them to 'rules' would assert something not known.
+  lesson_source        text CHECK (lesson_source IN ('model', 'rules')),
+  -- The model and token count, or why the model was not used. Answers "why is
+  -- this lesson generic?" without reading the logs.
+  lesson_detail        text
 );
 COMMENT ON TABLE reflections IS 'One post-trade reflection per closed trade. Replaces .data/reflections.json.';
 
@@ -718,6 +762,12 @@ COMMENT ON TABLE monitored_positions IS 'Live stop-loss watch list. Rows are del
 -- ---------------------------------------------------------------------
 
 ALTER TABLE missions ADD COLUMN IF NOT EXISTS baseline_equity_usd numeric;
+
+-- Phase 33 — lesson provenance. See the comment in the `reflections` CREATE
+-- block for why a template lesson and a model-written one must stay
+-- distinguishable in the table the Evaluation layer averages over.
+ALTER TABLE reflections ADD COLUMN IF NOT EXISTS lesson_source text;
+ALTER TABLE reflections ADD COLUMN IF NOT EXISTS lesson_detail text;
 
 
 -- ============================================================================

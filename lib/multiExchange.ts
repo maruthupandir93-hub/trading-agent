@@ -44,137 +44,26 @@ export type MultiExchangeSnapshot = {
   fetchedAt: number;
 };
 
-const FETCH_TIMEOUT_MS = 5000;
-
-async function fetchJson(url: string): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal multiexchange fetch)' }, signal: controller.signal });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`${res.status}: ${text.slice(0, 150)}`);
-    }
-    return await res.json();
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// Kraken's asset naming predates most others' (BTC -> XBT) — this is
-// the one venue-specific symbol quirk worth naming explicitly rather
-// than hiding behind a generic lookup table.
-const KRAKEN_BASE_OVERRIDES: Record<string, string> = { BTC: 'XBT' };
-
-function baseOf(item: WatchItem): string {
-  return item.symbol.split('/')[0].toUpperCase();
-}
-
-async function fetchBinance(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    const sym = item.binance ?? item.symbol.replace('/', '');
-    const json = await fetchJson(`https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`);
-    const price = parseFloat(json.price);
-    if (!isFinite(price)) throw new Error('non-numeric price in response');
-    return { exchange: 'binance', ok: true, price, quoteCurrency: 'USDT' };
-  } catch (err) {
-    return { exchange: 'binance', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-async function fetchBybit(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    const sym = `${baseOf(item)}USDT`;
-    const json = await fetchJson(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${encodeURIComponent(sym)}`);
-    const row = json?.result?.list?.[0];
-    const price = row ? parseFloat(row.lastPrice) : NaN;
-    if (!isFinite(price)) throw new Error('symbol not found or non-numeric price');
-    return { exchange: 'bybit', ok: true, price, quoteCurrency: 'USDT' };
-  } catch (err) {
-    return { exchange: 'bybit', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-async function fetchOkx(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    const instId = `${baseOf(item)}-USDT`;
-    const json = await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${encodeURIComponent(instId)}`);
-    const row = json?.data?.[0];
-    const price = row ? parseFloat(row.last) : NaN;
-    if (!isFinite(price)) throw new Error('symbol not found or non-numeric price');
-    return { exchange: 'okx', ok: true, price, quoteCurrency: 'USDT' };
-  } catch (err) {
-    return { exchange: 'okx', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-async function fetchKraken(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    const base = baseOf(item);
-    const krakenBase = KRAKEN_BASE_OVERRIDES[base] ?? base;
-    const pair = `${krakenBase}USDT`;
-    const json = await fetchJson(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(pair)}`);
-    if (Array.isArray(json?.error) && json.error.length > 0) throw new Error(json.error.join('; '));
-    const resultKey = json?.result ? Object.keys(json.result)[0] : undefined;
-    const row = resultKey ? json.result[resultKey] : undefined;
-    const price = row?.c?.[0] !== undefined ? parseFloat(row.c[0]) : NaN; // 'c' = last trade closed [price, lot volume]
-    if (!isFinite(price)) throw new Error('pair not found or non-numeric price — Kraken symbol mapping is best-effort (only the BTC->XBT rename is handled explicitly)');
-    return { exchange: 'kraken', ok: true, price, quoteCurrency: 'USDT' };
-  } catch (err) {
-    return { exchange: 'kraken', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-async function fetchCoinbase(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    // Coinbase Exchange's public book is USD-quoted for most pairs, not
-    // USDT — used as-is and labeled honestly rather than assumed
-    // equivalent to the USDT-quoted venues above (USDT/USD typically
-    // trades within a few basis points of parity, but that's an
-    // assumption this module states rather than silently bakes in).
-    const productId = `${baseOf(item)}-USD`;
-    const json = await fetchJson(`https://api.exchange.coinbase.com/products/${encodeURIComponent(productId)}/ticker`);
-    const price = json?.price !== undefined ? parseFloat(json.price) : NaN;
-    if (!isFinite(price)) throw new Error('product not found or non-numeric price');
-    return { exchange: 'coinbase', ok: true, price, quoteCurrency: 'USD' };
-  } catch (err) {
-    return { exchange: 'coinbase', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-async function fetchCryptoCom(item: WatchItem): Promise<ExchangeQuote> {
-  try {
-    const instrumentName = `${baseOf(item)}_USDT`;
-    const json = await fetchJson(`https://api.crypto.com/v2/public/get-ticker?instrument_name=${encodeURIComponent(instrumentName)}`);
-    // result.data is an array when instrument_name is given, but Crypto.com's
-    // API has returned a bare object for this shape in the past — handle both
-    // rather than assume one and throw an unhelpful "undefined" error.
-    const row = Array.isArray(json?.result?.data) ? json.result.data[0] : json?.result?.data;
-    const price = row?.a !== undefined ? parseFloat(row.a) : NaN; // 'a' = latest trade price
-    if (!isFinite(price)) throw new Error('instrument not found or non-numeric price');
-    return { exchange: 'cryptocom', ok: true, price, quoteCurrency: 'USDT' };
-  } catch (err) {
-    return { exchange: 'cryptocom', ok: false, error: err instanceof Error ? err.message : 'unknown error' };
-  }
-}
-
-const FETCHERS: Record<ExchangeId, (item: WatchItem) => Promise<ExchangeQuote>> = {
-  binance: fetchBinance,
-  bybit: fetchBybit,
-  okx: fetchOkx,
-  kraken: fetchKraken,
-  coinbase: fetchCoinbase,
-  cryptocom: fetchCryptoCom,
-};
-
-export async function aggregateMultiExchangePrices(item: WatchItem): Promise<MultiExchangeSnapshot | { error: string }> {
-  if (item.type !== 'crypto') {
-    return { error: 'Multi-exchange aggregation is crypto-only — there is no second free equities data source wired into this app (see DATA CAPABILITIES).' };
-  }
-  const exchanges: ExchangeId[] = ['binance', 'bybit', 'okx', 'kraken', 'coinbase', 'cryptocom'];
-  const quotes = await Promise.all(exchanges.map((ex) => FETCHERS[ex](item)));
-  return { symbol: item.symbol, quotes, fetchedAt: Date.now() };
-}
+// ---------------------------------------------------------------------
+// THE VENUE FETCHERS USED TO LIVE HERE AND HAVE MOVED TO THE BACKEND.
+//
+// Six `fetchBinance`/`fetchBybit`/... functions and `aggregateMultiExchangePrices`
+// called api.binance.com, api.bybit.com, okx.com, kraken.com,
+// api.exchange.coinbase.com and api.crypto.com directly from a Vercel route
+// handler. Binance refuses a restricted region with a 451, so this shared the
+// exact failure that broke /api/candles — and in its quieter form, because
+// `Promise.allSettled` meant a refused venue came back as one more failed quote
+// rather than as an error. The panel would have shown five venues instead of six
+// and looked like Binance was merely slow.
+//
+// `backend/api/marketdata.py::get_multi_exchange` now queries them from a served
+// region and returns THIS FILE'S `MultiExchangeSnapshot` shape verbatim, so
+// everything below is unchanged and `app/api/multiexchange/route.ts` is a plain
+// proxy.
+//
+// What remains here is the pure logic, which is where CLAUDE.md says it belongs:
+// the types, `computeSpread`, and the chat-context builder. None of it does I/O.
+// ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
 // Spread analysis — pure, given a snapshot. Only compares quotes that

@@ -59,6 +59,10 @@ from backend.graphs.nodes.risk_gateway import (
     RISK_GATEWAY_NODE,
     register_risk_gateway_node,
 )
+from backend.graphs.nodes.consultation import (
+    NODE_NAME as CONSULTATION_NODE,
+    register_consultation_node,
+)
 from backend.graphs.nodes.supervisor import SUPERVISOR_NODE, register_supervisor_node
 from backend.graphs.opportunity import (
     _after_scoring,
@@ -98,6 +102,8 @@ def _ensure_nodes() -> None:
         register_supervisor_node()
     if get_contract(RISK_GATEWAY_NODE) is None:
         register_risk_gateway_node()
+    if get_contract(CONSULTATION_NODE) is None:
+        register_consultation_node()
 
     # Phase 35. Registered ONLY when the feature is on, so with it off these nodes
     # do not exist — they are not registered-but-idle. A registered node still
@@ -172,7 +178,20 @@ def analysis_config() -> GraphConfig:
         # Prose describing a trade the gateway then refused would be the same
         # failure as prose describing one the Supervisor refused.
         (SUPERVISOR_NODE, RISK_GATEWAY_NODE),
-        (RISK_GATEWAY_NODE, NARRATIVE_NODE),
+        # Phase 48. AFTER the decision AND after the gateway, which is the entire
+        # safety argument for this node rather than an ordering preference.
+        #
+        # Section 31 draws the consultation feeding back INTO the Supervisor. That
+        # diagram describes the intent ("ask another model when unsure"); placing
+        # the node there would put external opinions in state while the decision
+        # was still being formed, one careless `reads=` tuple away from an outside
+        # model steering a trade. Here it is structurally incapable of influencing
+        # either gate: both have already written their verdicts and nothing
+        # downstream re-derives them.
+        #
+        # It writes `consultation` and nothing else — see its NodeContract.
+        (RISK_GATEWAY_NODE, CONSULTATION_NODE),
+        (CONSULTATION_NODE, NARRATIVE_NODE),
         (NARRATIVE_NODE, END),
     ]
 
@@ -194,7 +213,7 @@ def analysis_config() -> GraphConfig:
     return GraphConfig(
         name=GRAPH_NAME,
         nodes=[*base.nodes, *active_specialists, DEBATE_NODE, SUPERVISOR_NODE,
-               RISK_GATEWAY_NODE],
+               RISK_GATEWAY_NODE, CONSULTATION_NODE],
         entry=base.entry,
         edges=edges,
         conditional_edges=conditionals,

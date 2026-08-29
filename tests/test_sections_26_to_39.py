@@ -304,21 +304,87 @@ def test_the_result_contains_nothing_a_gate_can_read():
         )
 
 
-def test_nothing_in_graphs_imports_the_consultation_service():
-    """`consultation` is not a TradingState field either, so a node cannot write one
-    and the Supervisor cannot read one. Wiring it in must be a deliberate diff."""
+def test_the_consultation_is_wired_but_cannot_influence_any_gate():
+    """INVERTED, NOT DELETED — this test's demand was met, not abandoned.
+
+    It used to assert that `ai_consultation` was imported by NOTHING in
+    `backend/graphs/` and that `consultation` was not a `TradingState` field. Its
+    stated reason was: *"Wiring it in must be a deliberate diff."*
+
+    It now is wired — deliberately, in a reviewed change (Phase 48). So the claim
+    worth defending moved from "it is not connected" to "it is connected in the
+    only shape that keeps it advisory". Section 31: *"the external AI response is
+    advisory evidence, not authority."*
+
+    Four properties, and losing any one of them turns advice into authority:
+
+      1. Exactly ONE module under graphs/ touches the service, so the coupling is
+         a single reviewable place rather than scattered.
+      2. The node runs AFTER the risk gateway, so it is structurally incapable of
+         influencing the decision or the approval — not merely forbidden.
+      3. It writes `consultation` and nothing else.
+      4. NO OTHER NODE READS `consultation`. This is the one that matters most: a
+         gate reading this field is exactly the change that would make an external
+         model an authority, and it would be easy to add without noticing.
+    """
     import pathlib
 
+    from backend.graphs.analysis import analysis_config
+    from backend.graphs.registry import all_contracts, get_contract
     from backend.graphs.state import STATE_FIELDS
 
-    assert not any("consult" in f for f in STATE_FIELDS)
+    # The field exists now, and that was the deliberate part.
+    assert "consultation" in STATE_FIELDS
 
+    # 1. One importer only.
+    #
+    # Checked by AST, not substring. `state.py`'s comment EXPLAINS why this field
+    # exists and names the service to do so — a raw text scan flags that
+    # explanation as the offence and forces the next reader to delete the
+    # reasoning to get a green test.
+    import ast
+
+    importers = []
     for path in pathlib.Path("backend/graphs").rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        assert "ai_consultation" not in text, (
-            f"{path} imports the consultation service — it must stay outside the "
-            f"reasoning graph until wiring it is reviewed deliberately"
-        )
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.append(node.module)
+            elif isinstance(node, ast.Import):
+                modules.extend(a.name for a in node.names)
+            if any("ai_consultation" in m for m in modules):
+                importers.append(path)
+                break
+
+    assert [p.name for p in importers] == ["consultation.py"], (
+        f"the consultation service should be reachable from exactly one node module; "
+        f"found {[str(p) for p in importers]}"
+    )
+
+    cfg = analysis_config()
+
+    # 2. It runs after the gateway.
+    assert ("risk_gateway", "external_consultation") in cfg.edges, (
+        "the consultation must run AFTER the risk gateway. Moving it earlier would "
+        "put external opinions in state while the decision was still being formed."
+    )
+
+    # 3. It writes only what it declares.
+    contract = get_contract("external_consultation")
+    assert contract is not None
+    assert set(contract.writes) <= {"consultation", "llm_calls_made", "llm_tokens_used"}
+
+    # 4. Nothing else reads it.
+    readers = [
+        c.name for c in all_contracts()
+        if "consultation" in c.reads and c.name != "external_consultation"
+    ]
+    assert readers == [], (
+        f"these nodes READ `consultation`: {readers}. No gate may read an external "
+        f"model's opinion — that is the change that turns advisory evidence into "
+        f"authority, and Section 31 forbids it."
+    )
 
 
 def test_no_majority_is_computed_from_the_panel():

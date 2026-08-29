@@ -21,6 +21,18 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends
 
 from backend.core.auth import auth_status, require_write_auth
+# `settings` was USED BY THREE ROUTES AND NEVER IMPORTED, so each raised
+# NameError -> HTTP 500:
+#
+#   GET  /trading-mode           the Settings page's mode display
+#   POST /live-trading/enable    turning real-money trading ON
+#   POST /live-trading/disable   turning it OFF  <-- the dangerous one
+#
+# The disable route raised on its FIRST statement, so it failed safe (the flag
+# never changed) — but the documented way to switch back to paper over HTTP was
+# dead. Found by sweeping every endpoint rather than by any test: nothing
+# imported these three functions, so an import-time NameError could not surface.
+from backend.core.config import settings
 
 from backend.core.system_state import (
     is_emergency_stopped,

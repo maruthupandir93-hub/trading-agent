@@ -16,12 +16,12 @@
 // ---------------------------------------------------------------------
 
 import dynamic from 'next/dynamic';
-import { useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { PolymarketCard, type PolymarketCardData } from '@/components/cards/PolymarketCard';
 import { Badge } from '@/components/ui/Badge';
 import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/components/ui/primitives';
-import { BACKEND_PATHS } from '@/lib/backendConfig';
+import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
 // Code-split. The operator panels sit below this page's real-data content, so
@@ -32,6 +32,13 @@ const PolymarketOperator = dynamic(
   () => import('@/components/operator/PolymarketOperator').then((m) => ({ default: m.PolymarketOperator })),
   { ssr: false },
 );
+
+// The symbols the backend's Polymarket worker polls. Kept in step with
+// `backend/workers/polymarket_worker.WATCH_SYMBOLS` — discovering a mapping for a
+// symbol the worker does not poll would produce a candidate that can be confirmed
+// and then never read, which looks like a broken confirmation rather than a
+// mismatched list.
+const WATCHED_SYMBOLS = ['BTC/USDT', 'ETH/USDT'] as const;
 
 type Status = {
   enabled: boolean; adapterAvailable: boolean; adapterBlocker: string | null;
@@ -61,6 +68,89 @@ export default function PolymarketPage() {
   );
   const signals = useBackend<{ signals: string[]; total: number; unimplemented: Record<string, string>; refusedPath: string }>(
     BACKEND_PATHS.polymarketSignals, { intervalMs: 300_000 },
+  );
+
+  // ---------------------------------------------------------------------
+  // Discovery and confirmation, from the UI.
+  //
+  // WHY THESE CONTROLS EXIST
+  // ------------------------
+  // The third gate is "at least one HUMAN-CONFIRMED mapping", and until now
+  // there was no way for a human to grant it from the product. `POST
+  // /api/polymarket/mappings/confirm` was the only path and nothing rendered a
+  // control that called it, so the gate could only ever be satisfied by an
+  // operator who knew to run a curl. Every snapshot read `applicable: false,
+  // reason: no CONFIRMED mapping exists`, forever, and the page looked broken
+  // while every piece of it worked.
+  //
+  // `api/polymarket.py` makes exactly this argument about the route: "a safety
+  // check that also happens to make the feature impossible is not a safety
+  // check, it is a bug." A route nobody can reach is the same bug one layer up.
+  //
+  // THIS DOES NOT WEAKEN THE GATE — IT IS THE GATE.
+  // Confirming is still a deliberate, per-mapping human act. The button sends
+  // the operator's decision; the backend still refuses any confirmation that
+  // does not carry `set_by_human`, and there is deliberately no "confirm all".
+  // Un-confirming is offered on the same row, because withdrawing trust must
+  // never be harder than granting it.
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const reloadAll = useCallback(() => {
+    void status.reload();
+    void mappings.reload();
+    void snapshots.reload();
+  }, [status, mappings, snapshots]);
+
+  const confirmMapping = useCallback(
+    async (symbol: string, outcome: string, confirmed: boolean) => {
+      const key = `${symbol}|${outcome}`;
+      setBusy(key);
+      setActionError(null);
+      try {
+        const res = await fetch(backendProxyPath('/api/polymarket/mappings/confirm'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol, outcome, confirmed }),
+        });
+        if (!res.ok) {
+          // The backend's own message is surfaced verbatim. It distinguishes
+          // "no such mapping, run discovery first" from an auth failure, and
+          // replacing it with a generic string would throw that away.
+          const body = await res.text();
+          throw new Error(`HTTP ${res.status}: ${body.slice(0, 300)}`);
+        }
+        reloadAll();
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : 'confirmation failed');
+      } finally {
+        setBusy(null);
+      }
+    },
+    [reloadAll],
+  );
+
+  const runDiscovery = useCallback(
+    async (symbol: string) => {
+      setBusy(`discover:${symbol}`);
+      setActionError(null);
+      try {
+        const res = await fetch(
+          backendProxyPath(`/api/polymarket/discover/${encodeURIComponent(symbol)}`),
+          { method: 'POST' },
+        );
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`HTTP ${res.status}: ${body.slice(0, 300)}`);
+        }
+        reloadAll();
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : 'discovery failed');
+      } finally {
+        setBusy(null);
+      }
+    },
+    [reloadAll],
   );
 
   const s = status.data;
@@ -185,21 +275,73 @@ export default function PolymarketPage() {
       </Card>
 
       <Card>
-        <SectionTitle>Mappings</SectionTitle>
+        <SectionTitle
+          action={
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {WATCHED_SYMBOLS.map((sym) => (
+                <button
+                  key={sym}
+                  type="button"
+                  className="chip"
+                  disabled={busy !== null || s?.enabled !== true}
+                  onClick={() => void runDiscovery(sym)}
+                  title={
+                    s?.enabled === true
+                      ? `Search Polymarket for markets about ${sym}. Writes UNCONFIRMED candidates only.`
+                      : 'POLYMARKET_ENABLED is off, so discovery would write mappings nothing reads.'
+                  }
+                >
+                  {busy === `discover:${sym}` ? 'Searching…' : `Discover ${sym.split('/')[0]}`}
+                </button>
+              ))}
+            </div>
+          }
+        >
+          Mappings
+        </SectionTitle>
+
+        {actionError ? (
+          <div
+            className="text-[11px] mb-2 border-l pl-2 leading-relaxed"
+            style={{ color: 'var(--negative)', borderColor: 'var(--negative)' }}
+          >
+            {actionError}
+          </div>
+        ) : null}
+
         <TermTable
           columns={[
             { key: 'sy', label: 'Symbol' }, { key: 'o', label: 'Outcome' }, { key: 'r', label: 'Role' },
-            { key: 'b', label: 'Basis' }, { key: 'c', label: 'Confirmed' },
+            { key: 'b', label: 'Basis' }, { key: 'c', label: 'Confirmed' }, { key: 'a', label: '' },
           ]}
-          empty="No mappings discovered. Discovery needs POLYMARKET_ENABLED and network access to Polymarket."
+          empty="No mappings discovered. Use the Discover buttons above — discovery needs POLYMARKET_ENABLED and network access to Polymarket."
         >
           {(mappings.data?.mappings ?? []).map((m, i) => (
             <tr key={`${m.symbol}-${m.outcome}-${i}`}>
               <td className="mono text-[11.5px]">{m.symbol}</td>
-              <td className="mono text-[11px]">{m.outcome}</td>
+              <td className="mono text-[11px]" title={m.title ?? undefined}>{m.outcome}</td>
               <td className="text-[11px]">{m.role}</td>
               <td className="mono text-[10.5px]" style={{ color: 'var(--text-secondary)' }}>{m.directionalBasis ?? '—'}</td>
               <td><Badge state={m.confirmed ? 'CONFIRMED' : 'WARN'} label={m.confirmed ? 'Yes' : 'Pending'} /></td>
+              <td>
+                <button
+                  type="button"
+                  className="chip"
+                  disabled={busy !== null}
+                  onClick={() => void confirmMapping(m.symbol, m.outcome, !m.confirmed)}
+                  title={
+                    m.confirmed
+                      ? 'Withdraw confirmation. This mapping stops feeding the panel immediately.'
+                      : 'Confirm that this market is really about this instrument. Only then does it feed the panel.'
+                  }
+                >
+                  {busy === `${m.symbol}|${m.outcome}`
+                    ? '…'
+                    : m.confirmed
+                      ? 'Un-confirm'
+                      : 'Confirm'}
+                </button>
+              </td>
             </tr>
           ))}
         </TermTable>

@@ -1,0 +1,11 @@
+{
+  "task-verify-1787849289": {
+    "id": "task-verify-1787849289",
+    "symbol": "BTC/USDT",
+    "tab": "paper",
+    "side": "buy",
+    "marginUsd": 10,
+    "leverage": 2,
+    "status": "cancelled"
+  }
+}

@@ -397,6 +397,78 @@ class PositionMonitorAgent(BaseAgent):
     # Phase 30 / spec Section 13 — read and modify, for the monitoring graph
     # ------------------------------------------------------------------
 
+    async def track_manual_position(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty: float,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: Optional[float] = None,
+        tab: str = "paper",
+    ) -> str:
+        """Watch a position the OPERATOR opened by hand. Returns its tracking id.
+
+        WHY THIS IS A PUBLIC METHOD AND NOT A PAIR OF BUS EVENTS
+        --------------------------------------------------------
+        The obvious way to register a manual trade is to publish TAR_APPROVED and
+        ORDER_FILLED, so it travels the same path as an agent trade. That was
+        tried and it is wrong on three counts, each found by running it:
+
+          1. `ExecutionAgent` also subscribes to TAR_APPROVED, so publishing one
+             makes the AGENT'S EXECUTOR place a second (simulated) order for a
+             trade the operator has already booked.
+          2. Its own ORDER_FILLED then consumes the pending entry, and a
+             hand-published second fill arrives for a `tar_id` that is no longer
+             pending — logged, correctly, as an UNPROTECTED POSITION. A false
+             alarm on every manual trade is how a real one stops being read.
+          3. `ExecutionAgent` compares `tar.direction` against the literal
+             "LONG", so the case of a hand-built event silently decides whether
+             the order is a buy or a sell.
+
+        More fundamentally, a TAR is an AGENT artifact: it means the Supervisor
+        proposed and the CRO approved. Synthesising one for a human's click would
+        put a fabricated approval in the audit trail for a decision no agent made.
+        CLAUDE.md invariant 1 keeps the operator plane outside the agent plane;
+        this method is that boundary, and the `tar_id` it mints is prefixed
+        `manual-` so nothing downstream can mistake it for a CRO approval.
+
+        WHAT IT DOES NOT RELAX. The position is watched by exactly the same
+        `_check_price` loop as an agent position, the stop can still only ever be
+        TIGHTENED, and it is persisted to the same watch list so a restart
+        restores it.
+        """
+        import uuid as _uuid
+
+        tar_id = f"manual-{_uuid.uuid4().hex[:12]}"
+        self._open[tar_id] = _Tracked(
+            tar_id=tar_id,
+            symbol=symbol,
+            side=side,
+            tab=tab,
+            qty=qty,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            opened_at=datetime.datetime.utcnow(),
+            # Seeded at entry, exactly as `_register_fill` does. A None peak
+            # would make the first tick look like an unbounded excursion.
+            peak_price=entry_price,
+        )
+        logger.info(
+            "Monitoring MANUAL %s %s %s from %s (stop %s, target %s). %d position(s) watched.",
+            side, qty, symbol, entry_price, stop_loss, take_profit, len(self._open),
+        )
+        self.record_decision(
+            "manual-position-tracked",
+            f"{symbol} opened by the operator; stop {stop_loss} is now enforced.",
+            {"tarId": tar_id, "entryPrice": entry_price, "stopLoss": stop_loss},
+            acted=True,
+        )
+        await self.persist_watch_list()
+        return tar_id
+
     def snapshot_open(self) -> List[Dict[str, Any]]:
         """Plain-dict view of every watched position.
 
@@ -695,5 +767,46 @@ class PositionMonitorAgent(BaseAgent):
             self._closing.discard(pos.tar_id)
 
 
+# The ONE monitor. See `get_position_monitor`.
+_monitor: Optional[PositionMonitorAgent] = None
+
+
 def get_position_monitor() -> PositionMonitorAgent:
-    return PositionMonitorAgent()
+    """The process-wide position monitor.
+
+    IT WAS NOT A SINGLETON, AND THAT SILENTLY BROKE /api/graphs/positions
+    ---------------------------------------------------------------------
+    This used to be `return PositionMonitorAgent()` — a NEW, EMPTY agent on every
+    call. `main.py` builds one at startup, subscribes it to the bus and hands it
+    the execution engine, and that instance is the one holding every watched
+    position. Every other caller got a different object.
+
+    So `GET /api/graphs/positions`, whose own docstring calls this agent "the
+    single source of truth on what is open", constructed a fresh empty monitor and
+    reported `count: 0` — always, no matter how many positions the real one was
+    watching. The positions view was not showing an empty book; it was showing a
+    different book that could never have anything in it.
+
+    The same shape hid a second fault: `ExecutionAgent` keeps `_last_prices` from
+    TICK_RECEIVED, so a freshly constructed one has seen no ticks and refuses to
+    simulate a fill with "no observed price for X yet".
+
+    Every other accessor in this codebase is already a singleton —
+    `get_message_bus`, `get_event_buffer`, `get_ticker_stream`,
+    `get_polymarket_client`. This one only looked like one.
+    """
+    global _monitor
+    if _monitor is None:
+        _monitor = PositionMonitorAgent()
+    return _monitor
+
+
+def reset_position_monitor() -> None:
+    """Drop the singleton. For tests, which must not inherit another test's book."""
+    global _monitor
+    # DETACH BEFORE DROPPING. The bus holds a bound method, so releasing the
+    # reference alone leaves the old agent subscribed and still receiving
+    # events forever — see `BaseAgent.detach`.
+    if _monitor is not None:
+        _monitor.detach()
+    _monitor = None

@@ -1,235 +1,216 @@
+"""Graph 5 — Trade Reflection (spec Section 16 / Phase 33), on `TradingState`.
+
+    Trade Closed -> Memory -> Execution Quality -> Outcome -> Lesson -> Store
+
+WHAT CHANGED, AND WHY IT WAS THE LAST AUDIT ITEM
+------------------------------------------------
+This graph ran on its own `ReflectionState`. It was therefore the ONLY graph in
+the system that did not go through `build_graph`, which meant no `NodeContract`
+validation, no declared-write enforcement, and no run tracing. Spec Section 4 is
+explicit that there should be one shared state:
+
+    "Don't let every agent maintain its own ad-hoc state. Create one strongly
+     typed TradingState that every node reads from and writes back to."
+
+It was tolerable while every node here was deterministic. It stopped being
+tolerable when a model started writing the lesson: an unconstrained node with an
+LLM in it is precisely what the contract layer exists to prevent. A node on the
+old state could have written the confidence calibration delta — which feeds
+position sizing — and nothing would have objected.
+
+THREE CONSEQUENCES OF THE MOVE
+------------------------------
+1. **`collect_context` is gone, not ported.** It read a symbol's memory, which is
+   what `memory_loader` already does and does better — all seven Section 15
+   stores, a typed `MemoryContext`, and per-store `unavailable` reasons rather
+   than a bare dict. The graph reuses that node now. Deleting a duplicate is the
+   engineering principle the spec states outright.
+
+2. **The lesson is contract-isolated.** `reflection_lesson` is the only field the
+   LLM node may write; `reflection` sits in `DETERMINISTIC_ONLY_FIELDS`.
+
+3. **Runs are traced.** Every reflection now produces a `RunTrace` like every
+   other graph, so "why did this trade produce that lesson" is answerable from
+   the trace store rather than only from logs.
+
+`produces_decision=False`: this graph's job is not to decide. Without that flag
+`finish_run` would label every successful reflection "no decision produced".
+"""
+
+from __future__ import annotations
+
 import logging
-from typing import Dict, Any, TypedDict, Optional, List
-from langgraph.graph import StateGraph, END
-import time
+from typing import Any, Dict, Optional
+
+from langgraph.graph import END
+
+from backend.graphs.builder import GraphConfig, build_graph
+from backend.graphs.nodes.memory_loader import (
+    MEMORY_LOADER_NODE,
+    register_memory_node,
+)
+from backend.graphs.nodes.reflection import (
+    EXECUTION_NODE,
+    LESSON_NODE,
+    OUTCOME_NODE,
+    STORE_NODE,
+    register_reflection_nodes,
+    rule_based_lesson,
+)
+from backend.graphs.runtime import finish_run, start_run
+from backend.graphs.state import TradingState, TriggerReason
+from backend.llm.budget import RunBudget
 
 logger = logging.getLogger(__name__)
 
-class ReflectionState(TypedDict):
-    # Inputs
-    trade_receipt: Dict[str, Any]
-    
-    # Context
-    market_context: Dict[str, Any]
-    
-    # Analysis
-    execution_quality: str
-    execution_quality_detail: str
-    outcome_classification: str
-    attribution: List[str]
-    
-    # Outputs
-    lesson: str
-    confidence_delta: float
+GRAPH_NAME = "trade_reflection"
 
-async def collect_context(state: ReflectionState) -> ReflectionState:
-    """Read the real memory context for this symbol.
+_nodes_registered = False
 
-    Previously returned `{"note": "Context fetch stubbed"}`. A stub is at least
-    visible; what made it worth fixing is that Section 15's memory layer already
-    exists and `fetch_memory_context` reads all seven stores, so the context was
-    available and simply not asked for.
+
+def _ensure_nodes() -> None:
+    """Register this graph's nodes once.
+
+    Guarded by `get_contract`, not by a module flag alone — `clear_registry()`
+    resets the flag for the graph modules it knows about, and a node that checked
+    only its own flag would refuse to re-register after a clear and leave the
+    graph unbuildable.
     """
-    symbol = state["trade_receipt"].get("symbol")
-    if not symbol:
-        state["market_context"] = {
-            "unavailable": ["no symbol on the trade receipt, so no memory to read"]
-        }
-        return state
+    global _nodes_registered
+    if _nodes_registered:
+        return
+    from backend.graphs.registry import get_contract
+
+    if get_contract(MEMORY_LOADER_NODE) is None:
+        register_memory_node()
+    if get_contract(EXECUTION_NODE) is None:
+        register_reflection_nodes()
+
+    _nodes_registered = True
+
+
+def reflection_config() -> GraphConfig:
+    """Strictly linear. Every stage needs the one before it.
+
+    No conditional edges and no fan-out: execution quality needs the receipt,
+    the outcome needs the P&L, the lesson needs both, and the store needs the
+    lesson. There is nothing here that can usefully run in parallel, and a
+    superstep split would only add ways for a partial reflection to be stored.
+    """
+    _ensure_nodes()
+    return GraphConfig(
+        name=GRAPH_NAME,
+        nodes=[MEMORY_LOADER_NODE, EXECUTION_NODE, OUTCOME_NODE, LESSON_NODE, STORE_NODE],
+        entry=MEMORY_LOADER_NODE,
+        edges=[
+            (MEMORY_LOADER_NODE, EXECUTION_NODE),
+            (EXECUTION_NODE, OUTCOME_NODE),
+            (OUTCOME_NODE, LESSON_NODE),
+            (LESSON_NODE, STORE_NODE),
+            (STORE_NODE, END),
+        ],
+    )
+
+
+async def run_reflection_graph(
+    receipt: Dict[str, Any],
+    checkpointer: Any = None,
+    budget: Optional[RunBudget] = None,
+) -> Dict[str, Any]:
+    """Reflect on one closed trade. Never raises.
+
+    NO CHECKPOINTER IS USED BY DEFAULT, and that is deliberate rather than an
+    omission. A reflection is a single short pass over a trade that has already
+    closed — there is no position to resume reasoning about and nothing a restart
+    would need to continue. Graph 4 (monitoring) checkpoints because a POSITION
+    outlives a process; this does not.
+
+    `thread_scope` is the trade, so if a checkpointer is ever supplied the thread
+    maps to the thing being reflected on rather than to a run id nothing can
+    correlate.
+    """
+    _ensure_nodes()
+
+    symbol = receipt.get("symbol") or "UNKNOWN"
+    trade_id = receipt.get("trade_id") or receipt.get("tradeId") or "unknown"
+
+    state, ctx, thread_id = start_run(
+        graph=GRAPH_NAME,
+        symbol=symbol,
+        trigger=TriggerReason(
+            kind="manual",
+            symbol=symbol,
+            detail=f"trade {trade_id} closed",
+        ),
+        thread_scope=f"trade:{trade_id}",
+        budget=budget,
+    )
+
+    # Injected here rather than loaded by a node, so the graph has exactly one
+    # source of truth for which trade it is reflecting on and cannot pick a
+    # different one mid-run — the same reasoning as `monitored_position`.
+    state["closed_trade"] = receipt
 
     try:
-        from backend.services.memory_manager import fetch_memory_context
-
-        state["market_context"] = await fetch_memory_context(symbol)
-    except Exception as exc:  # noqa: BLE001
-        # Recorded, not substituted. A reflection written against invented context
-        # produces a lesson about a market that did not happen.
-        logger.error("Reflection could not read memory for %s: %s", symbol, exc)
-        state["market_context"] = {"unavailable": [f"memory context: {exc}"]}
-    return state
-
-
-async def analyze_execution(state: ReflectionState) -> ReflectionState:
-    """Read the MEASURED execution score, or report that there is none.
-
-    This used to be `state["execution_quality"] = "Good"` unconditionally — every
-    trade in the system's history graded itself Good, which is the same class of bug
-    as slippage hardcoded to 0.0 giving every fill a perfect score.
-
-    It matters more than it looks: `generate_lesson` and the confidence calibration
-    both read this, so a permanent "Good" means execution is never identified as the
-    cause of a loss, and the system can never learn that it is filling badly.
-
-    `agents/execution_agent._persist_execution_quality` writes a real score to the
-    `execution_quality` table, with a deliberately NULLABLE score — a fill with no
-    reference price is not a bad fill. That distinction is preserved here:
-    'unavailable' is not 'Poor'.
-    """
-    receipt = state["trade_receipt"]
-    order_id = receipt.get("orderId") or receipt.get("order_id")
-
-    if not order_id:
-        state["execution_quality"] = "unavailable"
-        state["execution_quality_detail"] = (
-            "no order id on the trade receipt, so the persisted execution score "
-            "cannot be looked up"
+        graph = build_graph(reflection_config(), ctx, checkpointer=checkpointer)
+        config = {"configurable": {"thread_id": thread_id}} if checkpointer else None
+        final: TradingState = await (
+            graph.ainvoke(state, config=config) if config else graph.ainvoke(state)
         )
-        return state
+    except Exception as e:
+        logger.error("Reflection graph failed for trade %s: %s", trade_id, e)
+        finish_run(ctx, None, outcome="failed",
+                   no_decision_reason=f"graph error: {e}", produces_decision=False)
+        return {"ok": False, "symbol": symbol, "error": str(e), "runId": ctx.run_id}
 
-    try:
-        from backend.core.db import get_db_pool
-
-        pool = get_db_pool()
-        if pool is None:
-            state["execution_quality"] = "unavailable"
-            state["execution_quality_detail"] = (
-                "no database pool — execution_quality lives in Postgres, which is "
-                "not provisioned by default. This is NOT a good fill."
-            )
-            return state
-
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT score, slippage_bps, latency_ms, fully_filled, notes "
-                "FROM execution_quality WHERE order_id = $1",
-                str(order_id),
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Execution quality lookup failed for %s: %s", order_id, exc)
-        state["execution_quality"] = "unavailable"
-        state["execution_quality_detail"] = f"lookup failed: {exc}"
-        return state
-
-    if row is None or row["score"] is None:
-        # A NULL score means not measurable, which the Evaluation layer must exclude
-        # from averages rather than treat as zero.
-        state["execution_quality"] = "unavailable"
-        state["execution_quality_detail"] = (
-            f"no measurable score for order {order_id}"
-            + ("" if row is None else " (score is NULL — no reference price)")
-        )
-        return state
-
-    score = float(row["score"])
-    state["execution_quality"] = (
-        "Good" if score >= 0.7 else "Fair" if score >= 0.4 else "Poor"
-    )
-    state["execution_quality_detail"] = (
-        f"score {score:.3f} (slippage {row['slippage_bps']} bps, "
-        f"latency {row['latency_ms']} ms, fully filled={row['fully_filled']})"
-    )
-    return state
-
-def outcome_analysis(state: ReflectionState) -> ReflectionState:
-    """Classify the trade as success or failure and attribute it."""
-    receipt = state["trade_receipt"]
-    pnl = float(receipt.get("pnl", 0.0))
-    won = pnl >= 0
-    strategies = receipt.get("strategies", []) or []
-    
-    state["outcome_classification"] = "Success" if won else "Failure"
-    
-    attribution = []
-    if not won:
-        if "trend" in strategies and "mean_reversion" not in strategies:
-            attribution.append("Trend entry failed, possible mean reversion or false breakout.")
-        elif "breakout" in strategies:
-            attribution.append("Breakout failed, possible false breakout.")
-    
-    state["attribution"] = attribution
-    return state
-
-def generate_lesson(state: ReflectionState) -> ReflectionState:
-    """Generate a specific, testable lesson."""
-    receipt = state["trade_receipt"]
-    won = state["outcome_classification"] == "Success"
-    attribution = state["attribution"]
-    
-    if won:
-        lesson = "No strict recommendation from a single winning trade. Continue monitoring repeatability."
-    else:
-        if attribution:
-            lesson = f"Check if {attribution[0]} correlates with this regime."
-        else:
-            lesson = "Check if losses cluster in this regime before changing weighting."
-            
-    state["lesson"] = lesson
-    # Delegated, not re-derived. `reflection_agent` already owns this formula, and
-    # two copies of a calibration rule that feeds position sizing would drift —
-    # this file originally copied the expression verbatim.
-    from backend.agents.reflection_agent import calibration_delta
-
-    state["confidence_delta"] = calibration_delta(float(receipt.get("pnl", 0.0)))
-
-    return state
-
-async def store_memory(state: ReflectionState) -> ReflectionState:
-    """Store the lesson into Semantic Memory (and log it)."""
-    from backend.services.semantic_memory import upsert_entity, add_relationship
-    
-    lesson_id = f"lesson_{int(time.time())}"
-    await upsert_entity(
-        entity_id=lesson_id,
-        entity_type="TradeLesson",
-        properties={
-            "lesson": state["lesson"],
-            "outcome": state["outcome_classification"],
-            "trade_symbol": state["trade_receipt"].get("symbol", "UNKNOWN")
-        }
-    )
-    
-    # Link to strategies
-    strategies = state["trade_receipt"].get("strategies", []) or []
-    for strat in strategies:
-        await upsert_entity(strat, "Strategy", {"name": strat})
-        await add_relationship(strat, lesson_id, "has_lesson", weight=1.0)
-        
-    return state
+    trace = finish_run(ctx, final, produces_decision=False)
+    return {"ok": True, "runId": ctx.run_id, **summarise_reflection(final),
+            "traceOutcome": trace.outcome}
 
 
-# Compiled lazily, once. See `reflection_agent.analyze_mistake` for why.
-_compiled = None
+def summarise_reflection(state: TradingState) -> Dict[str, Any]:
+    """The reflection's output shape.
 
-
-def get_reflection_graph():
-    """The compiled graph, built on first use and reused.
-
-    WHY THIS ONE IS STILL A LANGGRAPH GRAPH, unlike `strategy_selection_graph` and
-    `execution_graph` which were both converted to plain functions:
-
-    it is genuinely asynchronous and does real I/O — reading the seven memory stores,
-    looking up a persisted execution-quality row, writing lessons and relationships
-    into semantic memory. Those are the conditions under which a graph's error
-    capture and per-node structure earn their cost, and it runs once per CLOSED TRADE
-    rather than inside a scoring loop.
-
-    KNOWN GAP, stated rather than hidden: it still uses its own `ReflectionState`
-    rather than `TradingState`, so it does NOT go through `build_graph` and gets no
-    `NodeContract` validation, no declared-write enforcement and no run tracing. Spec
-    Section 4 wants one shared state. Closing it means adding a `closed_trade` field to
-    `TradingState` and mapping five nodes onto it — a real change to a working path,
-    and the last remaining item of the Sections 14-41 audit.
+    `lessonSource` is reported alongside the lesson, never folded into it. A
+    template string and a model's analysis are different kinds of artefact and a
+    reader must be able to tell which one they are looking at.
     """
-    global _compiled
-    if _compiled is None:
-        _compiled = build_reflection_graph()
-    return _compiled
+    reflection = state.get("reflection")
+    draft = state.get("reflection_lesson")
+
+    return {
+        "symbol": state.get("symbol"),
+        "tradeId": None if reflection is None else reflection.trade_id,
+        "outcome": None if reflection is None else reflection.outcome,
+        "realizedPnl": None if reflection is None else reflection.realized_pnl,
+        "executionQuality": None if reflection is None else reflection.execution_quality,
+        "executionQualityDetail": (
+            None if reflection is None else reflection.execution_quality_detail
+        ),
+        "attribution": [] if reflection is None else list(reflection.attribution),
+        "confidenceCalibrationDelta": (
+            None if reflection is None else reflection.confidence_calibration_delta
+        ),
+        "lesson": None if draft is None else draft.text,
+        "lessonSource": None if draft is None else draft.source,
+        "lessonDetail": None if draft is None else draft.detail,
+        "ruleBasedLesson": None if draft is None else draft.rule_based,
+        "unavailable": list(state.get("unavailable") or []),
+    }
 
 
-def build_reflection_graph() -> StateGraph:
-    workflow = StateGraph(ReflectionState)
+def lesson_from(state: TradingState) -> str:
+    """The lesson text, with the deterministic one as the floor.
 
-    workflow.add_node("collect_context", collect_context)
-    workflow.add_node("analyze_execution", analyze_execution)
-    workflow.add_node("outcome_analysis", outcome_analysis)
-    workflow.add_node("generate_lesson", generate_lesson)
-    workflow.add_node("store_memory", store_memory)
+    Never returns an empty string: `ReflectionCompletedEvent.lesson_learned` feeds
+    the HypothesisAgent, and an empty lesson would end the learning pipeline for
+    that trade rather than degrade it.
+    """
+    draft = state.get("reflection_lesson")
+    if draft is not None and draft.text:
+        return draft.text
 
-    workflow.set_entry_point("collect_context")
-    workflow.add_edge("collect_context", "analyze_execution")
-    workflow.add_edge("analyze_execution", "outcome_analysis")
-    workflow.add_edge("outcome_analysis", "generate_lesson")
-    workflow.add_edge("generate_lesson", "store_memory")
-    workflow.add_edge("store_memory", END)
-
-    return workflow.compile()
+    reflection = state.get("reflection")
+    if reflection is not None:
+        return rule_based_lesson(reflection)
+    return "No lesson generated."

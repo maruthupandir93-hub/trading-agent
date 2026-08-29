@@ -105,17 +105,58 @@ def test_the_node_endpoint_exposes_the_contracts_that_enforce_rule_0():
     per node, what it may WRITE and whether it may call a model."""
     from backend.api.graphs import list_nodes
 
+    # EVERY graph is built first, and that is required for this test to mean
+    # anything. The registry is populated lazily as configs are built, so
+    # `list_nodes()` on its own returns whichever graphs some earlier test
+    # happened to touch — the assertion below would pass or fail depending on
+    # test ORDER, and would silently stop covering a graph nobody had built.
+    from backend.graphs.analysis import analysis_config
+    from backend.graphs.monitoring import monitoring_config
+    from backend.graphs.reflection_graph import reflection_config
+
+    for build in (analysis_config, monitoring_config, reflection_config):
+        build()
+
     result = asyncio.run(list_nodes())
     assert result["total"] >= 20
 
-    # Exactly one node in the whole system may reach a model.
-    assert result["llmNodes"] == ["trade_thesis_narrative"], result["llmNodes"]
+    # EXACTLY these nodes may reach a model, pinned by name rather than by count
+    # so a new one cannot appear without editing this test.
+    #
+    # One (`trade_thesis_narrative`) → two (Phase 48's consultation) → three
+    # (Phase 33's reflection lesson). All three are the same shape and that shape
+    # is the point:
+    #
+    #   trade_thesis_narrative  explains a decision already computed
+    #   external_consultation   collects advisory opinions after both gates
+    #   reflection_lesson       writes prose about a trade that already closed
+    #
+    # None of them decides, sizes or approves anything. Each writes only prose or
+    # advisory evidence into a key no gate reads. A model in this system explains
+    # and advises; it never decides.
+    assert result["llmNodes"] == [
+        "external_consultation", "reflection_lesson", "trade_thesis_narrative",
+    ], result["llmNodes"]
 
     by_name = {n["name"]: n for n in result["nodes"]}
+
     gateway = by_name["risk_gateway"]
     assert gateway["deterministic"] is True
     assert gateway["mayCallLlm"] is False
     assert set(gateway["writes"]) == {"risk_assessment", "execution_plan"}
+
+    # Neither LLM node may write anything a gate reads. `decision`,
+    # `risk_assessment`, `execution_plan` and `confidence` are the fields that
+    # decide, approve, size or gate a trade — a model able to write one of them
+    # would be an authority regardless of what the docs said.
+    forbidden = {"decision", "risk_assessment", "execution_plan", "confidence",
+                 "trade_thesis", "position_decision"}
+    for name in result["llmNodes"]:
+        writes = set(by_name[name]["writes"])
+        assert not (writes & forbidden), (
+            f"LLM node {name!r} may write {sorted(writes & forbidden)} — a model that "
+            f"can write a decision field can overturn the decision."
+        )
 
 
 def test_the_runs_endpoint_reads_the_real_trace_store():
@@ -190,6 +231,29 @@ def test_the_graph_api_cannot_reach_an_order_call():
 # L2 -> L1 : the frontend knows where these live
 # ===========================================================================
 
+def _websocket_paths(app):
+    """Every mounted WebSocket path, with its mount prefix applied.
+
+    `app.openapi()` lists HTTP paths only, so a WebSocket route is invisible to
+    any check built on it. And walking `app.routes` does not help either: this
+    FastAPI version defers `include_router`, so the top level holds
+    `_IncludedRouter` wrappers — four of them — rather than the seventy-five real
+    routes. The routes live on `original_router` with their paths UNPREFIXED, and
+    the prefix is on `include_context`.
+
+    So `/api/graphs/stream` is a real, mounted endpoint that appears in neither
+    place unless it is reassembled here.
+    """
+    paths = set()
+    for entry in app.routes:
+        router = getattr(entry, "original_router", None)
+        prefix = getattr(getattr(entry, "include_context", None), "prefix", "") or ""
+        for route in getattr(router, "routes", []) if router else []:
+            if "WebSocket" in type(route).__name__:
+                paths.add(f"{prefix}{route.path}")
+    return paths
+
+
 def test_the_frontend_config_names_every_langgraph_path_the_backend_serves():
     """The paths must match EXACTLY. `lib/backendConfig.ts` exists because six
     components had localhost hardcoded and several pointed at paths FastAPI does not
@@ -201,7 +265,13 @@ def test_the_frontend_config_names_every_langgraph_path_the_backend_serves():
     from backend.main import app
 
     config = pathlib.Path("lib/backendConfig.ts").read_text(encoding="utf-8")
-    served = set(app.openapi()["paths"])
+
+    # WEBSOCKET ROUTES ARE ADDED EXPLICITLY. `app.openapi()` lists HTTP paths
+    # only, so `/api/graphs/stream` — a real, mounted WebSocket — was absent from
+    # `served` and would be reported as "a path FastAPI does not serve". It
+    # slipped through before only because that path was built inside a template
+    # literal, which this file's single-quote regex never matched.
+    served = set(app.openapi()["paths"]) | _websocket_paths(app)
 
     declared = set(re.findall(r"'(/api/graphs[a-z/-]*)'", config))
     assert declared, "backendConfig declares no LangGraph paths"
@@ -213,17 +283,65 @@ def test_the_frontend_config_names_every_langgraph_path_the_backend_serves():
         )
 
 
-def test_the_websocket_urls_derive_from_one_base():
-    """Written out separately, the host drifts between HTTP and WS config — and an
-    https deployment opening an insecure socket is blocked outright by browsers."""
+def test_the_frontend_opens_no_websockets():
+    """INVERTED, NOT DELETED.
+
+    This used to assert that `agentEventsWsUrl` and `graphStreamWsUrl` existed and
+    derived their host from one base, so the host could not drift between the HTTP
+    and WS config. That was the right check while the browser opened sockets.
+
+    It cannot open them any more. The frontend is served over https and the
+    backend has no TLS certificate, so a browser refuses `ws://` outright — and a
+    WebSocket cannot be proxied through a Vercel serverless function either. The
+    old helpers returned URLs that could never connect, and the failure was
+    silent: the agent terminal, the debate visualizer and the trade history table
+    simply stayed empty.
+
+    The frontend now polls same-origin routes that proxy to the backend. So the
+    invariant worth defending flipped: not "the WS URLs share a base" but "there
+    are no WS URLs at all". The BACKEND's socket endpoints still exist and are
+    still tested — see test_the_stream_endpoint_exists_for_section_39_5 below.
+    """
     import pathlib
 
-    config = pathlib.Path("lib/backendConfig.ts").read_text(encoding="utf-8")
-    for fn in ("agentEventsWsUrl", "graphStreamWsUrl"):
-        assert fn in config, f"{fn} is missing"
-    assert config.count("BACKEND_BASE.replace(/^http/, 'ws')") >= 2, (
-        "each WS url must derive from BACKEND_BASE rather than hardcoding a host"
+    raw = pathlib.Path("lib/backendConfig.ts").read_text(encoding="utf-8")
+    # Comments stripped first: that file's header EXPLAINS why the old helpers are
+    # gone and names them, so a raw substring scan would flag the explanation as
+    # the offence and force the next reader to delete the reasoning to get green.
+    config = chr(10).join(
+        line for line in raw.splitlines() if not line.strip().startswith(("//", "*", "/*"))
     )
+
+    for fn in ("agentEventsWsUrl", "graphStreamWsUrl"):
+        assert fn not in config, (
+            f"{fn} is back. A browser on an https page cannot open ws:// — this "
+            f"reintroduces a connection that fails silently."
+        )
+
+    assert "AGENT_EVENTS_PATH" in config, "the polling replacement is missing"
+    assert "backendProxyPath" in config, "the same-origin proxy helper is missing"
+    assert "serverOnlyBackendUrl" in config, (
+        "the absolute-URL builder must keep its server-only name so a component "
+        "calling it is a compile error rather than a silently blocked request"
+    )
+
+    # No component may construct a socket. Checked across the whole frontend
+    # rather than in this one file, because the call site that mattered most
+    # (components/MarketData.tsx) never used backendConfig at all — it hardcoded
+    # `wss://stream.binance.com`.
+    for folder in ("app", "components", "lib"):
+        for path in pathlib.Path(folder).rglob("*.ts*"):
+            if path.name.endswith(".test.ts"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            code = chr(10).join(
+                line for line in text.splitlines()
+                if not line.strip().startswith(("//", "*", "/*"))
+            )
+            assert "new WebSocket(" not in code, (
+                f"{path} opens a WebSocket from the browser. On an https deployment "
+                f"that connection is blocked and fails silently."
+            )
 
 
 def test_the_stream_endpoint_exists_for_section_39_5():

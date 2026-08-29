@@ -47,7 +47,12 @@ class ExecutionAgent(BaseAgent):
         that doesn't deliberately ask for live trading gets simulation.
         """
         super().__init__()
-        self.simulation_mode = (not settings.LIVE_TRADING) if simulation_mode is None else simulation_mode
+        # An EXPLICIT argument pins the mode for the life of this agent (the
+        # backtest engine passes `simulation_mode=True` and must never be able to
+        # go live because someone flipped a setting mid-backtest). `None` means
+        # "follow LIVE_TRADING", and that is resolved on every read — see the
+        # `simulation_mode` property.
+        self._simulation_override = simulation_mode
         self._last_prices = {}
         if self.simulation_mode:
             logger.info("ExecutionAgent started in SIMULATION mode — no real orders will be placed.")
@@ -57,6 +62,47 @@ class ExecutionAgent(BaseAgent):
                 "to a real exchange. USE_TESTNET=%s.",
                 settings.USE_TESTNET,
             )
+
+    @property
+    def simulation_mode(self) -> bool:
+        """Whether orders are simulated. READ AT CALL TIME, NOT AT CONSTRUCTION.
+
+        THE BUG THIS FIXES IS THE DANGEROUS DIRECTION OF A SAFETY TOGGLE
+        ----------------------------------------------------------------
+        This used to be a plain attribute assigned once in `__init__`:
+
+            self.simulation_mode = (not settings.LIVE_TRADING) if ... else ...
+
+        while `config.set_live_trading`'s docstring asserted the opposite:
+
+            "`ExecutionAgent` reads `settings.LIVE_TRADING` at call time, not
+             import time, so the next trade attempt sees the new value."
+
+        It did not. `main.py` constructs one agent at startup and subscribes it to
+        the bus, so that instance's mode was frozen at whatever LIVE_TRADING was
+        when the process booted. Toggling from the Settings page updated the
+        setting, persisted it to .env, reported success — and changed nothing
+        about what the running executor actually did.
+
+        Both directions are wrong, and one of them is severe:
+
+          OFF -> ON   the operator believes they are live; orders are simulated,
+                      so they think they hold positions they do not hold.
+          ON -> OFF   the operator presses "disable live trading", is told it
+                      worked, and REAL ORDERS KEEP BEING PLACED with real funds
+                      until the process is restarted.
+
+        The second is a safety control that reports success while doing nothing,
+        which is worse than not having the control.
+
+        Reading at call time is the same rule `services/execution_service.
+        execution_enabled()` already documents for `GRAPH_EXECUTION_ENABLED`, and
+        for the same reason: a module-level constant freezes the value at import
+        and makes the operator's toggle a no-op until a restart.
+        """
+        if self._simulation_override is not None:
+            return self._simulation_override
+        return not settings.LIVE_TRADING
 
     @property
     def name(self) -> str:
@@ -633,6 +679,48 @@ class ExecutionAgent(BaseAgent):
             logger.error(f"Failed to persist trade {trade_id}: {e}")
 
 
+# The ONE execution engine. See `get_execution_agent`.
+_execution_agent: Optional["ExecutionAgent"] = None
+
+
 def get_execution_agent() -> ExecutionAgent:
-    """Simulation unless LIVE_TRADING=true — see ExecutionAgent.__init__."""
-    return ExecutionAgent()
+    """The process-wide execution engine. Simulation unless LIVE_TRADING=true.
+
+    A SINGLETON NOW, AND THE REASON IS STATE THIS AGENT ACCUMULATES.
+    This used to construct a new agent per call. `main.py` builds one, subscribes
+    it to the bus and attaches it to the position monitor — and that instance is
+    the only one that ever sees a TICK_RECEIVED, so it is the only one whose
+    `_last_prices` is populated.
+
+    Any other caller got an agent that had seen no ticks, and simulating a fill
+    through it fails with:
+
+        TAR ... NOT simulated: no observed price for BTC/USDT yet, so there is no
+        honest fill price to simulate against.
+
+    which reads as a market-data problem and is actually a second, empty object.
+    Spec Section 8 calls this "a hard chokepoint — no agent talks to an exchange
+    directly, ever"; a chokepoint that can be instantiated freely is a chokepoint
+    in name only.
+    """
+    global _execution_agent
+    if _execution_agent is None:
+        _execution_agent = ExecutionAgent()
+    return _execution_agent
+
+
+def reset_execution_agent() -> None:
+    """Drop the singleton. For tests only.
+
+    A LIVE_TRADING toggle does NOT need this: `simulation_mode` is a property
+    resolved on every read, so the running agent follows the setting without
+    being rebuilt. Rebuilding it would also drop `_last_prices` and leave the old
+    instance subscribed to the bus.
+    """
+    global _execution_agent
+    # DETACH BEFORE DROPPING. The bus holds a bound method, so releasing the
+    # reference alone leaves the old agent subscribed and still receiving
+    # events forever — see `BaseAgent.detach`.
+    if _execution_agent is not None:
+        _execution_agent.detach()
+    _execution_agent = None

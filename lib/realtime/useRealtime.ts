@@ -143,8 +143,8 @@ export function useBackend<T>(
   const load = useCallback(async () => {
     if (!path) return;
     try {
-      const { backendUrl } = await import('../backendConfig');
-      const res = await fetch(backendUrl(path));
+      const { backendProxyPath } = await import('../backendConfig');
+      const res = await fetch(backendProxyPath(path));
       if (!res.ok) {
         setState('unreachable');
         setError(`HTTP ${res.status}`);

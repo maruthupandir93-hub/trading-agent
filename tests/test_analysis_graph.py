@@ -94,8 +94,42 @@ def _finding(name: str, role: str, **over) -> SpecialistFinding:
 
 
 # ===========================================================================
-# The three specialists with no feed
+# The three specialists that used to have no feed
+#
+# Orderflow, liquidity and news now read level-2 depth, the trade tape and RSS
+# headlines off `MarketSnapshot`. The tests below therefore exercise the path
+# where those feeds DID NOT ARRIVE, which is the case that still has to be
+# honest — and which is now a real failure mode rather than the permanent state.
+#
+# A snapshot with empty feed lists is what `data_validation` produces when the
+# fetch fails, so that is what these build.
 # ===========================================================================
+
+
+def _snapshot_with_no_feeds(**over) -> MarketSnapshot:
+    """A snapshot whose candles are fine but whose specialist feeds failed.
+
+    Empty lists mean NOT FETCHED, never "the book was empty" — see the
+    `MarketSnapshot` field comments. `feed_problems` carries the reasons, exactly
+    as the real fetch path fills them in.
+    """
+    snap = MarketSnapshot(
+        symbol="BTC/USDT",
+        price=130.0,
+        candles={"15m": _candles(80)},
+        order_book_bids=[],
+        order_book_asks=[],
+        trade_tape=[],
+        headlines=[],
+        feed_problems={
+            "orderflow": "depth/tape fetch failed: no order-book or trade-tape data reached this run",
+            "liquidity": "depth fetch failed: no order-book depth reached this run",
+            "news": "every headline feed failed: no headlines reached this run",
+        },
+    )
+    for k, v in over.items():
+        setattr(snap, k, v)
+    return snap
 
 @pytest.mark.parametrize(
     "node,name,role",
@@ -112,7 +146,7 @@ def test_a_specialist_with_no_feed_reports_unavailable_not_neutral(node, name, r
     `stance='neutral'` the debate would count three missing inputs as three votes
     for balance, and `coverage` would report a full panel.
     """
-    out = node(_state())
+    out = node(_state(market_data=_snapshot_with_no_feeds()))
     finding = out["specialist_findings"][0]
 
     assert finding.specialist == name
@@ -127,20 +161,45 @@ def test_a_specialist_with_no_feed_reports_unavailable_not_neutral(node, name, r
 
 
 def test_the_absent_specialists_name_the_specific_missing_feed():
-    """"unavailable" with no reason is not much better than silence."""
-    of = specialist_orderflow(_state())["specialist_findings"][0]
-    liq = specialist_liquidity(_state())["specialist_findings"][0]
-    news = specialist_news(_state())["specialist_findings"][0]
+    """"unavailable" with no reason is not much better than silence.
+
+    The reason now comes from `MarketSnapshot.feed_problems` — the specific fetch
+    that failed on this run — rather than from a module constant describing a
+    permanent gap. That is a strictly better answer to "why is this specialist
+    missing?", and the property under test is unchanged: it must name the feed.
+    """
+    st = _state(market_data=_snapshot_with_no_feeds())
+    of = specialist_orderflow(st)["specialist_findings"][0]
+    liq = specialist_liquidity(st)["specialist_findings"][0]
+    news = specialist_news(st)["specialist_findings"][0]
 
     assert "order-book" in of.reason_unavailable or "trade-tape" in of.reason_unavailable
     assert "depth" in liq.reason_unavailable
     assert "news" in news.reason_unavailable or "headline" in news.reason_unavailable
 
 
+def test_a_specialist_whose_feed_failed_is_told_apart_from_one_with_no_state():
+    """Two different absences must not collapse into one message.
+
+    "the depth fetch failed" and "there is no market data at all" call for
+    different operator responses, and a specialist that reported the same string
+    for both would hide which had happened.
+    """
+    no_state = specialist_orderflow(_state())["specialist_findings"][0]
+    failed_feed = specialist_orderflow(
+        _state(market_data=_snapshot_with_no_feeds())
+    )["specialist_findings"][0]
+
+    assert no_state.available is False and failed_feed.available is False
+    assert no_state.reason_unavailable != failed_feed.reason_unavailable
+    assert "market data" in no_state.reason_unavailable
+
+
 def test_orderflow_and_liquidity_also_stamp_the_refusal_into_state():
     """So a later reader finds an explicit refusal, not a None it might try to fill."""
-    of = specialist_orderflow(_state())["orderflow_analysis"]
-    liq = specialist_liquidity(_state())["liquidity_analysis"]
+    st = _state(market_data=_snapshot_with_no_feeds())
+    of = specialist_orderflow(st)["orderflow_analysis"]
+    liq = specialist_liquidity(st)["liquidity_analysis"]
     assert of.available is False and of.reason
     assert liq.available is False and liq.reason
 
@@ -148,9 +207,14 @@ def test_orderflow_and_liquidity_also_stamp_the_refusal_into_state():
 def test_liquidity_names_the_volume_proxy_without_substituting_it():
     """Pointing at what exists is useful; using it as depth would not be.
 
-    The finding must stay unavailable even though a volume proxy is quoted.
+    Still true with real depth wired in, and arguably more important: now that a
+    genuine spread and depth reading exists, the volume proxy must be visibly a
+    CROSS-CHECK and never the thing the concern was computed from.
     """
-    out = specialist_liquidity(_state(market_regime=MarketRegimeState(liquidity="HIGH")))
+    out = specialist_liquidity(_state(
+        market_data=_snapshot_with_no_feeds(),
+        market_regime=MarketRegimeState(liquidity="HIGH"),
+    ))
     finding = out["specialist_findings"][0]
     joined = " ".join(finding.evidence)
 
@@ -158,6 +222,29 @@ def test_liquidity_names_the_volume_proxy_without_substituting_it():
     assert "NOT order-book depth" in joined, "and labelled as not being depth"
     assert finding.available is False, "quoting a proxy must not make the specialist available"
     assert finding.concern is None, "an unavailable constraint contributes no concern"
+
+
+def test_liquidity_with_a_real_book_measures_a_concern_and_still_never_votes():
+    """The constraint role survives the specialist becoming available.
+
+    This is the property that would be easiest to lose in the rewrite: a
+    specialist that can now measure something might start expressing it as a
+    direction. Thin depth is a reason to size down, never a reason to be short.
+    """
+    book_bids = [{"price": 100.0 - i * 0.01, "qty": 5.0} for i in range(20)]
+    book_asks = [{"price": 100.01 + i * 0.01, "qty": 5.0} for i in range(20)]
+    out = specialist_liquidity(_state(market_data=MarketSnapshot(
+        symbol="BTC/USDT", price=100.0, candles={"15m": _candles(80)},
+        order_book_bids=book_bids, order_book_asks=book_asks,
+    )))
+    finding = out["specialist_findings"][0]
+
+    assert finding.available is True
+    assert finding.role == "constraint"
+    assert finding.concern is not None
+    assert finding.stance is None, "a constraint must never carry a direction"
+    assert finding.confidence is None, "a constraint must never carry a directional confidence"
+    assert finding.signed_weight() == 0.0, "a constraint must contribute nothing to the tally"
 
 
 # ===========================================================================

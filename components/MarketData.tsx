@@ -24,6 +24,17 @@ export function useMarketData(): MarketDataValue {
 }
 
 const EQUITY_POLL_MS = 8000;
+
+// Crypto ticks are polled far more often than equities because the backend
+// already holds them in memory from a live socket — this poll is a cache read,
+// not an exchange round-trip, so 2s costs almost nothing and keeps the price
+// grid feeling live. Equities genuinely hit Yahoo per poll, hence 8s.
+//
+// This is the one place the loss from retiring the browser's own WebSocket is
+// visible: ticks are now up to CRYPTO_POLL_MS old instead of instant. That is
+// the unavoidable price of the browser only being allowed to talk to its own
+// https origin — see the effect below for why.
+const CRYPTO_POLL_MS = 2000;
 const FLASH_MS = 700;
 
 export function MarketDataProvider({ children }: { children: React.ReactNode }) {
@@ -86,52 +97,74 @@ export function MarketDataProvider({ children }: { children: React.ReactNode }) 
   const cryptoItems = useMemo(() => watchlist.filter((w) => w.type === 'crypto' && w.binance), [watchlist]);
   const equityItems = useMemo(() => watchlist.filter((w) => w.type === 'equity'), [watchlist]);
 
-  // --- Crypto: single combined Binance WebSocket stream, reconnects with backoff ---
+  // --- Crypto: poll /api/ticks, which is fed by the BACKEND's Binance socket ---
+  //
+  // THIS USED TO BE A WEBSOCKET THIS COMPONENT OPENED ITSELF, straight to
+  // `wss://stream.binance.com:9443`, one per visitor.
+  //
+  // Two reasons it moved, and the second is the one that actually forced it:
+  //
+  //  1. It made the dashboard's correctness depend on the VIEWER's location.
+  //     Binance refuses some regions, so an operator in one saw a price grid
+  //     that silently never ticked — from the same build that worked elsewhere.
+  //     It is also why live prices kept updating while /api/candles returned
+  //     502: the two took completely different routes to the same exchange, and
+  //     that masked how broken the data layer was.
+  //  2. Every other market call now goes through the backend so that Vercel's
+  //     region cannot refuse it. Leaving one browser-to-exchange socket behind
+  //     would leave one path that fails for a reason none of the others can.
+  //
+  // WHY POLLING RATHER THAN A SOCKET TO OUR OWN BACKEND: this page is served
+  // over https and the backend has no TLS certificate, so the browser refuses
+  // `ws://` outright (mixed content) and a WebSocket cannot be proxied through a
+  // Vercel serverless function. The browser's last hop therefore has to be an
+  // ordinary same-origin https request.
+  //
+  // ONLY THAT LAST HOP IS POLLED. The backend still holds a real-time socket to
+  // Binance, so what a poll reads is a second or so old — not a fresh REST
+  // round-trip per symbol. The tick's own `ageSeconds` is carried through so
+  // staleness is measured, not assumed.
   useEffect(() => {
     if (!hydrated || cryptoItems.length === 0) return;
-    let ws: WebSocket | null = null;
-    let closedByUs = false;
-    let attempt = 0;
+    let cancelled = false;
 
     const bySlug = new Map(cryptoItems.map((w) => [w.binance!.toLowerCase(), w.symbol]));
-    const streams = [...bySlug.keys()].map((s) => `${s}@ticker`).join('/');
-    const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+    const query = [...bySlug.keys()].join(',');
 
-    function connect() {
-      ws = new WebSocket(url);
-      ws.onopen = () => {
-        attempt = 0;
-      };
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data);
-          const d = msg?.data;
-          if (!d?.s) return;
-          const symbol = bySlug.get(String(d.s).toLowerCase());
-          if (!symbol) return;
-          const price = parseFloat(d.c);
-          const openPrice = parseFloat(d.o);
-          if (!Number.isFinite(price)) return;
-          applyTick(symbol, price, Number.isFinite(openPrice) ? openPrice : null, 'ws-live');
-        } catch {
-          // ignore malformed frame
+    async function poll() {
+      try {
+        const res = await fetch(`/api/ticks?binance=${encodeURIComponent(query)}`);
+        const json = await res.json();
+        if (cancelled) return;
+        if (json.error) throw new Error(json.error);
+
+        for (const [slug, tick] of Object.entries(json.ticks ?? {})) {
+          // null means "subscribed, but no frame has arrived yet" — a symbol
+          // asked for the first time. Skipped rather than rendered as zero.
+          if (!tick) continue;
+          const symbol = bySlug.get(slug);
+          if (!symbol) continue;
+          const t = tick as { price: number; prevClose: number | null; stale: boolean };
+          if (!Number.isFinite(t.price)) continue;
+          // Still labelled 'ws-live': the tick genuinely originated from a
+          // websocket, just the backend's rather than this browser's, and the
+          // provenance labels exist to describe the DATA's origin, not the
+          // transport of the final hop. A stale one is downgraded so the UI's
+          // freshness indicator stays truthful.
+          applyTick(symbol, t.price, t.prevClose ?? null, t.stale ? 'poll-live' : 'ws-live');
         }
-      };
-      ws.onclose = () => {
-        if (closedByUs) return;
-        attempt++;
-        const backoff = Math.min(15000, 1000 * 2 ** attempt);
-        setTimeout(connect, backoff);
-      };
-      ws.onerror = () => {
-        ws?.close();
-      };
+      } catch {
+        // Silent: the equity poll below owns the visible error banner, and a
+        // transient failure here self-corrects on the next tick. A hard outage
+        // shows up as prices going stale, which the UI already surfaces.
+      }
     }
-    connect();
 
+    poll();
+    const iv = setInterval(poll, CRYPTO_POLL_MS);
     return () => {
-      closedByUs = true;
-      ws?.close();
+      cancelled = true;
+      clearInterval(iv);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, cryptoItems.map((c) => c.binance).join(',')]);

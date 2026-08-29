@@ -57,7 +57,12 @@ from backend.graphs.state import (
     TradingState,
 )
 from backend.llm.budget import RunBudget
-from backend.llm.provider import DEFAULT_TEMPERATURE, ModelTier, get_provider
+from backend.llm.provider import (
+    DEFAULT_TEMPERATURE,
+    ModelTier,
+    get_provider,
+    request_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -537,7 +542,10 @@ async def narrate_thesis(state: TradingState) -> Optional[Dict[str, Any]]:
         system=system,
         user=user,
         tier=ModelTier.NARRATIVE,
-        max_tokens=400,
+        # 400 tokens of PROSE (the prompt asks for 3-5 sentences), plus room
+        # for the model to think first. See `request_budget` — passing a bare
+        # 400 here returned an empty completion on every run.
+        max_tokens=request_budget(400),
         temperature=DEFAULT_TEMPERATURE,
     )
 

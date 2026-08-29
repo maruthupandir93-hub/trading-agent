@@ -387,3 +387,126 @@ def test_the_backend_portfolio_store_persists(monkeypatch):
             f"(lib/portfolioStore.server.ts) and is replaced wholesale on every save, "
             f"so a second writer there silently deletes the agent's book."
         )
+
+
+# ---------------------------------------------------------------------------
+# The chain, driven through the BUS in the real subscription order
+# ---------------------------------------------------------------------------
+#
+# WHY THE TESTS ABOVE DID NOT CATCH THE BUG THIS ONE EXISTS FOR
+# -------------------------------------------------------------
+# `test_an_approved_fill_becomes_a_monitored_position` calls the monitor's
+# handlers directly, approval first, so it can never observe the ORDER of bus
+# delivery. `test_the_chain_is_connected_end_to_end_by_contract` compares
+# DECLARED `events_published` against DECLARED `events_consumed`, so it passes as
+# long as the two agents name the same event — which they always did.
+#
+# The real failure was in neither place. `MessageBus.publish` delivered inline,
+# so `ExecutionAgent` — which `main.py` constructs, and therefore subscribes,
+# BEFORE `PositionMonitorAgent` — published ORDER_FILLED from inside its own
+# TAR_APPROVED handler, and that nested delivery ran to completion before the
+# outer TAR_APPROVED ever reached the monitor. The monitor saw the fill first,
+# found nothing pending, and logged:
+#
+#     UNPROTECTED POSITION: sell 0.1587 BTC/USDT filled at 78738.45 ... with no
+#     matching TAR_APPROVED, so no stop-loss is known and this position will NOT
+#     be monitored.
+#
+# Every position the agent opened, every time. Observed live on 2026-08-28.
+#
+# So this test publishes ONE event onto ONE bus with both real agents attached in
+# main.py's order, and asserts the position ends up watched. It is the only shape
+# that could have failed before the fix.
+
+
+def test_a_tar_approval_alone_produces_a_monitored_position(bus, monkeypatch):
+    """One publish, both real agents, main.py's subscription order."""
+    from backend.agents.execution_agent import ExecutionAgent
+    from backend.agents.position_monitor import PositionMonitorAgent
+
+    # SUBSCRIPTION ORDER IS THE POINT. main.py builds `execution` before
+    # `position_monitor`, so the executor is callback #1 on TAR_APPROVED and the
+    # monitor is #2. Reversing these two lines makes this test pass even against
+    # the original bug, which is precisely why the order is stated here.
+    executor = ExecutionAgent()
+    executor.rebind_bus(bus)
+
+    monitor = PositionMonitorAgent()
+    monitor.rebind_bus(bus)
+    monitor.attach_execution(FakeExecution())
+
+    # Paper mode: the executor simulates the fill and publishes ORDER_FILLED from
+    # inside its own TAR_APPROVED handler. That nested publish is the hazard.
+    # `LIVE_TRADING` is a read-only property backed by a private attribute, so it
+    # is set through the field rather than the property. `persist=False` is not an
+    # option on the setter's private path, and `set_live_trading` would WRITE .env
+    # from a test — so the attribute is patched directly and restored by
+    # monkeypatch.
+    monkeypatch.setattr(
+        "backend.core.config.settings._live_trading", False, raising=False
+    )
+
+    approved = approval(symbol="BTC/USDT", stop=68_000.0)
+
+    async def run():
+        # A tick FIRST. `ExecutionAgent` refuses to simulate a fill for a symbol it
+        # has never seen a price for — "no observed price ... so there is no honest
+        # fill price to simulate against" — which is the same never-fabricate rule
+        # the rest of this codebase runs on. Without it the executor declines and
+        # the test would pass for the wrong reason: no fill, so no unprotected fill.
+        await bus.publish("TICK_RECEIVED", TickReceivedEvent(symbol="BTC/USDT", price=70_000.0, volume=1.0, exchange="binance_futures"))
+        await bus.publish("TAR_APPROVED", approved)
+
+    asyncio.run(run())
+
+    watched = monitor.open_positions() if hasattr(monitor, "open_positions") else monitor._open
+    assert watched, (
+        "the fill was delivered to the monitor before the approval that authorised "
+        "it, so the position was recorded UNPROTECTED and nothing is enforcing its "
+        "stop-loss"
+    )
+
+    tracked = list(watched.values())[0]
+    assert tracked.symbol == "BTC/USDT"
+    assert tracked.stop_loss == 68_000.0, "the approved stop must reach the watch list"
+    assert tracked.tar_id == str(approved.tar_id), (
+        "the monitored position must be joined to the approval it came from"
+    )
+
+
+def test_no_position_is_ever_recorded_unprotected_by_ordering_alone(bus, monkeypatch, caplog):
+    """The negative form: the CRITICAL log line must not appear.
+
+    Asserted separately from the positive case because a future change could
+    populate the watch list from somewhere else and still log an unprotected fill
+    on the way — leaving the alarm firing on every trade until people learn to
+    ignore it, which is worse than a silent bug.
+    """
+    import logging as _logging
+
+    from backend.agents.execution_agent import ExecutionAgent
+    from backend.agents.position_monitor import PositionMonitorAgent
+
+    executor = ExecutionAgent()
+    executor.rebind_bus(bus)
+    monitor = PositionMonitorAgent()
+    monitor.rebind_bus(bus)
+    monitor.attach_execution(FakeExecution())
+
+    # `LIVE_TRADING` is a read-only property backed by a private attribute, so it
+    # is set through the field rather than the property. `persist=False` is not an
+    # option on the setter's private path, and `set_live_trading` would WRITE .env
+    # from a test — so the attribute is patched directly and restored by
+    # monkeypatch.
+    monkeypatch.setattr(
+        "backend.core.config.settings._live_trading", False, raising=False
+    )
+
+    async def run():
+        await bus.publish("TICK_RECEIVED", TickReceivedEvent(symbol="BTC/USDT", price=70_000.0, volume=1.0, exchange="binance_futures"))
+        await bus.publish("TAR_APPROVED", approval())
+
+    with caplog.at_level(_logging.CRITICAL):
+        asyncio.run(run())
+
+    assert "UNPROTECTED POSITION" not in caplog.text, caplog.text

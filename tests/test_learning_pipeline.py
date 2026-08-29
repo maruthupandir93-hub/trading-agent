@@ -347,8 +347,37 @@ async def test_duplicate_research_questions_are_not_re_queued():
 # Sections 14 & 15 — the loops actually run
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def private_bus(monkeypatch):
+    """A bus of this test's own, so a published event cannot start a graph run.
+
+    WHY THIS IS REQUIRED AND NOT TIDINESS
+    -------------------------------------
+    The analysis graph subscribes itself to TRIGGER_FIRED on the GLOBAL bus.
+    Anything that publishes one there during a test starts a real 23-node run
+    that reaches for the network — `tests/test_post_trade_chain.py` carries the
+    same fixture and says plainly "that has happened before".
+
+    It happened again here. The monitor worker used to raise its concern trigger
+    against a placeholder `symbol="PORTFOLIO"`, which failed instantly because no
+    such market exists. Now that it names the REAL symbol the concern is about —
+    which is the whole point, since a run on "PORTFOLIO" could never conclude
+    anything — the published trigger starts a genuine analysis run and the suite
+    stops dead with no failure and no output.
+
+    Patched by module because the worker resolves `get_message_bus` lazily inside
+    the publish helper.
+    """
+    from backend.core.message_bus import MessageBus
+    import backend.core.message_bus as mb
+
+    private = MessageBus()
+    monkeypatch.setattr(mb, "get_message_bus", lambda: private)
+    return private
+
+
 @pytest.mark.asyncio
-async def test_monitor_cycle_reports_real_state_not_a_hardcoded_position():
+async def test_monitor_cycle_reports_real_state_not_a_hardcoded_position(private_bus):
     """It used to return `[{"symbol": "BTC-USDT", "pnl_pct": -2.5}]` hardcoded."""
     from backend.workers.monitor_worker import ContinuousMonitorWorker
 
@@ -388,3 +417,84 @@ def test_workers_are_started_from_the_application_lifespan():
     assert "get_curiosity_worker" in main_src
     assert "monitor_worker.start()" in main_src
     assert "curiosity_worker.start()" in main_src
+
+
+# ===========================================================================
+# Lesson provenance (Phase 33) — a template and a model's analysis must stay
+# distinguishable in the table the Evaluation layer averages over.
+# ===========================================================================
+
+class _RecordingConn:
+    def __init__(self, sink): self.sink = sink
+    async def execute(self, sql, *args): self.sink.append((sql, args))
+
+
+class _RecordingPool:
+    def __init__(self, sink): self.sink = sink
+    def acquire(self):
+        sink = self.sink
+        class _Acquire:
+            async def __aenter__(self): return _RecordingConn(sink)
+            async def __aexit__(self, *exc): return False
+        return _Acquire()
+
+
+async def test_the_reflection_row_records_who_wrote_the_lesson(monkeypatch):
+    """`reflections.content` can now hold either a template string or real model
+    analysis, and the Evaluation layer + learning dashboard both read this table.
+
+    Without provenance they would average a canned string and a reasoned finding
+    together as if they were the same kind of observation.
+    """
+    import backend.agents.reflection_agent as ra
+
+    calls = []
+    monkeypatch.setattr(ra, "get_db_pool", lambda: _RecordingPool(calls))
+
+    await ra.ReflectionAgent()._persist_reflection(
+        "t-1", "BTC/USDT", "A model-written lesson.",
+        lesson_source="model", lesson_detail="glm-5.2, 285 tokens",
+    )
+
+    sql, args = calls[0]
+    assert "lesson_source" in sql and "lesson_detail" in sql
+    assert "model" in args
+    assert any("285 tokens" in str(a) for a in args)
+    # An upsert must refresh provenance too, or a re-reflection would keep the
+    # old source alongside new content.
+    assert "lesson_source = $6" in sql
+
+
+async def test_unknown_provenance_stays_null_rather_than_defaulting(monkeypatch):
+    """Rows written before the column existed have genuinely unknown provenance.
+
+    Defaulting them to 'rules' would assert a fact about the system's own history
+    that nobody measured — the same class as `fng: 50` on a failed fetch.
+    """
+    import backend.agents.reflection_agent as ra
+
+    calls = []
+    monkeypatch.setattr(ra, "get_db_pool", lambda: _RecordingPool(calls))
+
+    await ra.ReflectionAgent()._persist_reflection("t-2", "BTC/USDT", "A template lesson.")
+
+    args = calls[0][1]
+    assert args[-2] is None and args[-1] is None
+
+
+def test_the_schema_declares_the_provenance_columns():
+    """Both halves must exist: the CREATE block for a fresh database, and the
+    ALTER for an existing one. `CREATE TABLE IF NOT EXISTS` is a no-op on a live
+    table, so a column added only to the CREATE block never appears — the exact
+    mistake that left `execution_quality` declared-but-never-created for months.
+    """
+    import pathlib
+
+    sql = pathlib.Path("db/schema.sql").read_text(encoding="utf-8")
+    create = sql.split("CREATE TABLE IF NOT EXISTS reflections (")[1].split(");")[0]
+
+    for column in ("lesson_source", "lesson_detail"):
+        assert column in create, f"{column} missing from the reflections CREATE block"
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in sql, (
+            f"{column} has no ALTER — it will never appear on an existing database"
+        )

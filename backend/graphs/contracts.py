@@ -225,6 +225,17 @@ FORBIDDEN_IMPORTS: FrozenSet[str] = frozenset({
     "buy_paper",
     "sell_paper",
     "update_portfolio",
+    # The OPERATOR's manual exchange path (api/operator_exchange.py). It exists
+    # so a human can trade with their own keys from the dashboard, and it is
+    # deliberately unsupervised — CLAUDE.md invariant 1 puts manual clicks
+    # outside the Supervisor's scope.
+    #
+    # That is exactly why it must be unreachable from here. A graph node calling
+    # it would turn "the operator chose to do this" into "the model chose to do
+    # this" while keeping the label that says a human did, and it would bypass
+    # the CRO and the leverage ceiling on the way.
+    "place_order",
+    "operator_exchange",
 })
 
 # Modules under graphs/ exempt from the import ban, with the reason. Empty by

@@ -354,9 +354,12 @@ def test_reflection_does_not_grade_every_trade_as_good():
     permanent "Good" means execution can never be identified as the cause of a loss,
     so the system can never learn that it fills badly.
     """
-    import backend.graphs.reflection_graph as rg
+    # MOVED, NOT WEAKENED. Phase 33's migration onto `TradingState` relocated this
+    # from `reflection_graph.analyze_execution` to a contract-checked node; the
+    # property is unchanged and is now also enforced by the node's declared writes.
+    import backend.graphs.nodes.reflection as rn
 
-    src = code_only(rg.analyze_execution)
+    src = code_only(rn.assess_execution_quality)
     assert "score >= 0.7" in src, "the grade must be derived from a measured score"
     assert "execution_quality WHERE order_id" in src, (
         "it must look up the persisted score rather than assuming one"
@@ -364,18 +367,42 @@ def test_reflection_does_not_grade_every_trade_as_good():
 
     # With no order id there is nothing to look up, and that is 'unavailable' — NOT
     # 'Poor'. A fill with no reference price is not a bad fill.
-    state = {"trade_receipt": {"symbol": "BTC/USDT", "pnl": 1.0}}
-    asyncio.run(rg.analyze_execution(state))
-    assert state["execution_quality"] == "unavailable"
-    assert state["execution_quality_detail"]
+    delta = asyncio.run(rn.assess_execution_quality(
+        {"closed_trade": {"symbol": "BTC/USDT", "pnl": 1.0}}
+    ))
+    reflection = delta["reflection"]
+    assert reflection.execution_quality == "unavailable"
+    assert reflection.execution_quality_detail
 
 
 def test_reflection_reads_real_memory_rather_than_a_stub():
+    """The stub is gone, and so is the DUPLICATE that replaced it.
+
+    This asserted that `reflection_graph.collect_context` called
+    `fetch_memory_context` rather than returning `{"note": "Context fetch stubbed"}`.
+
+    Phase 33's migration deleted `collect_context` entirely rather than porting
+    it: reading a symbol's memory is what `memory_loader` already did, and did
+    better — all seven Section 15 stores, a typed `MemoryContext`, and per-store
+    `unavailable` reasons instead of a bare dict. Two implementations of one job
+    is the duplication the engineering principles forbid.
+
+    So the claim is now stronger: the reflection graph reads real memory AND owns
+    no second copy of the code that does it.
+    """
+    import backend.graphs.nodes.memory_loader as ml
     import backend.graphs.reflection_graph as rg
 
-    src = code_only(rg.collect_context)
+    assert not hasattr(rg, "collect_context"), (
+        "collect_context is back — it duplicates memory_loader"
+    )
+
+    src = code_only(ml.load_memory_context)
     assert "Context fetch stubbed" not in src
     assert "fetch_memory_context" in src
+
+    # And the graph actually uses that node.
+    assert ml.MEMORY_LOADER_NODE in rg.reflection_config().nodes
 
 
 def test_the_calibration_formula_has_exactly_one_definition():
@@ -383,12 +410,27 @@ def test_the_calibration_formula_has_exactly_one_definition():
     `reflection_graph`. This number feeds ConfidenceAgent, which feeds position
     sizing, so two copies that could drift is a real hazard."""
     import backend.agents.reflection_agent as ra
-    import backend.graphs.reflection_graph as rg
+
+    # The delta moved from the lesson node to `classify_outcome`, and that move
+    # made the guarantee STRONGER rather than merely relocating it: the lesson
+    # node may call a model, and `reflection` is in DETERMINISTIC_ONLY_FIELDS, so
+    # the field carrying this number is now one a model is structurally forbidden
+    # from writing.
+    import backend.graphs.nodes.reflection as rn
 
     assert hasattr(ra, "calibration_delta")
-    assert "calibration_delta" in code_only(rg.generate_lesson)
-    assert "/ 100.0" not in code_only(rg.generate_lesson), (
+
+    outcome_src = code_only(rn.classify_outcome)
+    assert "calibration_delta" in outcome_src
+    assert "/ 100.0" not in outcome_src, (
         "the graph is re-deriving the formula instead of calling the shared one"
+    )
+
+    # The LLM node must not compute it at all.
+    lesson_src = code_only(rn.write_lesson)
+    assert "calibration_delta" not in lesson_src, (
+        "the lesson node computes the calibration delta — that number feeds "
+        "position sizing and must not be produced by a node that calls a model"
     )
     assert ra.calibration_delta(1_000_000.0) == ra.CALIBRATION_CAP
     assert ra.calibration_delta(-1_000_000.0) == -ra.CALIBRATION_CAP
