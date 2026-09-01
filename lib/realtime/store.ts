@@ -50,6 +50,27 @@ export type GraphNodeState = {
   durationMs: number | null;
   detail: string | null;
   at: number;
+  /** Which graph and run this node belonged to, and for which instrument.
+   *
+   *  The backend has always sent all three (`GraphNodeStartedEvent` carries
+   *  `graph`, `run_id` and `symbol`); this store used to drop them, which is the
+   *  bug documented on `graphRuns` below. */
+  graph: string | null;
+  runId: string | null;
+  symbol: string | null;
+};
+
+/** One graph's live pipeline: the run it is on, and where that run has reached. */
+export type GraphRunState = {
+  graph: string;
+  runId: string | null;
+  /** The instrument this run is analysing. A pipeline without it is unreadable —
+   *  see the note on `graphRuns`. */
+  symbol: string | null;
+  nodes: Record<string, GraphNodeState>;
+  /** The node RUNNING right now in THIS graph. `null` between cycles. */
+  currentNode: string | null;
+  at: number;
 };
 
 export type TriggerEventState = {
@@ -68,12 +89,29 @@ export type RealtimeState = {
   connected: boolean;
   /** Raw tail, for the timeline and log views. */
   events: AgentStreamEvent[];
-  /** Node name -> latest known state, for the flow diagram. */
-  nodes: Record<string, GraphNodeState>;
-  /** The node currently RUNNING, which is what drives the flowing-dot edge.
-   *  `null` when nothing is running — the reference animates on a guessed
-   *  "active" state; this is the real one. */
-  currentNode: string | null;
+  /** Graph name -> that graph's live pipeline.
+   *
+   *  KEYED BY GRAPH, AND THAT IS A BUG FIX, NOT TIDINESS.
+   *
+   *  This used to be one flat `nodes: Record<name, state>` shared by every graph,
+   *  with `graph`, `run_id` and `symbol` discarded from each event. Two things
+   *  followed, and the operator saw both as "the pipeline is showing a different
+   *  coin than the one I am trading":
+   *
+   *    1. `position_monitoring` and `trade_analysis` SHARE SIX NODE NAMES —
+   *       memory_loader, data_validation, feature_generation, market_analysis,
+   *       regime_detection, market_state. The monitoring graph runs once per tick
+   *       per open position, so it fires constantly; every tick overwrote those
+   *       six entries with a monitoring run's state, for whatever symbol that
+   *       position happened to be. A decision cycle on SOL was therefore rendered
+   *       half from a BTC monitoring tick.
+   *    2. Nothing reset the map between runs, so a finished cycle's nodes stayed
+   *       and mixed with the next one's — two different cycles displayed side by
+   *       side as though they were one pipeline.
+   *
+   *  A new `runId` within a graph now REPLACES that graph's node map rather than
+   *  merging into it, and different graphs can no longer touch each other's. */
+  graphRuns: Record<string, GraphRunState>;
   /** Symbol -> last tick price seen on the stream. */
   prices: Record<string, number>;
   triggers: TriggerEventState[];
@@ -87,8 +125,7 @@ const MAX_TRIGGERS = 100;
 const initial: RealtimeState = {
   connected: false,
   events: [],
-  nodes: {},
-  currentNode: null,
+  graphRuns: {},
   prices: {},
   triggers: [],
   lastDecision: {},
@@ -188,17 +225,48 @@ export function route(prev: RealtimeState, e: AgentStreamEvent): RealtimeState {
                 ? 'FAILED'
                 : 'COMPLETED';
 
-        next.nodes = {
-          ...prev.nodes,
+        // An event with no graph is filed under 'unknown' rather than dropped.
+        // Losing a node from the pipeline is a worse failure than showing it in
+        // a bucket a caller has to ask for by name.
+        const graph = str(e, 'graph') ?? 'unknown';
+        const runId = str(e, 'run_id', 'runId');
+        const symbol = str(e, 'symbol');
+        const priorRun = prev.graphRuns[graph];
+
+        // A NEW RUN REPLACES THE MAP; it does not merge into it. Carrying the
+        // previous cycle's nodes forward renders two cycles as one pipeline, and
+        // the stale half looks exactly like a live one.
+        const sameRun = priorRun != null && runId != null && priorRun.runId === runId;
+        const baseNodes = sameRun ? priorRun.nodes : {};
+
+        const nodes: Record<string, GraphNodeState> = {
+          ...baseNodes,
           [name]: {
             name,
             status,
             durationMs: num(e, 'duration_ms', 'durationMs'),
             detail: str(e, 'detail', 'summary', 'out'),
             at,
+            graph,
+            runId,
+            symbol,
           },
         };
-        next.currentNode = status === 'RUNNING' ? name : prev.currentNode === name ? null : prev.currentNode;
+
+        const priorCurrent = sameRun ? priorRun.currentNode : null;
+        next.graphRuns = {
+          ...prev.graphRuns,
+          [graph]: {
+            graph,
+            runId,
+            // The run's symbol, kept from the first event that carried one — a
+            // later event without it must not blank the label mid-cycle.
+            symbol: symbol ?? (sameRun ? priorRun.symbol : null),
+            nodes,
+            currentNode: status === 'RUNNING' ? name : priorCurrent === name ? null : priorCurrent,
+            at,
+          },
+        };
       }
       break;
     }

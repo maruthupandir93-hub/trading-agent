@@ -56,6 +56,7 @@ from backend.agents.regime_agent import detect_market_regime
 from backend.graphs.contracts import NodeContract
 from backend.graphs.registry import register_node
 from backend.graphs.state import (
+    VolatilityState,
     MarketRegimeState,
     MarketSnapshot,
     SentimentAnalysis,
@@ -63,6 +64,8 @@ from backend.graphs.state import (
     TradingState,
 )
 from backend.services.market_data import fetch_klines, get_price
+
+from backend.services import volatility_journal
 
 logger = logging.getLogger(__name__)
 
@@ -645,6 +648,127 @@ def assemble_market_state(state: TradingState) -> Optional[Dict[str, Any]]:
     if regime is None or regime.regime is None:
         return {"unavailable": ["market_state (no regime was determined)"]}
     return None
+# ===========================================================================
+# Volatility analysis — a regime/risk layer, not another indicator
+# ===========================================================================
+
+def analyse_volatility_node(state: TradingState) -> Optional[Dict[str, Any]]:
+    """Measure volatility and derive the risk policy it implies.
+
+    DETERMINISTIC AND NEVER AN LLM CALL. Every number is arithmetic over the
+    candles already on `market_data`. CLAUDE.md is explicit that maths with a
+    real answer must not be delegated to a model; the model may INTERPRET this
+    output alongside trend, funding and news, and must never produce it.
+
+    WHY IT RUNS AFTER regime_detection AND BEFORE strategy scoring
+    -------------------------------------------------------------
+    It needs the same validated candles the regime used, and everything
+    downstream needs its verdict:
+
+        strategy scoring   a breakout profile is a different proposition in a
+                           compressed market than in an expanding one
+        Risk Gateway       size multiplier, leverage cap and stop distance
+        Supervisor         `trading_allowed` can refuse the trade outright
+
+    READS market_data ONLY, so it is replay-safe (Section 39.4). It performs no
+    fetch of its own: a node that fetched would reason over a different series on
+    a resumed checkpoint than it did on the original run.
+
+    AN UNMEASURABLE VOLATILITY BLOCKS TRADING RATHER THAN DEFAULTING TO CALM.
+    That is the one asymmetry worth stating plainly. Every other "unavailable" in
+    this graph degrades a vote; this one refuses, because position size and stop
+    distance are both derived from it and neither has a safe default.
+    """
+    from backend.algorithms.volatility import analyse_volatility
+
+    snapshot = state.get("market_data")
+    if snapshot is None:
+        return {
+            "volatility": VolatilityState(
+                trading_allowed=False,
+                risk_multiplier=0.0,
+                unavailable=["no market data in state"],
+                evidence=[
+                    "trading blocked: without candles there is no volatility "
+                    "measurement, and a stop cannot be placed against one that "
+                    "was never taken"
+                ],
+            ),
+            "unavailable": ["volatility analysis (no market data)"],
+        }
+
+    # 15m is the base timeframe every other node in this graph reasons over, so
+    # the volatility regime describes the same bars the decision is made on.
+    timeframe = "15m"
+    candles = snapshot.candles.get(timeframe) or []
+
+    reading = analyse_volatility(candles, symbol=state["symbol"], timeframe=timeframe)
+
+    out: Dict[str, Any] = {
+        "volatility": VolatilityState(
+            regime=reading.regime,
+            basis=reading.basis,
+            score=reading.score,
+            atr=reading.atr,
+            atr_percent=reading.atr_percent,
+            realized_volatility=reading.realized_volatility,
+            bollinger_width=reading.bollinger_width,
+            candle_range_percent=reading.candle_range_percent,
+            percentile=reading.percentile,
+            volatility_shock=reading.volatility_shock,
+            expansion_ratio=reading.expansion_ratio,
+            trading_allowed=reading.trading_allowed,
+            risk_multiplier=reading.risk_multiplier,
+            max_leverage=reading.max_leverage,
+            stop_atr_multiple=reading.stop_atr_multiple,
+            candles_used=reading.candles_used,
+            unavailable=list(reading.unavailable),
+            evidence=list(reading.evidence),
+        )
+    }
+
+    # Surfaced on the run's own unavailable list too, so "why did nothing trade?"
+    # names the volatility block rather than leaving the operator to infer it.
+    if not reading.trading_allowed:
+        out["unavailable"] = [
+            f"volatility gate ({reading.regime or 'unknown'}): trading is blocked this cycle"
+        ]
+    elif reading.unavailable:
+        out["unavailable"] = [f"volatility partial ({'; '.join(reading.unavailable)})"]
+
+    logger.debug(
+        "Volatility for %s: %s (basis=%s, ATR%%=%s, shock=%s, risk x%s)",
+        state["symbol"], reading.regime, reading.basis,
+        reading.atr_percent, reading.volatility_shock, reading.risk_multiplier,
+    )
+
+    # WRITE-ONLY TELEMETRY, and that is what keeps this node replay-safe.
+    #
+    # Nothing in the graph ever reads this buffer back, so a resumed checkpoint
+    # recomputes the identical reading from the identical candles whether or not
+    # a previous run also appended here. Same category as the logger call above.
+    #
+    # It is IN MEMORY and NOT a database table on purpose — this node runs on
+    # every analysis cycle and every monitoring tick per open position, which is
+    # thousands of rows a day for a handful of readings that ever attach to a
+    # trade. The durable record is the frontend's 15-entry file; see
+    # `backend/services/volatility_journal.py` for the full reasoning.
+    #
+    # Wrapped, because telemetry must never be able to fail a graph run.
+    try:
+        volatility_journal.record(
+            run_id=state["run_id"],
+            symbol=state["symbol"],
+            timeframe=timeframe,
+            ts=time.time(),
+            reading=reading.as_dict(),
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("volatility journal append failed", exc_info=True)
+
+    return out
+
+
 
 
 # ===========================================================================
@@ -701,6 +825,23 @@ def register_market_nodes() -> None:
             phase=24,
         ),
         detect_regime,
+    )
+
+    register_node(
+        NodeContract(
+            name="volatility_analysis",
+            reads=("market_data", "symbol"),
+            writes=("volatility", "unavailable"),
+            purpose=(
+                "ATR%, realized volatility, Bollinger width and a PERCENTILE-ranked "
+                "volatility regime, plus the size, leverage and stop policy it implies"
+            ),
+            # Deterministic on purpose. The maths has a real answer; a model
+            # asked to produce it would add hallucination risk to position sizing.
+            deterministic=True,
+            phase=24,
+        ),
+        analyse_volatility_node,
     )
 
     register_node(

@@ -397,6 +397,55 @@ class PositionMonitorAgent(BaseAgent):
     # Phase 30 / spec Section 13 — read and modify, for the monitoring graph
     # ------------------------------------------------------------------
 
+    async def _persist_closed_trade(
+        self, pos: "_Tracked", exit_price: float, realized: float, reason: str
+    ) -> None:
+        """Record the completed round trip, WITH its realized P&L. Never raises.
+
+        The row's `side` is the EXIT side, not the entry side, because that is
+        what actually happened at this moment — a long closing is a sell. The
+        entry leg is already in the table from `execution_agent._persist_trade`,
+        so recording the exit as another buy would make the log read as two
+        opens.
+
+        A failure here is logged and swallowed: the position IS closed and the
+        money has already moved. Raising would leave the caller believing the
+        close failed and retrying an exit for a position that is already flat —
+        the exact double-exit the persist-before-publish ordering above exists to
+        prevent.
+        """
+        import uuid
+
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            logger.error(
+                "Closed %s with realized %+.2f but did NOT persist it: no database "
+                "pool. The P&L dashboard and win rate will not include this trade.",
+                pos.symbol, realized,
+            )
+            return
+
+        exit_side = "sell" if pos.side == "buy" else "buy"
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO trades
+                        (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    """,
+                    str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
+                    pos.symbol, exit_side, pos.qty, exit_price, realized,
+                    "agent-close", f"closed by {reason} from entry {pos.entry_price:.8g}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to persist the closing trade for %s (realized %+.2f): %s",
+                pos.symbol, realized, exc,
+            )
+
     async def track_manual_position(
         self,
         *,
@@ -730,6 +779,22 @@ class PositionMonitorAgent(BaseAgent):
             # tighten_stop's would-fire-immediately guard STRICTER, never looser,
             # so the stale value is safe in the only direction that matters.
             await self.persist_watch_list()
+
+            # THE CLOSING TRADE, WITH ITS REALIZED P&L. This did not exist, and it
+            # is why the P&L dashboard, the win rate and the trade log were empty.
+            #
+            # `execution_agent._persist_trade` writes the OPENING fill, and an
+            # opening fill has no P&L — the trade has not finished. Nothing then
+            # wrote the CLOSE, so of 2,626 rows in `trades`, 2,623 (every
+            # `agent-plan` row) carried `pnl IS NULL`. `lib/api/portfolio.realised`
+            # counts only rows where `typeof t.pnl === 'number'`, so it counted 3,
+            # reported "no trade carries a pnl", and every derived figure — total
+            # P&L, win rate, biggest win, max drawdown — was blank or meaningless.
+            #
+            # It is written HERE rather than in the executor because this is the
+            # only place that holds entry, exit, quantity and side together, which
+            # is exactly what a closed round trip is. The executor sees one leg.
+            await self._persist_closed_trade(pos, fill_price, realized, reason)
 
             logger.info(
                 "Closed %s at %s (%s, triggered at %s): realized %+.2f after %.0fs. "

@@ -35,6 +35,19 @@ export function withV1Inserted(baseUrl: string): string | null {
   return `${trimmed}/v1`;
 }
 
+// The Vercel Edge runtime refuses `fetch()` to a bare IP literal and answers
+// with its OWN 403 whose body names the hostname it rejected. That 403 never
+// reached the backend or the model provider, so every field an operator would
+// normally check — API key, model name, base URL, backend health — is fine, and
+// the message reads as though the LLM provider rejected the request.
+//
+// Detected by the exact phrase Vercel emits. Narrow on purpose: a 403 from a
+// model provider is a real auth failure and must keep saying so.
+export function looksLikeVercelEdgeIpBlock(status: number, rawText: string): boolean {
+  if (status !== 403) return false;
+  return /Direct IP access is not allowed/i.test(rawText);
+}
+
 // Turns a raw upstream error body into the most useful message we can
 // give: parse JSON error shapes most OpenAI-compatible servers use,
 // fall back to a specific explanation for the missing-/v1 signature,
@@ -53,6 +66,19 @@ export function parseUpstreamErrorMessage(status: number, rawText: string, urlTr
     }
   } catch {
     // not JSON — fall through
+  }
+
+  // Vercel's body is plain text, so it survives the JSON attempt above and would
+  // otherwise reach the raw-text return at the bottom — showing the operator a
+  // rejected hostname with no indication of what to change.
+  if (looksLikeVercelEdgeIpBlock(status, trimmed)) {
+    return (
+      `The request never left Vercel: its Edge runtime refuses fetch() to a bare IP address, ` +
+      `and the backend is configured as one (BACKEND_INTERNAL_URL). This is not an LLM, API-key ` +
+      `or backend fault. Fix it by running the calling route on the Node runtime ` +
+      `(export const runtime = 'nodejs') — every other backend-calling route in this app already ` +
+      `does — or by giving the backend a DNS hostname. Raw response: ${trimmed.slice(0, 200)}`
+    );
   }
 
   if (looksLikeMissingV1(status, trimmed, urlTried)) {

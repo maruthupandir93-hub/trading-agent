@@ -35,6 +35,7 @@ import type { GraphRun, GraphSummary, NodeContract } from '@/lib/api/graphs';
 import { runNodeStatuses } from '@/lib/api/graphs';
 import { useBackend } from '@/lib/realtime/useRealtime';
 import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
+import { useActiveSessionSymbol } from '@/lib/realtime/useActiveSession';
 import { mergeNodeStates } from '@/lib/viz/flow';
 
 // Code-split. The operator panels sit below this page's real-data content, so
@@ -97,7 +98,15 @@ export default function AgentBrainPage() {
   // otherwise. This page previously defaulted to the live stream alone, which is
   // empty on a fresh load, so "Agent Brain" opened on twenty-three IDLE boxes and
   // told the operator to go and select a run to see anything at all.
-  const pipeline = usePipeline();
+  // PINNED TO THE SESSION'S COIN when one is running.
+  //
+  // Without this the view seeds from "the most recent decision-graph run",
+  // whatever instrument that was — so a session on SOL rendered a BTC cycle the
+  // moment anything else triggered one, and the diagram gave no hint it had
+  // switched. `pipelineSourceLabel` names the symbol either way, so an unpinned
+  // view stays readable rather than merely ambiguous.
+  const sessionSymbol = useActiveSessionSymbol();
+  const pipeline = usePipeline(undefined, { symbol: sessionSymbol });
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [inspectSymbol, setInspectSymbol] = useState<string | null>(null);

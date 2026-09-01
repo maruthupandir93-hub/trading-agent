@@ -116,6 +116,16 @@ def opportunity_config() -> GraphConfig:
             "feature_generation",
             "market_analysis",
             "regime_detection",
+            # The volatility layer. Deterministic, and it must run BEFORE strategy
+            # scoring: a breakout profile is a different proposition in a
+            # compressed market than in an expanding one, and the Risk Gateway
+            # reads its size multiplier, leverage cap and stop distance.
+            #
+            # Added to BOTH this config and `market_state_config`. Graph 2 is built
+            # from this one and contains all of Graph 1's stages, so wiring it only
+            # into Graph 1 would have put it in a graph `main.py` never subscribes
+            # — the exact mistake recorded above about the memory loader.
+            "volatility_analysis",
             "market_state",
             # Phase 25
             "strategy_candidates",
@@ -129,7 +139,8 @@ def opportunity_config() -> GraphConfig:
             ("data_validation", "feature_generation"),
             ("feature_generation", "market_analysis"),
             ("market_analysis", "regime_detection"),
-            ("regime_detection", "market_state"),
+            ("regime_detection", "volatility_analysis"),
+            ("volatility_analysis", "market_state"),
             ("market_state", "strategy_candidates"),
             ("strategy_candidates", "strategy_scoring"),
             ("trade_thesis_narrative", END),

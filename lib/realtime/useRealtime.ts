@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  type GraphRunState,
   type RealtimeState,
   realtimeSnapshot,
   subscribeRealtime,
@@ -50,12 +51,15 @@ export function useRealtimeConnected(): boolean {
   return useRealtimeSelector((s) => s.connected);
 }
 
-export function useGraphNodes() {
-  return useRealtimeSelector((s) => s.nodes);
-}
-
-export function useCurrentNode(): string | null {
-  return useRealtimeSelector((s) => s.currentNode);
+/** One graph's live pipeline, or null if that graph has not spoken yet.
+ *
+ *  TAKES A GRAPH NAME, and that argument is not optional for a reason. The
+ *  monitoring graph shares six node names with the decision graph and fires on
+ *  every tick per open position; a selector that returned "all nodes" handed the
+ *  caller a blend of two graphs running on two different instruments. See the
+ *  note on `graphRuns` in store.ts. */
+export function useGraphRun(graph: string): GraphRunState | null {
+  return useRealtimeSelector((s) => s.graphRuns[graph] ?? null);
 }
 
 export function useLivePrice(symbol: string | null | undefined): number | null {

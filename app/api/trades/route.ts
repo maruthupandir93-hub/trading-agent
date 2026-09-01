@@ -69,7 +69,19 @@ export async function POST(req: Request) {
     return Response.json({ error: 'price must be a positive number' }, { status: 400 });
   }
 
-  const VALID_ORIGIN_TAGS = ['debate', 'chat-trade-action', 'agent-plan', 'user-command', 'manual-click'];
+  // Kept in step with `TradeLogEntry['originTag']` in lib/types.ts, which is in
+  // turn the set the Python backend writes. A tag missing here is rejected at the
+  // door, so an omission does not surface as a validation error on a legitimate
+  // trade.
+  const VALID_ORIGIN_TAGS = [
+    'debate',
+    'chat-trade-action',
+    'agent-plan',
+    'agent-close',
+    'user-command',
+    'manual-click',
+    'manual-panel',
+  ];
 
   const entry = await addTrade({
     tab: tab as TradeTab,

@@ -141,6 +141,42 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     if decision.action == "EXIT":
         return _exit_plan(state, decision, portfolio, symbol, tab)
 
+    # ---- VOLATILITY GATE, before anything is sized ------------------------
+    #
+    # Placed FIRST among the entry checks, for the same reason `check_leverage`
+    # runs before the stop-distance maths: a refusal that depends on market
+    # conditions rather than on the proposed trade should not be reachable by
+    # making the trade smaller. If the regime says no, no size is acceptable.
+    #
+    # An UNKNOWN volatility blocks too. That is deliberate and it is the one place
+    # in this graph where a missing input refuses rather than degrades: position
+    # size and stop distance are both derived from volatility, and neither has a
+    # safe default. "We could not measure how much this market is moving" is not a
+    # reason to guess.
+    volatility = state.get("volatility")
+    if volatility is not None and not volatility.trading_allowed:
+        regime = volatility.regime or "unknown"
+        detail = (
+            f"volatility regime is {regime}"
+            + (f" ({volatility.percentile:.0f}th percentile of its own recent range)"
+               if volatility.percentile is not None else "")
+            + (f", and ATR% expanded {volatility.expansion_ratio:.1f}x its baseline"
+               if volatility.volatility_shock and volatility.expansion_ratio else "")
+        )
+        return {
+            "risk_assessment": RiskAssessment(
+                approved=False,
+                rejection_reasons=[
+                    f"{detail}. No position size is acceptable in this regime: a stop "
+                    f"placed here is as likely to be gapped through as touched, so "
+                    f"sizing cannot bound the loss it exists to bound."
+                ],
+                checks={
+                    "Volatility": {"status": "reject", "detail": detail},
+                },
+            )
+        }
+
     # ---- TRADE: size first, because the checks are functions of size ------
     if thesis is None or thesis.entry_price is None or thesis.stop_loss is None:
         # Should be unreachable: the Supervisor already returns DO_NOT_TRADE for a
@@ -232,6 +268,22 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         atr=atr,
         risk_per_trade_percent=sizing["fraction"],
     )
+
+    # VOLATILITY SCALES THE SIZE DOWN, NEVER UP.
+    #
+    # `RISK_MULTIPLIER` is <= 1.0 for every regime by construction. A multiplier
+    # above 1.0 would mean "this market is quiet, so take a bigger position",
+    # which converts a risk control into a leverage source — and quiet markets are
+    # precisely where the next expansion begins.
+    #
+    # Applied AFTER the risk-budget calculation rather than folded into
+    # `risk_per_trade_percent`, so the trace shows both the budgeted size and what
+    # volatility did to it. Folding them would make the reduction invisible.
+    volatility_multiplier = 1.0
+    if volatility is not None:
+        volatility_multiplier = max(0.0, min(1.0, volatility.risk_multiplier))
+        if volatility_multiplier < 1.0:
+            size = size * volatility_multiplier
 
     if size <= 0:
         return {
@@ -475,6 +527,10 @@ def register_risk_gateway_node() -> None:
             reads=(
                 "decision", "trade_thesis", "portfolio_state", "market_data",
                 "technical_analysis", "symbol", "run_id",
+                # The volatility layer gates entry and scales size. Declared so a
+                # contract check fails loudly if the node is ever removed from the
+                # graph, rather than the gateway silently sizing without it.
+                "volatility",
             ),
             writes=("risk_assessment", "execution_plan"),
             purpose=(

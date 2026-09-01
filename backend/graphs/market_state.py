@@ -108,6 +108,10 @@ def market_state_config() -> GraphConfig:
             "feature_generation",
             "market_analysis",
             "regime_detection",
+            # Runs between the regime and the market-state summary: it needs the
+            # same validated candles, and everything downstream — strategy
+            # scoring, the Risk Gateway, the Supervisor — needs its verdict.
+            "volatility_analysis",
             "market_state",
         ],
         entry="memory_loader",
@@ -116,7 +120,8 @@ def market_state_config() -> GraphConfig:
             ("data_validation", "feature_generation"),
             ("feature_generation", "market_analysis"),
             ("market_analysis", "regime_detection"),
-            ("regime_detection", "market_state"),
+            ("regime_detection", "volatility_analysis"),
+            ("volatility_analysis", "market_state"),
             ("market_state", END),
         ],
     )

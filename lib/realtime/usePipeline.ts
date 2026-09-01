@@ -32,7 +32,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { BACKEND_PATHS } from '../backendConfig';
 import type { GraphNodeState } from './store';
-import { useBackend, useCurrentNode, useGraphNodes } from './useRealtime';
+import { useBackend, useGraphRun } from './useRealtime';
 import {
   mergeSeededAndLive,
   nodesFromRunTrace,
@@ -53,6 +53,12 @@ export type PipelineView = {
   ageSeconds: number | null;
   /** True while a cycle is actually in progress. */
   isRunning: boolean;
+  /** WHICH INSTRUMENT this pipeline is about — live symbol when a cycle is
+   *  running, otherwise the seeded run's. Never assume it matches the coin the
+   *  operator is trading: the agent analyses whatever it was triggered on, and a
+   *  pipeline rendered without this label was the whole reason a SOL session
+   *  appeared to be showing a BTC cycle. */
+  symbol: string | null;
 };
 
 /** How often to re-check for a newly finished run.
@@ -67,7 +73,21 @@ const RUNS_POLL_MS = 10_000;
 /** The graph these pipeline views render. */
 export const DECISION_GRAPH = 'trade_analysis';
 
-export function usePipeline(graph: string = DECISION_GRAPH): PipelineView {
+export type PipelineOptions = {
+  /** Pin the view to one instrument.
+   *
+   *  Without it the seed is "the most recent run of this graph", whatever symbol
+   *  that was — so an operator running a session on SOL sees a BTC cycle the
+   *  moment anything else analyses BTC more recently. Pages that KNOW which
+   *  instrument the operator cares about should pass it. */
+  symbol?: string | null;
+};
+
+export function usePipeline(
+  graph: string = DECISION_GRAPH,
+  options: PipelineOptions = {},
+): PipelineView {
+  const pinnedSymbol = options.symbol ?? null;
   // FILTERED BY GRAPH, and that is not optional.
   //
   // The monitoring graph runs once per tick per open position, so it outnumbers
@@ -79,12 +99,17 @@ export function usePipeline(graph: string = DECISION_GRAPH): PipelineView {
   // limit=1 because only the latest run seeds the diagram: merging two would show
   // nodes from different cycles side by side as though they were one.
   const runs = useBackend<{ runs: RunTrace[] }>(
-    `${BACKEND_PATHS.graphRuns}?limit=1&graph=${encodeURIComponent(graph)}`,
+    `${BACKEND_PATHS.graphRuns}?limit=1&graph=${encodeURIComponent(graph)}` +
+      (pinnedSymbol ? `&symbol=${encodeURIComponent(pinnedSymbol)}` : ''),
     { intervalMs: RUNS_POLL_MS },
   );
 
-  const liveNodes = useGraphNodes();
-  const currentNode = useCurrentNode();
+  // SCOPED TO THIS GRAPH. `position_monitoring` shares six node names with the
+  // decision graph and fires on every tick per open position, so an unscoped read
+  // blended two graphs' runs — on two different instruments — into one diagram.
+  const liveRun = useGraphRun(graph);
+  const liveNodes = liveRun?.nodes ?? EMPTY_NODES;
+  const currentNode = liveRun?.currentNode ?? null;
 
   const lastRun = runs.data?.runs?.[0] ?? null;
   const seeded = useMemo(() => nodesFromRunTrace(lastRun), [lastRun]);
@@ -119,8 +144,16 @@ export function usePipeline(graph: string = DECISION_GRAPH): PipelineView {
     lastRun,
     ageSeconds,
     isRunning: currentNode !== null,
+    // The live run's symbol wins while a cycle is in progress; otherwise the
+    // seeded run's. Both are the truth about what is being DISPLAYED, which is
+    // not necessarily what the operator asked about — hence the label.
+    symbol: liveRun?.symbol ?? lastRun?.symbol ?? null,
   };
 }
+
+/** Stable empty map, so `useMemo` on `liveNodes` is not invalidated every render
+ *  by a fresh `{}` — which would rebuild the merged node map on every tick. */
+const EMPTY_NODES: Record<string, GraphNodeState> = {};
 
 /** One line describing where the pipeline display came from.
  *
@@ -128,11 +161,15 @@ export function usePipeline(graph: string = DECISION_GRAPH): PipelineView {
  *  two different ways on two pages is how an operator stops trusting either.
  */
 export function pipelineSourceLabel(view: PipelineView): string {
+  // The symbol is named in EVERY branch, including the live ones. It used to be
+  // named only when seeded, so a live cycle on a coin the operator was not
+  // trading rendered with no indication of which instrument it was about.
+  const on = view.symbol ? ` on ${view.symbol}` : '';
   if (view.isRunning) {
-    return `Live — ${view.currentNode} is running now.`;
+    return `Live${on} — ${view.currentNode} is running now.`;
   }
   if (view.source === 'live') {
-    return 'Live — the stream has reported this cycle; no node is running right now.';
+    return `Live${on} — the stream has reported this cycle; no node is running right now.`;
   }
   if (view.source === 'last-run' && view.lastRun) {
     const age = view.ageSeconds === null ? 'unknown' : `${view.ageSeconds}s`;

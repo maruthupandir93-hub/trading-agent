@@ -6,13 +6,13 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { AgentStreamEvent } from '../agentEventStream';
 import { NODE_LEVEL_ONLY, type RealtimeState, route } from './store';
 
 const EMPTY: RealtimeState = {
   connected: false,
   events: [],
-  nodes: {},
-  currentNode: null,
+  graphRuns: {},
   prices: {},
   triggers: [],
   lastDecision: {},
@@ -20,6 +20,33 @@ const EMPTY: RealtimeState = {
 };
 
 const at = '2026-08-21T10:00:00.000Z';
+
+const G = 'trade_analysis';
+const MON = 'position_monitoring';
+
+/** A node event with the identity fields the backend actually sends. */
+function nodeEvent(
+  event_type: string,
+  node: string,
+  over: Record<string, unknown> = {},
+): AgentStreamEvent {
+  return {
+    event_type,
+    node,
+    graph: G,
+    run_id: 'run-1',
+    symbol: 'SOL/USDT',
+    timestamp: at,
+    ...over,
+  } as AgentStreamEvent;
+}
+
+/** The pipeline for one graph, or a thrown assertion if it never spoke. */
+function run(s: RealtimeState, graph = G) {
+  const r = s.graphRuns[graph];
+  if (!r) throw new Error(`no run recorded for ${graph}`);
+  return r;
+}
 
 describe('event router', () => {
   it('folds a tick into the price slice', () => {
@@ -35,34 +62,86 @@ describe('event router', () => {
   });
 
   it('tracks the running node and clears it on completion', () => {
-    let s = route(EMPTY, { event_type: 'GRAPH_NODE_STARTED', node: 'specialist_market', timestamp: at });
-    expect(s.currentNode).toBe('specialist_market');
-    expect(s.nodes.specialist_market.status).toBe('RUNNING');
+    let s = route(EMPTY, nodeEvent('GRAPH_NODE_STARTED', 'specialist_market'));
+    expect(run(s).currentNode).toBe('specialist_market');
+    expect(run(s).nodes.specialist_market.status).toBe('RUNNING');
 
-    s = route(s, { event_type: 'GRAPH_NODE_COMPLETED', node: 'specialist_market', duration_ms: 82, timestamp: at });
-    expect(s.currentNode).toBeNull();
-    expect(s.nodes.specialist_market.status).toBe('COMPLETED');
-    expect(s.nodes.specialist_market.durationMs).toBe(82);
+    s = route(s, nodeEvent('GRAPH_NODE_COMPLETED', 'specialist_market', { duration_ms: 82 }));
+    expect(run(s).currentNode).toBeNull();
+    expect(run(s).nodes.specialist_market.status).toBe('COMPLETED');
+    expect(run(s).nodes.specialist_market.durationMs).toBe(82);
   });
 
   it('reports a missing duration as null, not zero', () => {
     // `0ms` is a claim about how long a node took. `null` is the absence of one, and
     // the whole system is built on keeping those apart.
-    const s = route(EMPTY, { event_type: 'GRAPH_NODE_COMPLETED', node: 'debate', timestamp: at });
-    expect(s.nodes.debate.durationMs).toBeNull();
+    const s = route(EMPTY, nodeEvent('GRAPH_NODE_COMPLETED', 'debate'));
+    expect(run(s).nodes.debate.durationMs).toBeNull();
   });
 
   it('does not clear currentNode when a DIFFERENT node completes', () => {
     // Two nodes run in one superstep in the fan-out. Completing one must not blank
     // the edge animation for the other, which was the first shape of this reducer.
-    let s = route(EMPTY, { event_type: 'GRAPH_NODE_STARTED', node: 'specialist_risk', timestamp: at });
-    s = route(s, { event_type: 'GRAPH_NODE_COMPLETED', node: 'specialist_market', timestamp: at });
-    expect(s.currentNode).toBe('specialist_risk');
+    let s = route(EMPTY, nodeEvent('GRAPH_NODE_STARTED', 'specialist_risk'));
+    s = route(s, nodeEvent('GRAPH_NODE_COMPLETED', 'specialist_market'));
+    expect(run(s).currentNode).toBe('specialist_risk');
   });
 
   it('marks a failed node FAILED', () => {
-    const s = route(EMPTY, { event_type: 'GRAPH_NODE_FAILED', node: 'supervisor', timestamp: at });
-    expect(s.nodes.supervisor.status).toBe('FAILED');
+    const s = route(EMPTY, nodeEvent('GRAPH_NODE_FAILED', 'supervisor'));
+    expect(run(s).nodes.supervisor.status).toBe('FAILED');
+  });
+
+  // -------------------------------------------------------------------
+  // THE PIPELINE SHOWED A DIFFERENT COIN THAN THE ONE BEING TRADED.
+  //
+  // Three separate causes, all in this reducer, all invisible from the
+  // outside because the diagram has no symbol on it. Each is pinned below.
+  // -------------------------------------------------------------------
+
+  it('keeps the monitoring graph out of the decision graph`s pipeline', () => {
+    // THE BUG. `position_monitoring` and `trade_analysis` share six node names,
+    // and monitoring fires once per tick PER OPEN POSITION — so it constantly
+    // overwrote the decision pipeline's nodes with a monitoring run's state, for
+    // whatever symbol that position happened to be. A SOL cycle was rendered half
+    // from a BTC tick.
+    let s = route(EMPTY, nodeEvent('GRAPH_NODE_STARTED', 'market_analysis'));
+    s = route(s, nodeEvent('GRAPH_NODE_COMPLETED', 'market_analysis', {
+      graph: MON, run_id: 'mon-9', symbol: 'BTC/USDT',
+    }));
+
+    expect(run(s, G).nodes.market_analysis.status).toBe('RUNNING');
+    expect(run(s, G).symbol).toBe('SOL/USDT');
+    expect(run(s, MON).nodes.market_analysis.status).toBe('COMPLETED');
+    expect(run(s, MON).symbol).toBe('BTC/USDT');
+  });
+
+  it('replaces the node map when a NEW run starts, rather than merging', () => {
+    // Carrying the previous cycle's nodes forward renders two cycles as one
+    // pipeline, and the stale half is indistinguishable from the live half.
+    let s = route(EMPTY, nodeEvent('GRAPH_NODE_COMPLETED', 'debate'));
+    s = route(s, nodeEvent('GRAPH_NODE_STARTED', 'memory_loader', {
+      run_id: 'run-2', symbol: 'ETH/USDT',
+    }));
+
+    expect(run(s).nodes.debate).toBeUndefined();
+    expect(run(s).runId).toBe('run-2');
+    expect(run(s).symbol).toBe('ETH/USDT');
+  });
+
+  it('does not blank the symbol when a later event omits it', () => {
+    // The label must survive a mid-cycle event that carries no symbol, or the
+    // pipeline loses the one field that says which coin it is about.
+    let s = route(EMPTY, nodeEvent('GRAPH_NODE_STARTED', 'memory_loader'));
+    s = route(s, nodeEvent('GRAPH_NODE_COMPLETED', 'memory_loader', { symbol: undefined }));
+    expect(run(s).symbol).toBe('SOL/USDT');
+  });
+
+  it('files an event with no graph rather than dropping it', () => {
+    // Losing a node from the pipeline is worse than showing it in a bucket a
+    // caller has to name.
+    const s = route(EMPTY, { event_type: 'GRAPH_NODE_STARTED', node: 'debate', timestamp: at });
+    expect(run(s, 'unknown').nodes.debate.status).toBe('RUNNING');
   });
 
   it('records a suppressed trigger as suppressed rather than dropping it', () => {
@@ -125,9 +204,9 @@ describe('event router', () => {
     // `useRealtimeSelector` compares by reference, so an untouched slice must keep
     // its identity. A reducer that rebuilt every slice each event would make the
     // selector equality check useless and re-render the whole app on every tick.
-    const base = route(EMPTY, { event_type: 'GRAPH_NODE_STARTED', node: 'debate', timestamp: at });
+    const base = route(EMPTY, nodeEvent('GRAPH_NODE_STARTED', 'debate'));
     const next = route(base, { event_type: 'TICK_RECEIVED', symbol: 'BTC/USDT', price: 1, timestamp: at });
-    expect(next.nodes).toBe(base.nodes);
+    expect(next.graphRuns).toBe(base.graphRuns);
     expect(next.triggers).toBe(base.triggers);
     expect(next.lastDecision).toBe(base.lastDecision);
   });

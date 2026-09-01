@@ -435,6 +435,175 @@ everything is folded into `.env`, which is gitignored.
 
 **That password is still in git history.** Deleting the file does not remove it.
 
+### `/api/chat` runs on NODE, and putting it back on Edge breaks "Ask Agent"
+
+The operator saw one error, on one page:
+
+    Upstream error 403: Direct IP access is not allowed in Vercel's Edge
+    environment (hostname: <backend ip>)
+
+That text is written by VERCEL. Its Edge runtime refuses `fetch()` to a bare IP
+literal and will only dial a DNS hostname, and `BACKEND_INTERNAL_URL` on this
+deployment is `http://<ip>:8000`. The request never reached the backend or the
+model provider, so every field an operator would check — API key, model, base
+URL, backend health — was fine, and the 403 read as the LLM rejecting the request.
+
+`/api/chat` was the ONLY edge route in the app, which is exactly why chat was the
+only broken page while market data, positions and the pipeline all kept working.
+A whole-app outage gets found in minutes; one page looked like a chat bug.
+
+The original reason for Edge — that Vercel's Node functions buffer the whole
+response — was true of the older Serverless Function model and is not true of
+App Router route handlers today; the SSE passthrough is unchanged and still
+streams. `lib/chatUpstream.ts` now also DIAGNOSES that 403 by its exact phrase
+rather than echoing a hostname, and `lib/chatUpstream.test.ts` fails if the
+`runtime` line changes — the bug is invisible in local dev, because `localhost`
+is a hostname and edge dials it happily.
+
+### A trade row carrying a `pnl` IS a realized close — the dashboard depended on it
+
+`/api/stats` returned `totalClosedTrades: 0` — every P&L panel, the win rate and
+expectancy all blank — on an account whose trade log rendered fine one page over.
+`reconstructClosedTrades` had two independent faults with that identical symptom:
+
+  1. **Long-only.** `buy` opened, `sell` closed. This agent trades perpetual
+     futures and takes SHORTS, which open on a sell and close on a buy. Every
+     short hit the sell branch, found no open state and was skipped by a bare
+     `continue`; its closing buy then registered as a brand-new long. Shorts were
+     not merely uncounted — they corrupted the running quantity of any long later
+     opened on the same symbol.
+  2. **It required the opening leg to be in the window.** A close whose open
+     predates the log — after any restart, any retention trim, and for every
+     position the operator already held — was discarded ENTIRELY, realized P&L
+     included. That P&L is authoritative: it was computed at close time against
+     the real entry. Discarding it in favour of a pairing walk that failed is
+     choosing a reconstruction over a fact.
+
+The rule is now structural, not conventional: the four writers of `trades`
+(`execution_agent`, `operator_trade`, `operator_exchange`, `tradeStore.server.ts`)
+all insert opening fills with `pnl` ABSENT, and only close paths supply one.
+`pnl: 0` is a real break-even close and counts; absent is an open and does not.
+The ledger walk survives, demoted from GATE to ENRICHMENT — it supplies hold
+time, entry context and direction, and when it fails `paired: false` with
+`holdMinutes: null`, never 0. `averageHoldTime` therefore reports a sampleSize
+that is NOT `closed.length`.
+
+`TradeLogEntry['originTag']` was also missing `agent-close` and `manual-panel`,
+two of the four tags Python actually writes, so real trades grouped under a tag
+TypeScript had no name for.
+
+### Volatility history lives in a FRONTEND FILE, capped at 15 — not in Postgres
+
+The obvious home for "volatility history, for learning" is a table, and that is
+deliberately not where it is. The volatility node runs on every analysis cycle
+AND every monitoring tick per open position — thousands of rows a day, of which
+only the few attached to a trade carry a lesson, in a database the operator is
+keeping small on purpose.
+
+So: `backend/services/volatility_journal.py` is an in-memory ring (200, cleared
+on restart, **write-only with respect to the graph** — nothing reads it back,
+which is what keeps `volatility_analysis` replay-safe under Section 39.4), read
+through `GET /api/graphs/volatility`. The DURABLE record is
+`.data/volatility-history.json` via `lib/volatilityHistoryStore.server.ts`,
+capped at `MAX_ENTRIES = 15`, keyed `<runId>:<symbol>`.
+
+Two things that cost real bugs elsewhere and are pinned by tests here:
+
+* The cap is enforced ON WRITE. `pvHistoryStore` does the opposite and says why —
+  an equity curve truncated at the front loses the points a drawdown-from-peak
+  needs. That reasoning does NOT carry over: a volatility reading is a
+  point-in-time observation accumulated into nothing, so trimming on read would
+  just let the file grow forever.
+* Re-polled readings UPDATE IN PLACE. The ring is polled, so the same reading is
+  offered repeatedly; appending would fill all 15 slots with one reading within
+  seconds and evict the genuine history.
+
+The backend stamps `time.time()` (seconds) and the frontend renders milliseconds;
+`toEntry` converts at the boundary. Without it a reading is stamped ~55 years ago,
+sorts last, is evicted immediately, and it reads as the agent having stopped
+measuring volatility.
+
+### The pre-execution chain, as actually traced
+
+Graph 2 (`trade_analysis`) is 24 nodes, and a live run visits all of them:
+
+    ... regime_detection -> volatility_analysis -> strategy_scoring
+     -> opportunity_detection -> 9 specialists (market, orderflow, liquidity,
+        news, funding, portfolio, risk, prediction, event_risk)
+     -> debate -> supervisor -> risk_gateway -> external_consultation
+     -> trade_thesis_narrative
+
+`external_consultation` was silently OFF: `LLM_CONSULT_PANEL` was unset, so the
+node recorded "no panel configured" on every uncertain decision instead of asking
+anything. It is now `nvidia`/`openai/gpt-oss-120b` — deliberately NOT kimi-k3,
+which is already the reasoning tier, because consulting the same model is one
+prior sampled twice and reporting that as a second opinion manufactures
+agreement. It stays advisory by CONSTRUCTION: it runs after the Supervisor and
+the Risk Gateway, writes only `consultation`, and no gate reads that field.
+
+### The pipeline showed a different coin than the trade being executed
+
+Three causes, all in `lib/realtime/store.ts`, all invisible because the diagram
+carried no instrument label at all.
+
+1. **The live node map was shared by every graph.** `route()` discarded `graph`,
+   `run_id` and `symbol` — which the backend has always sent — and merged every
+   node event into one flat `nodes` map keyed by node NAME. `position_monitoring`
+   and `trade_analysis` **share six node names** (`memory_loader`,
+   `data_validation`, `feature_generation`, `market_analysis`,
+   `regime_detection`, `market_state`), and monitoring runs once per tick per
+   open position. So a monitoring tick on BTC constantly overwrote those six
+   entries mid-cycle, and a decision run on SOL rendered half from another coin.
+2. **Nothing reset the map between runs.** A finished cycle's nodes stayed and
+   mixed with the next one's — two cycles displayed as one pipeline, with the
+   stale half indistinguishable from the live half.
+3. **The seed was not filtered by symbol.** `usePipeline` asked for "the most
+   recent `trade_analysis` run", whatever instrument that was.
+
+State is now `graphRuns: Record<graph, GraphRunState>`; a new `runId` within a
+graph REPLACES that graph's node map rather than merging; `/api/graphs/runs`
+takes a `symbol` filter; `usePipeline(graph, { symbol })` pins the view, and the
+four pages that render a pipeline pin it to the running session's coin via
+`useActiveSessionSymbol()`. `pipelineSourceLabel` now names the symbol in EVERY
+branch, so an unpinned view is readable rather than merely ambiguous, and the
+dashboard flags "(not your session)" when they differ.
+
+`mergeNodeStates` takes `NodeDisplayState` (status/detail/duration) rather than
+the full `GraphNodeState`: a replayed trace and a selected historical run have no
+run identity to offer, and demanding it would have them invent placeholders.
+
+Four tests in `lib/realtime/store.test.ts` pin the reducer.
+
+### A session's start and target are ACCOUNT amounts, not coin prices
+
+"$2 into $5" is a statement about the WALLET. The session ends when the account
+reaches the target, whatever the coin is worth then. A price target would say
+nothing about how much was staked, so the same move could double the account or
+barely touch it.
+
+Where the starting figure comes from differs by book, deliberately:
+
+- **paper** — the operator types it, and `set_paper_starting_amount` WRITES it to
+  the paper book's cash. Recording 2.00 on the session while the book held 10,000
+  would leave every downstream number about the 10,000: the Risk Gateway sizes a
+  percentage of ten thousand, one position exceeds the whole notional stake, and
+  the progress bar barely moves. It is REFUSED while paper positions are open —
+  rewriting cash underneath a position leaves equity that is part old-basis and
+  part new.
+- **real** — `real_account_balance()` reads free USDT from the exchange and it is
+  NOT typeable. A typed figure would be the denominator of every percentage the
+  session reports while the venue held a different number. Cached 30s because
+  `/api/session` is polled every 5s and the balance only moves on a fill; `None`
+  never `0.0` when unreadable, because "no money" and "could not ask" are
+  different facts.
+
+`current_equity('real')` now falls back to that balance. It used to return None
+forever — the local store has never held a real cash figure — so a real session
+was unstartable and the panel said "equity is not measurable" indefinitely.
+
+`target_equity` still reaches only the stop check. `tests/test_session_amounts.py`
+asserts that structurally by scanning the module's own source.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -504,15 +673,15 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 26 files / 406 tests, must all pass
+npm run test                        # vitest; 29 files / 439 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
 **Run these SEQUENTIALLY, not chained into one parallel invocation.**
 Vitest run alongside `tsc` or `next build` on a memory-constrained
-machine loses workers and prints `Test Files 20 passed (26)` — six files
+machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (26/26, 406/406, verified over five consecutive runs). The
+deterministic (29/29, 439/439, verified over five consecutive runs). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing

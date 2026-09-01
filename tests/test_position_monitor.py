@@ -348,3 +348,99 @@ async def test_monitor_may_close_but_not_open():
     assert "ROUTE_ORDERS" not in monitor.permissions
     assert "TAR_SUBMITTED" not in monitor.events_published
     assert monitor.events_published == ["POSITION_CLOSED"]
+
+
+# ---------------------------------------------------------------------------
+# The closing trade, and its realized P&L
+# ---------------------------------------------------------------------------
+#
+# WHY THIS WAS MISSING AND WHAT IT COST
+# -------------------------------------
+# `execution_agent._persist_trade` writes the OPENING fill, and an opening fill
+# has no P&L — the trade has not finished. Nothing wrote the CLOSE. Measured
+# against the live database: of 2,626 rows in `trades`, 2,623 (every `agent-plan`
+# row) had `pnl IS NULL`.
+#
+# `lib/api/portfolio.realised()` counts only rows where `typeof t.pnl === 'number'`,
+# so it counted three. The P&L dashboard read "no trade carries a pnl", the win
+# rate was `null`, and biggest-win and max-drawdown were blank — on a system that
+# had executed thousands of trades.
+
+
+class _RecordingConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, sql, *args):
+        self._rows.append((sql, args))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _RecordingPool:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def acquire(self):
+        return _RecordingConn(self._rows)
+
+
+@pytest.mark.asyncio
+async def test_a_closed_position_is_persisted_with_its_realized_pnl(monkeypatch):
+    """The row the P&L dashboard, win rate and trade log all read."""
+    rows: list = []
+    # Patched at the SOURCE, not on the position_monitor namespace.
+    # `_persist_closed_trade` does `from backend.core.db import get_db_pool` inside
+    # the function, so it resolves the name from `backend.core.db` at call time —
+    # a monkeypatch on `pm.get_db_pool` would bind a name nothing reads.
+    monkeypatch.setattr("backend.core.db.get_db_pool", lambda: _RecordingPool(rows))
+
+    monitor, execution = _monitor()
+    await _open_position(monitor, execution)
+
+    # Through the stop. The tick goes to BOTH agents, as it does on the real bus:
+    # the executor prices the simulated exit from its own `_last_prices`, so a tick
+    # delivered only to the monitor would fill the close at the ENTRY price and
+    # report a realized P&L of exactly zero.
+    stop_tick = TickReceivedEvent(symbol=SYMBOL, price=STOP - 100, volume=1.0, exchange="test")
+    await execution.handle_event(stop_tick)
+    await monitor.handle_event(stop_tick)
+
+    inserts = [r for r in rows if "INSERT INTO trades" in r[0]]
+    assert inserts, "closing the position wrote no trade row — the P&L dashboard stays empty"
+
+    args = inserts[0][1]
+    # (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note)
+    assert args[3] == SYMBOL
+    assert args[4] == "sell", "the exit of a long is a SELL; recording it as a buy reads as two opens"
+    assert isinstance(args[7], float), "the closing row must carry a realized pnl"
+    assert args[7] < 0, "a long stopped out below entry realized a loss"
+    assert args[8] == "agent-close"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_database_does_not_break_the_close(monkeypatch, caplog):
+    """The position IS closed and the money has already moved.
+
+    Raising here would leave the caller believing the close failed and retrying an
+    exit for a position that is already flat — the double-exit the
+    persist-before-publish ordering exists to prevent.
+    """
+    import logging
+
+    monkeypatch.setattr("backend.core.db.get_db_pool", lambda: None)
+
+    monitor, execution = _monitor()
+    await _open_position(monitor, execution)
+
+    stop_tick = TickReceivedEvent(symbol=SYMBOL, price=STOP - 100, volume=1.0, exchange="test")
+    await execution.handle_event(stop_tick)
+    with caplog.at_level(logging.ERROR):
+        await monitor.handle_event(stop_tick)
+
+    assert monitor.open_position_count == 0, "the close must still happen"
+    assert "did NOT persist" in caplog.text

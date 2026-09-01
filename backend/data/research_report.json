@@ -1,40 +1,40 @@
 {
-    "last_updated": "2026-08-29T02:07:02.974725",
+    "last_updated": "2026-09-01T02:52:14.786235",
     "trending_coins": [
         {
             "symbol": "USDCUSDT",
             "change_24h": "0.01%",
-            "volume": "$3,308,315,305",
-            "mtf_trend": "Mixed",
-            "discovered_setup": "None"
+            "volume": "$3,262,730,692",
+            "mtf_trend": "Bullish",
+            "discovered_setup": "Strong Long Setup"
         },
         {
             "symbol": "BTCUSDT",
-            "change_24h": "-3.25%",
-            "volume": "$1,434,980,980",
+            "change_24h": "1.20%",
+            "volume": "$1,171,446,480",
             "mtf_trend": "Bearish",
-            "discovered_setup": "Strong Short Setup"
+            "discovered_setup": "None"
         },
         {
             "symbol": "ETHUSDT",
-            "change_24h": "-2.57%",
-            "volume": "$859,338,662",
-            "mtf_trend": "Bearish",
-            "discovered_setup": "Strong Short Setup"
-        },
-        {
-            "symbol": "SOLUSDT",
-            "change_24h": "-3.32%",
-            "volume": "$440,677,932",
-            "mtf_trend": "Bullish",
+            "change_24h": "2.43%",
+            "volume": "$585,290,683",
+            "mtf_trend": "Mixed",
             "discovered_setup": "None"
         },
         {
             "symbol": "USD1USDT",
             "change_24h": "0.00%",
-            "volume": "$236,763,546",
-            "mtf_trend": "Bullish",
-            "discovered_setup": "Strong Long Setup"
+            "volume": "$235,354,919",
+            "mtf_trend": "Bearish",
+            "discovered_setup": "None"
+        },
+        {
+            "symbol": "SOLUSDT",
+            "change_24h": "2.01%",
+            "volume": "$212,931,477",
+            "mtf_trend": "Bearish",
+            "discovered_setup": "None"
         }
     ]
 }

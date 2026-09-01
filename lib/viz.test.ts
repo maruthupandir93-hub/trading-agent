@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildJourney, type JourneySource } from './viz/journey';
 import { EXEC_STAGES, mergeNodeStates, stageForNode } from './viz/flow';
-import type { GraphNodeState } from './realtime/store';
+import type { NodeDisplayState } from './viz/flow';
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -117,9 +117,12 @@ describe('TradeJourney.buildJourney', () => {
 });
 
 describe('FlowDiagram.mergeNodeStates', () => {
-  const live: Record<string, GraphNodeState> = {
-    specialist_market: { name: 'specialist_market', status: 'COMPLETED', durationMs: 82, detail: 'ok', at: 1 },
-    debate: { name: 'debate', status: 'RUNNING', durationMs: null, detail: null, at: 2 },
+  // Typed as NodeDisplayState, not GraphNodeState: the merge reads only status,
+  // detail and duration, and a historical or replayed run legitimately has no
+  // run identity to offer.
+  const live: Record<string, NodeDisplayState> = {
+    specialist_market: { status: 'COMPLETED', durationMs: 82, detail: 'ok' },
+    debate: { status: 'RUNNING', durationMs: null, detail: null },
   };
 
   it('keeps the declared topology so the pipeline does not change shape', () => {

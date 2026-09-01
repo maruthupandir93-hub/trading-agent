@@ -198,7 +198,27 @@ export type TradeLogEntry = {
   // auto-executes, so there is no real per-strategy-agent attribution
   // to report; this tags by ACTUAL origin instead of guessing one.
   // Absent on trades placed before this existed.
-  originTag?: 'debate' | 'chat-trade-action' | 'agent-plan' | 'user-command' | 'manual-click';
+  // WHO originated this fill. The union must stay in step with what the BACKEND
+  // actually writes, which is the whole set below — `agent-close` and
+  // `manual-panel` were missing, so two of the four tags the Python side emits
+  // had no TypeScript name and the dashboard grouped real trades under a tag it
+  // could not describe.
+  //
+  //   agent-plan         the agent opened it (execution_agent, supervisor_agent)
+  //   agent-close        the position monitor closed it — a stop, target or exit
+  //   debate             opened from a Debate verdict
+  //   chat-trade-action  opened from a trade action in chat
+  //   user-command       opened from a typed command
+  //   manual-click       a human's click, including the real-money operator path
+  //   manual-panel       the operator's PAPER trade panel (backend/api/operator_trade)
+  originTag?:
+    | 'debate'
+    | 'chat-trade-action'
+    | 'agent-plan'
+    | 'agent-close'
+    | 'user-command'
+    | 'manual-click'
+    | 'manual-panel';
   // Real Exchange Trading — set only when this row was actually filled
   // by a live Binance/Bybit order (see components/ExchangeAccounts.tsx,
   // components/Supervisor.tsx's submitRealOrderAsync), not the plain

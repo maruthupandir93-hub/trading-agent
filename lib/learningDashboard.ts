@@ -37,10 +37,19 @@ export type ClosedTrade = {
   exitTradeId: string;
   symbol: string;
   tab: string;
-  entryTs: number;
+  // NULL when the opening leg is not in the log window. The round trip still
+  // happened and its P&L is still real — see `reconstructClosedTrades` — so the
+  // trade is counted and only the entry-derived fields are withheld. Reporting a
+  // hold time of 0 for an unpaired close would drag the average toward zero with
+  // trades that were in fact held for hours.
+  entryTs: number | null;
   exitTs: number;
-  holdMinutes: number;
+  holdMinutes: number | null;
   pnl: number;
+  /** Was the opening leg found? Everything entry-derived is only meaningful when true. */
+  paired: boolean;
+  /** 'long' opens on a buy and closes on a sell; 'short' is the mirror. */
+  direction: 'long' | 'short' | 'unknown';
   originTag: TradeLogEntry['originTag'] | 'unknown';
   marketCondition: 'bullish' | 'bearish' | 'range' | 'unknown';
   volatilityRegime: 'low' | 'medium' | 'high' | 'unknown';
@@ -69,8 +78,52 @@ function classifyEntryContext(entryContext: string | undefined, entryPrice: numb
   return { marketCondition, volatilityRegime };
 }
 
-type OpenState = { openedAt: number; originTag: TradeLogEntry['originTag'] | 'unknown'; entryContext?: string; entryPrice: number; runningQty: number };
+type OpenState = {
+  openedAt: number;
+  originTag: TradeLogEntry['originTag'] | 'unknown';
+  entryContext?: string;
+  entryPrice: number;
+  /** Always positive — the size still open, regardless of direction. */
+  runningQty: number;
+  direction: 'long' | 'short';
+};
 
+/**
+ * Round trips, reconstructed from the trade log.
+ *
+ * TWO BUGS THIS FUNCTION USED TO HAVE, BOTH OF WHICH REPORTED AN EMPTY DASHBOARD
+ * ON AN ACCOUNT THAT HAD TRADED. They are worth stating because the symptom was
+ * identical in each case — `totalClosedTrades: 0`, every panel blank — while the
+ * trade log itself rendered fine two pages away, which reads as "the dashboard is
+ * broken" rather than "these two are computed from different rules".
+ *
+ * 1. IT WAS LONG-ONLY. `buy` opened, `sell` closed. This agent trades perpetual
+ *    futures and takes shorts, which OPEN on a sell and CLOSE on a buy. Every
+ *    short therefore hit the sell branch, found no open state, and was skipped by
+ *    a bare `continue`; its closing buy then registered as a brand-new long. So
+ *    short round trips were not merely uncounted, they corrupted the running
+ *    quantity of any long later opened on the same symbol.
+ *
+ * 2. IT REQUIRED THE OPENING LEG TO BE IN THE WINDOW. A close whose open predates
+ *    the log — the ordinary case after any restart, any retention trim, and for
+ *    every position the operator was already holding — was discarded ENTIRELY,
+ *    including its realized P&L. That P&L is the authoritative number: it was
+ *    computed at close time by whoever closed the position, against the real
+ *    entry. Throwing it away in favour of a pairing walk that failed is choosing
+ *    a reconstruction over a fact.
+ *
+ * SO THE RULE IS NOW: **a trade row carrying a numeric `pnl` IS a realized
+ * close.** That holds structurally rather than by convention — the four writers
+ * of this table (`execution_agent`, `operator_trade`, `operator_exchange` and
+ * `lib/tradeStore.server.ts`) all insert opening fills with `pnl` absent, and
+ * only the close path supplies one. `pnl: 0` is a real break-even close and is
+ * counted; `pnl` absent is an open and is not.
+ *
+ * The ledger walk is kept, demoted from GATE to ENRICHMENT: when the opening leg
+ * is found, the close carries hold time, entry context and direction. When it is
+ * not, `paired` is false and those fields are null/'unknown' — which is how every
+ * consumer here distinguishes "we do not know" from a number.
+ */
 export function reconstructClosedTrades(tradeLog: TradeLogEntry[], reflectedTradeIds: Set<string> = new Set()): ClosedTrade[] {
   const sorted = [...tradeLog].sort((a, b) => a.ts - b.ts);
   const openState: Record<string, OpenState> = {};
@@ -78,34 +131,67 @@ export function reconstructClosedTrades(tradeLog: TradeLogEntry[], reflectedTrad
 
   for (const t of sorted) {
     const key = `${t.tab}:${t.symbol}`;
-    if (t.side === 'buy') {
-      const state = openState[key];
+    const state = openState[key];
+    // A close is identified by carrying a realized P&L, NOT by its side — see
+    // the docstring. `typeof` rather than a truthiness test, so a break-even
+    // close at exactly 0 is counted rather than read as an open.
+    const isClose = typeof t.pnl === 'number' && Number.isFinite(t.pnl);
+
+    if (!isClose) {
+      // ---- an OPEN, or an add to one already running -------------------
+      const direction: 'long' | 'short' = t.side === 'buy' ? 'long' : 'short';
       if (!state || state.runningQty <= DUST_QTY) {
-        openState[key] = { openedAt: t.ts, originTag: t.originTag ?? 'unknown', entryContext: t.entryContext, entryPrice: t.price, runningQty: t.qty };
+        openState[key] = {
+          openedAt: t.ts,
+          originTag: t.originTag ?? 'unknown',
+          entryContext: t.entryContext,
+          entryPrice: t.price,
+          runningQty: t.qty,
+          direction,
+        };
+      } else if (state.direction === direction) {
+        // Averaging in. The position stays continuously open from when it first
+        // opened, so `openedAt` is deliberately NOT advanced.
+        state.runningQty += t.qty;
       } else {
-        state.runningQty += t.qty; // averaging in — position stays continuously open since it first opened
+        // An opposite-side fill carrying no P&L. It reduces the position but
+        // reports no result, so there is nothing to record — decrement and move
+        // on rather than inventing a P&L for it.
+        state.runningQty -= t.qty;
+        if (state.runningQty <= DUST_QTY) delete openState[key];
       }
-    } else {
-      const state = openState[key];
-      if (!state) continue; // a sell/close with no tracked open state (log starts mid-position) — skip, don't invent a hold time
+      continue;
+    }
+
+    // ---- a CLOSE -------------------------------------------------------
+    const paired = Boolean(state) && state.runningQty > DUST_QTY;
+    const { marketCondition, volatilityRegime } = paired
+      ? classifyEntryContext(state.entryContext, state.entryPrice)
+      : { marketCondition: 'unknown' as const, volatilityRegime: 'unknown' as const };
+
+    closed.push({
+      exitTradeId: t.id,
+      symbol: t.symbol,
+      tab: t.tab,
+      entryTs: paired ? state.openedAt : null,
+      exitTs: t.ts,
+      holdMinutes: paired ? (t.ts - state.openedAt) / 60000 : null,
+      pnl: t.pnl as number,
+      // The ORIGIN of a round trip is the origin of the trade that OPENED it. A
+      // stop-loss close is tagged `agent-close` whoever opened the position, so
+      // attributing the result to the close would credit every outcome to the
+      // exit mechanism and none to the strategy that chose the trade.
+      originTag: paired ? state.originTag : (t.originTag ?? 'unknown'),
+      marketCondition,
+      volatilityRegime,
+      paired,
+      direction: paired ? state.direction : 'unknown',
+      hasReflection: reflectedTradeIds.has(t.id),
+    });
+
+    if (paired) {
       state.runningQty -= t.qty;
-      if (state.runningQty <= DUST_QTY && t.pnl !== undefined) {
-        const { marketCondition, volatilityRegime } = classifyEntryContext(state.entryContext, state.entryPrice);
-        closed.push({
-          exitTradeId: t.id,
-          symbol: t.symbol,
-          tab: t.tab,
-          entryTs: state.openedAt,
-          exitTs: t.ts,
-          holdMinutes: (t.ts - state.openedAt) / 60000,
-          pnl: t.pnl,
-          originTag: state.originTag,
-          marketCondition,
-          volatilityRegime,
-          hasReflection: reflectedTradeIds.has(t.id),
-        });
-        delete openState[key];
-      }
+      if (state.runningQty <= DUST_QTY) delete openState[key];
     }
   }
   return closed;
@@ -160,15 +246,20 @@ export function winRateByVolatilityRegime(closed: ClosedTrade[]): GroupStats[] {
   return groupBy(closed, (c) => c.volatilityRegime);
 }
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// Both of these key off the ENTRY time — "which hour did we choose to open this"
+// is the question, not when it happened to be closed. An unpaired close has no
+// entry time, so it groups under 'unknown' rather than being silently attributed
+// to the hour of its exit.
 export function performanceByWeekday(closed: ClosedTrade[]): GroupStats[] {
-  return groupBy(closed, (c) => WEEKDAY_LABELS[new Date(c.entryTs).getUTCDay()]).sort(
+  return groupBy(closed, (c) => (c.entryTs === null ? 'unknown' : WEEKDAY_LABELS[new Date(c.entryTs).getUTCDay()])).sort(
     (a, b) => WEEKDAY_LABELS.indexOf(a.group) - WEEKDAY_LABELS.indexOf(b.group),
   );
 }
 export function performanceByHourOfDay(closed: ClosedTrade[]): GroupStats[] {
-  return groupBy(closed, (c) => String(new Date(c.entryTs).getUTCHours()).padStart(2, '0') + ':00 UTC').sort(
-    (a, b) => parseInt(a.group) - parseInt(b.group),
-  );
+  return groupBy(
+    closed,
+    (c) => (c.entryTs === null ? 'unknown' : String(new Date(c.entryTs).getUTCHours()).padStart(2, '0') + ':00 UTC'),
+  ).sort((a, b) => parseInt(a.group) - parseInt(b.group));
 }
 
 // ---------------------------------------------------------------------
@@ -215,8 +306,13 @@ export function computeExpectancy(closed: ClosedTrade[]): ExpectancyResult {
 // Hold time — mean and median across closed trades.
 // ---------------------------------------------------------------------
 export function averageHoldTime(closed: ClosedTrade[]): { avgMinutes: number | null; medianMinutes: number | null; sampleSize: number } {
-  if (closed.length === 0) return { avgMinutes: null, medianMinutes: null, sampleSize: 0 };
-  const sorted = [...closed].map((c) => c.holdMinutes).sort((a, b) => a - b);
+  // Only trades whose opening leg was found have a hold time. `sampleSize` is
+  // therefore NOT `closed.length` and is reported separately — an average over 3
+  // of 40 trades has to be readable as such, and counting the other 37 as
+  // zero-minute holds would report a scalping system that does not exist.
+  const measurable = closed.map((c) => c.holdMinutes).filter((m): m is number => m !== null);
+  if (measurable.length === 0) return { avgMinutes: null, medianMinutes: null, sampleSize: 0 };
+  const sorted = measurable.sort((a, b) => a - b);
   const avg = sorted.reduce((s, v) => s + v, 0) / sorted.length;
   const mid = Math.floor(sorted.length / 2);
   const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];

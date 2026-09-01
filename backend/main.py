@@ -8,6 +8,7 @@ from backend.api import (
     marketdata as marketdata_api,
     operator_exchange as operator_exchange_api,
     operator_trade as operator_trade_api,
+    session as session_api,
 )
 from backend.core.agent_os import get_agent_os
 from backend.agents.trading_agent import register_trading_agent
@@ -119,6 +120,18 @@ async def lifespan(app: FastAPI):
     # `attach_execution` is above this for the same reason — a restored position
     # whose stop is ALREADY breached closes on the first tick, and a monitor with
     # no execution engine attached can only log that it cannot.
+    # Autonomous sessions are RESTORED but never RESUMED — a session that
+    # restarted real trading on boot, without anyone asking, would be the worst
+    # possible interpretation of a process restart.
+    from backend.services.trading_session import restore as restore_sessions
+
+    interrupted_sessions = restore_sessions()
+    if interrupted_sessions:
+        logger.warning(
+            "%d autonomous session(s) were interrupted by the last shutdown. They are "
+            "marked stopped and were NOT resumed.", interrupted_sessions,
+        )
+
     restored = await monitor.restore()
     if restored:
         logger.warning(
@@ -522,6 +535,16 @@ app.include_router(
     operator_trade_api.router,
     prefix="/api/operator/trade",
     tags=["Operator Trade Panel"],
+)
+
+# Autonomous trading sessions. The most consequential surface in the app: /start
+# begins a loop that drives the ordinary decision chain toward a target equity.
+# It places no orders itself and cannot bypass the Risk Gateway, the CRO or the
+# leverage ceiling — see `services/trading_session.py`.
+app.include_router(
+    session_api.router,
+    prefix="/api/session",
+    tags=["Autonomous Session"],
 )
 
 # Original fallback health check removed, using dedicated router above

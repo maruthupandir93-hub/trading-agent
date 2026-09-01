@@ -165,6 +165,10 @@ async def list_runs(
         None,
         description="Only runs of this graph, e.g. 'trade_analysis'. Omit for all.",
     ),
+    symbol: Optional[str] = Query(
+        None,
+        description="Only runs on this instrument, e.g. 'BTC/USDT'. Omit for all.",
+    ),
 ) -> Dict[str, Any]:
     """Recent graph runs from the trace store (spec Section 39.7).
 
@@ -182,14 +186,27 @@ async def list_runs(
     Filtering server-side rather than over-fetching and filtering in the browser:
     the caller would otherwise have to guess how many runs to request to be sure
     of finding one, and the honest answer is that there is no such number.
+
+    WHY `symbol` EXISTS
+    -------------------
+    The same reasoning, one level down. "The last `trade_analysis` run" is not
+    necessarily the last run on the instrument the operator is watching — the
+    agent analyses whatever it was triggered on. A session running on SOL/USDT
+    therefore seeded its pipeline view from a BTC/USDT run the moment anything
+    triggered one, and the diagram showed a different coin than the trade being
+    executed with nothing on screen saying so.
     """
     from backend.graphs.tracing import list_recent_runs
 
     # Over-fetch before filtering so `limit` means "give me this many of the graph
     # I asked for", not "look at this many and keep whatever matches".
-    if graph:
+    if graph or symbol:
         pool = list_recent_runs(limit=200)
-        runs = [r for r in pool if r.get("graph") == graph][:limit]
+        runs = [
+            r for r in pool
+            if (not graph or r.get("graph") == graph)
+            and (not symbol or r.get("symbol") == symbol)
+        ][:limit]
     else:
         runs = list_recent_runs(limit=limit)
 
@@ -197,6 +214,7 @@ async def list_runs(
         "runs": runs,
         "count": len(runs),
         "graphFilter": graph,
+        "symbolFilter": symbol,
         "tracingMeaning": (
             "spec Section 39.7: tracing tells you what a run DID — every node, every "
             "unavailable input, every error. It is not a substitute for the "
@@ -249,6 +267,44 @@ async def monitored_positions() -> Dict[str, Any]:
             "stops are enforced by PositionMonitorAgent on every tick, and can only "
             "ever be TIGHTENED — widening would exceed the risk the position was sized "
             "against"
+        ),
+    }
+
+
+@router.get("/volatility")
+async def volatility_readings(
+    limit: int = Query(50, ge=1, le=200),
+    symbol: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Volatility readings produced since this process started. Newest first.
+
+    IN-MEMORY, NOT A TABLE, AND IT SAYS SO IN THE RESPONSE. The volatility node
+    runs on every analysis cycle and every monitoring tick per open position;
+    persisting each one would add thousands of rows a day to a database the
+    operator is deliberately keeping small, for a handful of readings that ever
+    attach to a trade. The durable record is the frontend's capped file
+    (`lib/volatilityHistoryStore.server.ts`), which folds these in as it polls.
+
+    So a restart empties this, and only the last
+    `volatility_journal.MAX_ENTRIES` readings are held. `bufferedTotal` and
+    `retention` are returned so a caller can SEE that rather than mistake a short
+    list for a quiet market.
+    """
+    from backend.services import volatility_journal
+
+    entries = volatility_journal.recent(limit=limit, symbol=symbol)
+    return {
+        "readings": entries,
+        "count": len(entries),
+        "bufferedTotal": volatility_journal.size(),
+        "retention": (
+            f"in-memory ring of at most {volatility_journal.MAX_ENTRIES} readings, "
+            f"cleared on restart; the durable record is the frontend's capped file"
+        ),
+        "meaning": (
+            "regime is ranked against this instrument's OWN recent ATR% distribution "
+            "when basis='percentile'; basis='absolute' is a thin-history fallback and "
+            "is NOT comparable across instruments"
         ),
     }
 

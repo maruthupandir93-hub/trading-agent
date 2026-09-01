@@ -187,6 +187,62 @@ class MarketRegimeState:
 
 
 @dataclass
+class VolatilityState:
+    """The volatility layer's verdict — a REGIME plus the risk policy it implies.
+
+    Written by `volatility_analysis`, read by the Risk Gateway, the strategy
+    scorer and the Supervisor. Deliberately separate from
+    `MarketRegimeState.volatility`, which is a coarse LOW/MEDIUM/HIGH band derived
+    from a single stdev: that field answers "is this market busy?" while this one
+    answers "may we trade, how big, at what leverage, and how far away does the
+    stop have to sit?".
+
+    Keeping both is not duplication. The old band feeds the regime label the
+    strategy profiles are muted against; this carries a policy. Collapsing them
+    would either make the label carry sizing authority it was never validated for,
+    or throw away the percentile basis that makes this transferable across
+    instruments.
+
+    Every measurement is Optional because a short candle series genuinely cannot
+    support it, and `regime is None` means UNKNOWN — never "calm".
+    """
+
+    regime: Optional[str] = None          # VERY_LOW | LOW | NORMAL | HIGH | EXTREME
+    # "percentile" | "absolute" — how the regime was decided. An absolute basis is
+    # a fallback for thin history and is NOT comparable across instruments.
+    basis: Optional[str] = None
+    score: Optional[float] = None
+
+    atr: Optional[float] = None
+    atr_percent: Optional[float] = None
+    realized_volatility: Optional[float] = None
+    bollinger_width: Optional[float] = None
+    candle_range_percent: Optional[float] = None
+    percentile: Optional[float] = None
+
+    volatility_shock: bool = False
+    expansion_ratio: Optional[float] = None
+
+    # -- the policy the rest of the graph reads --------------------------
+    #
+    # `trading_allowed=False` is a HARD refusal, not advice: the Risk Gateway
+    # rejects on it. An unknown regime is also False, because a stop cannot be
+    # placed against a volatility nobody measured.
+    trading_allowed: bool = True
+    # Multiplies position size. Only ever <= 1.0 — see RISK_MULTIPLIER.
+    risk_multiplier: float = 1.0
+    # Caps leverage. Combined with ABSOLUTE_MAX_LEVERAGE by min(), so it can
+    # lower the ceiling and never raise it (CLAUDE.md invariant 2).
+    max_leverage: Optional[int] = None
+    # Stop distance in ATR multiples.
+    stop_atr_multiple: Optional[float] = None
+
+    candles_used: int = 0
+    unavailable: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+
+
+@dataclass
 class TechnicalAnalysis:
     trend: Optional[str] = None
     multi_timeframe_trend: Optional[str] = None
@@ -746,6 +802,9 @@ class TradingState(TypedDict, total=False):
     # --- Market (spec Section 4) --------------------------------------
     market_data: Optional[MarketSnapshot]
     market_regime: Optional[MarketRegimeState]
+    # The volatility layer. Written once by `volatility_analysis`; read by the
+    # Risk Gateway, strategy scoring and the Supervisor.
+    volatility: Optional[VolatilityState]
 
     # --- Analysis ----------------------------------------------------
     technical_analysis: Optional[TechnicalAnalysis]
@@ -893,6 +952,7 @@ def new_state(
         started_at=started_at,
         market_data=None,
         market_regime=None,
+        volatility=None,
         technical_analysis=None,
         orderflow_analysis=None,
         liquidity_analysis=None,

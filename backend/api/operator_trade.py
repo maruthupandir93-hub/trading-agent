@@ -358,10 +358,23 @@ async def place_paper_trade(req: PaperTradeRequest) -> Dict[str, Any]:
     else:
         monitor_note = "A sell closes an existing position; no stop applies."
 
+    # PERSIST THE TRADE. This was missing, and it is exactly the gap an operator
+    # reports as "I placed a trade and it never showed up in history or orders":
+    # `buy_paper` moves cash and positions but writes NO row to `trades`, which is
+    # what /history and /api/catalog/orders read. The agent's own fills have always
+    # been persisted (`execution_agent._persist_trade`); manual ones were not.
+    recorded = await _persist_manual_trade(
+        symbol=req.symbol, side=req.side, qty=req.qty, price=price,
+    )
+
     portfolio = await get_portfolio()
     return {
         "status": "success",
         "tab": "paper",
+        # Whether a LOCAL record exists, which is a different question from
+        # whether the trade happened. Surfaced so the operator is never left
+        # believing the trade log is complete when it is not.
+        "recorded": recorded,
         "symbol": req.symbol,
         "side": req.side,
         "qty": req.qty,
@@ -376,6 +389,48 @@ async def place_paper_trade(req: PaperTradeRequest) -> Dict[str, Any]:
             "real funds moved."
         ),
     }
+
+
+async def _persist_manual_trade(*, symbol: str, side: str, qty: float, price: float) -> bool:
+    """Write one manual paper fill to the `trades` table. Never raises.
+
+    `origin_tag='manual-panel'` distinguishes it from the agent's own fills
+    (`agent-plan`) and from the real-money operator path (`manual-click`), so the
+    three can never be confused when reading history back.
+
+    `price` is required by the schema and by `lib/tradeStore.server.ts`, which
+    does `toNumber(r.price) ?? 0` — a NULL here would render as a trade filled at
+    zero. The caller has already refused to proceed without a live price, so
+    there is always a real number to write.
+    """
+    import datetime
+    import uuid
+
+    from backend.core.db import get_db_pool
+
+    pool = get_db_pool()
+    if pool is None:
+        logger.warning(
+            "Manual trade %s %s %s at %s was NOT persisted: no database pool. The "
+            "paper book moved but /history and /orders will not show it.",
+            side, qty, symbol, price,
+        )
+        return False
+
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO trades (id, ts, tab, symbol, side, qty, price, origin_tag)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                str(uuid.uuid4()), datetime.datetime.utcnow(), "paper",
+                symbol, side, qty, price, "manual-panel",
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to persist manual trade for %s: %s", symbol, exc)
+        return False
 
 
 async def _register_with_monitor(req: PaperTradeRequest, price: float) -> bool:

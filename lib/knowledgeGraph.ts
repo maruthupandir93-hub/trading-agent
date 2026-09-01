@@ -282,8 +282,12 @@ export function queryTrades(graph: KnowledgeGraph, query: TradeQuery): TradeQuer
     appliedConstraints.push(`P&L >= ${query.minPnl}`);
   }
   if (query.maxHoldMinutes !== undefined) {
-    matches = matches.filter((t) => t.holdMinutes <= query.maxHoldMinutes!);
-    appliedConstraints.push(`hold time <= ${query.maxHoldMinutes}m`);
+    // A trade whose opening leg is outside the log window has NO hold time, and
+    // it is excluded rather than treated as instantaneous. Reading null as 0
+    // would make every unpaired trade satisfy every "held less than X" query and
+    // quietly pad the answer with trades whose duration is unknown.
+    matches = matches.filter((t) => t.holdMinutes !== null && t.holdMinutes <= query.maxHoldMinutes!);
+    appliedConstraints.push(`hold time <= ${query.maxHoldMinutes}m (trades with an unknown hold time are excluded)`);
   }
 
   matches = [...matches].sort((a, b) => b.exitTs - a.exitTs);

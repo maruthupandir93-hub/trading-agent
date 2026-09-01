@@ -28,9 +28,19 @@ export type FlowNode = {
  *
  *  A node the stream has said nothing about is IDLE, which is true, rather than
  *  absent, which is misleading. */
+/** The three fields a diagram actually needs from a node state.
+ *
+ *  Deliberately narrower than `GraphNodeState`. The live stream's states carry a
+ *  graph, run id and symbol; a replayed trace and a selected historical run do
+ *  not, because the caller already knows which run it picked. Demanding the full
+ *  type here would force those two call sites to invent identity fields nothing
+ *  reads — the usual way a type stops describing the data and starts being
+ *  satisfied with placeholders. */
+export type NodeDisplayState = Pick<GraphNodeState, 'status' | 'detail' | 'durationMs'>;
+
 export function mergeNodeStates(
   declared: { name: string; mayCallLlm?: boolean }[],
-  live: Record<string, GraphNodeState>,
+  live: Record<string, NodeDisplayState>,
 ): FlowNode[] {
   return declared.map((d) => {
     const l = live[d.name];
@@ -155,6 +165,12 @@ export function nodesFromRunTrace(run: RunTrace | null | undefined): Record<stri
       durationMs: typeof n.duration_ms === 'number' ? Math.round(n.duration_ms) : null,
       detail,
       at: typeof n.started_at === 'number' ? n.started_at * 1000 : Date.now(),
+      // Carried from the trace so a seeded node knows which run and which
+      // INSTRUMENT it describes. Without it the diagram cannot say whether the
+      // cycle it is showing is the coin the operator is actually trading.
+      graph: typeof run.graph === 'string' ? run.graph : null,
+      runId: typeof run.run_id === 'string' ? run.run_id : null,
+      symbol: typeof run.symbol === 'string' ? run.symbol : null,
     };
   }
   return out;

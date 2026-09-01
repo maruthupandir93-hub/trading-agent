@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react';
 import { MarketCard, type MarketCardData } from '@/components/cards/MarketCard';
 import { PolymarketCard, type PolymarketCardData } from '@/components/cards/PolymarketCard';
 import { LiveAgentInspectorModal } from '@/components/modals/LiveAgentInspectorModal';
+import { VolatilityHistoryPanel } from '@/components/VolatilityHistoryPanel';
 import { FlowDiagram } from '@/components/viz/FlowDiagram';
 import { Badge } from '@/components/ui/Badge';
 import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/components/ui/primitives';
@@ -32,11 +33,16 @@ import {
   useRealtimeConnected,
 } from '@/lib/realtime/useRealtime';
 import { pipelineSourceLabel, usePipeline } from '@/lib/realtime/usePipeline';
+import { useActiveSessionSymbol } from '@/lib/realtime/useActiveSession';
 import { mergeNodeStates } from '@/lib/viz/flow';
 
 const GRAPH2_FLOW = [
   'market_analysis',
   'regime_classification',
+  // Runs between the regime and strategy scoring, and can refuse the cycle
+  // outright. Omitting it from this list left the operator watching a pipeline
+  // that skipped straight past the node most likely to have stopped the trade.
+  'volatility_analysis',
   'strategy_scoring',
   'opportunity_detection',
   'debate',
@@ -70,7 +76,15 @@ export default function DashboardPage() {
   // this page between cycles shows what the agent actually just did instead of
   // twenty-three IDLE boxes. See `usePipeline` for why the stream alone cannot
   // answer that.
-  const pipeline = usePipeline();
+  // PINNED TO THE SESSION'S COIN when one is running.
+  //
+  // Without this the view seeds from "the most recent decision-graph run",
+  // whatever instrument that was — so a session on SOL rendered a BTC cycle the
+  // moment anything else triggered one, and the diagram gave no hint it had
+  // switched. `pipelineSourceLabel` names the symbol either way, so an unpinned
+  // view stays readable rather than merely ambiguous.
+  const sessionSymbol = useActiveSessionSymbol();
+  const pipeline = usePipeline(undefined, { symbol: sessionSymbol });
 
   const [inspect, setInspect] = useState<string | null>(null);
 
@@ -202,11 +216,29 @@ export default function DashboardPage() {
         )}
       </Card>
 
+      {/* ---- Volatility regime ----
+           Placed directly above the pipeline because it is the gate that decides
+           whether the pipeline is permitted to produce a trade at all. An operator
+           looking at a cycle that ran and traded nothing needs the regime in the
+           same glance, or the refusal reads as a fault. */}
+      <VolatilityHistoryPanel />
+
       {/* ---- Agent status ---- */}
       <Card>
         <SectionTitle
           action={
             <div className="flex items-center gap-2">
+              {/* WHICH COIN this pipeline is about. The diagram used to carry no
+                  instrument at all, so a cycle on a symbol the operator was not
+                  trading was indistinguishable from one on the symbol they were. */}
+              {pipeline.symbol ? (
+                <span className="mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                  {pipeline.symbol}
+                  {sessionSymbol && pipeline.symbol !== sessionSymbol ? (
+                    <span style={{ color: 'var(--warning)' }}> (not your session)</span>
+                  ) : null}
+                </span>
+              ) : null}
               <Badge
                 state={pipeline.isRunning ? 'RUNNING' : connected ? 'HEALTHY' : 'DOWN'}
                 label={pipeline.isRunning ? 'Cycle running' : connected ? 'Stream live' : 'Stream offline'}
