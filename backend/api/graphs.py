@@ -309,6 +309,32 @@ async def volatility_readings(
     }
 
 
+@router.get("/reconciliation")
+async def reconciliation_status(refresh: bool = Query(False)) -> Dict[str, Any]:
+    """How the local book compares to the VENUE's, as of the last check.
+
+    `refresh=true` forces a fresh private call. Off by default because this
+    endpoint is polled by a dashboard and the balance/positions move only on a
+    fill — re-asking the venue on every poll spends the API key's rate budget,
+    and that budget is what places orders.
+
+    A `venuePositions` of null means the venue could not be ASKED. It is not a
+    report that the venue holds nothing, and no caller may treat it as one.
+    """
+    from backend.services import reconciliation
+
+    report = await reconciliation.reconcile() if refresh else reconciliation.last_report()
+    if report is None:
+        return {
+            "available": False,
+            "reason": (
+                "no reconciliation has run yet. The loop runs once a minute and only "
+                "while LIVE_TRADING is on — there is no real book to compare otherwise."
+            ),
+        }
+    return {"available": True, **report.as_dict()}
+
+
 @router.post("/run/{symbol:path}")
 async def run_analysis(
     symbol: str,

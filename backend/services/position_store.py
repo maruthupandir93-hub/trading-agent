@@ -67,6 +67,7 @@ _FIELDS = (
     "take_profit",
     "peak_price",
     "opened_at",
+    "stop_order_id",
 )
 
 
@@ -146,9 +147,9 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
                         INSERT INTO monitored_positions (
                           tar_id, status, symbol, tab, side, qty,
                           entry_price, stop_loss, take_profit, peak_price,
-                          opened_at, updated_at
+                          opened_at, stop_order_id, updated_at
                         )
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                         ON CONFLICT (tar_id) DO UPDATE SET
                           status      = EXCLUDED.status,
                           symbol      = EXCLUDED.symbol,
@@ -160,6 +161,7 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
                           take_profit = EXCLUDED.take_profit,
                           peak_price  = EXCLUDED.peak_price,
                           opened_at   = EXCLUDED.opened_at,
+                          stop_order_id = EXCLUDED.stop_order_id,
                           updated_at  = EXCLUDED.updated_at
                         """,
                         *[row.get(f) for f in _FIELDS],
@@ -201,7 +203,7 @@ async def load_watch_list() -> List[Dict[str, Any]]:
             records = await conn.fetch(
                 """
                 SELECT tar_id, status, symbol, tab, side, qty, entry_price,
-                       stop_loss, take_profit, peak_price, opened_at
+                       stop_loss, take_profit, peak_price, opened_at, stop_order_id
                 FROM monitored_positions
                 """
             )
@@ -228,6 +230,12 @@ async def load_watch_list() -> List[Dict[str, Any]]:
                 "take_profit": _as_float(r["take_profit"]),
                 "peak_price": _as_float(r["peak_price"]),
                 "opened_at": _as_naive_utc(r["opened_at"]),
+                # Tolerant read. The SELECT names this column, so a real row
+                # always carries it — but a database whose `ALTER TABLE ... ADD
+                # COLUMN` has not been applied yet would raise mid-loop and lose
+                # the whole watch list, which is a far worse outcome than a null
+                # stop order id on one restored position.
+                "stop_order_id": (r["stop_order_id"] if "stop_order_id" in r.keys() else None),
             }
         )
     return out

@@ -604,6 +604,108 @@ was unstartable and the panel said "equity is not measurable" indefinitely.
 `target_equity` still reaches only the stop check. `tests/test_session_amounts.py`
 asserts that structurally by scanning the module's own source.
 
+### Truncating the book's tables on a RUNNING backend does nothing
+
+The operator reset their database, and the dashboard still read "Open positions:
+1". That is the expected outcome, not a bug in the reset:
+
+* `portfolio_store` keeps the book in a module-level `_portfolio` dict, and
+  `_persist()` REPLACES `agent_paper_account` / `agent_positions` from memory
+  after every write. The deleted position is back on the next fill.
+* `PositionMonitorAgent` keeps the watch list in `self._open`, and
+  `save_watch_list` is a `DELETE` + re-`INSERT` of everything it is holding.
+
+So a reset has to clear MEMORY first and let it persist down to empty. That is
+`POST /api/admin/reset-paper` (`clear_all` on the monitor, then
+`update_portfolio`). Doing it by hand works only if the backend is stopped, or
+restarted afterwards so `load_portfolio()` re-reads the empty tables.
+
+**It refuses while `LIVE_TRADING` is on, and that refusal is the most important
+line in the route.** `clear_all` stops watching without closing anything — right
+when the whole book is being discarded, catastrophic when the position is real and
+still open at the venue with nothing enforcing its stop. The check runs before
+anything is cleared. Decisions, reflections, traces and volatility history are
+deliberately untouched: they are the record of how the book reached the state
+being reset.
+
+### The venue layer: Binance and Bybit, and the four things that were missing
+
+`backend/services/venue.py` replaced a hardcoded `ccxt.binance(...)` that sent
+market orders carrying nothing but a `clientOrderId`. Enough to open a position;
+not enough to trade real money. Each of these is a way to lose money, not a rough
+edge:
+
+1. **Leverage was never set on the venue.** The Risk Gateway sized for the
+   operator's chosen leverage; the exchange used whatever its UI was last set to.
+   `ensure_leverage` now runs before every entry and a refusal ABORTS the trade —
+   filling at a leverage we know is wrong is trading on a false number.
+2. **Closes had no `reduceOnly`.** A close was just an opposite-side order, and
+   any surplus over the live size OPENS a position the other way.
+3. **Sizes were not rounded to the venue's filters.** A size below the minimum is
+   REFUSED, never rounded up — bumping up would stake more than any gate approved.
+4. **Nothing compared the local book to the venue's.** See reconciliation below.
+
+**Two clients, and the split is load-bearing.** `public` carries no credentials
+and serves all tickers, candles and market metadata; only balance, positions,
+leverage and orders use `private`. The key's rate budget is what places orders,
+and spending it on price polls throttles the request that matters.
+
+**The parameter matrix is where the venues genuinely disagree** and is centralised
+in `_order_params` so no call site can get half of it right:
+
+    Binance one-way : reduceOnly, no positionSide
+    Binance hedge   : positionSide — and NO reduceOnly (Binance REJECTS it)
+    Bybit  one-way  : positionIdx 0 + reduceOnly
+    Bybit  hedge    : positionIdx 1/2, acting on the leg OPPOSITE the order side
+    Bybit idempotency key is `orderLinkId`; `clientOrderId` is ignored
+
+Getting the hedge close backwards does not error — it opens a second position on
+the other leg. `EXCHANGE_ID` selects the venue; credentials are per-venue
+(`BINANCE_*` / `BYBIT_*`) because these are different accounts holding different
+money.
+
+### The stop-loss now RESTS AT THE VENUE
+
+CLAUDE.md used to say plainly that nothing watches while the process is down, and
+that only a resting stop order closes that window. It exists now.
+
+`PositionMonitorAgent._place_resting_stop` places a reduce-only stop-market at the
+venue on every REAL fill (paper gets none — there is no venue order behind a
+simulated fill). Three properties, each pinned by `tests/test_resting_stop.py`:
+
+* **Placed on the EXIT side.** A long's stop sells. On the entry side it would add
+  to the position at the stop rather than close it.
+* **Tightening CANCELS then places** — never the reverse. Two live reduce-only
+  stops means the second, after the first fires and flattens, is an order to OPEN
+  the opposite position. A brief gap with no stop is recoverable; that is not.
+* **Cancelled when the position closes.** A stop left resting on a flat account is
+  an order to open a reversed position the next time price touches it. A failed
+  cancel is CRITICAL and KEEPS the id — it is the only handle on that order.
+
+`monitored_positions.stop_order_id` persists it, so a restart can still cancel the
+stop this process left behind.
+
+A refused stop does NOT reject the position: it is already open and the money has
+moved, so refusing to track it would leave it open AND unwatched. It logs CRITICAL
+instead, because the operator is then relying on this process staying up.
+
+### Reconciliation REPORTS, and must never repair
+
+`backend/services/reconciliation.py` asks the venue what it holds and compares.
+It runs once a minute, only while `LIVE_TRADING` is on, and is read through
+`GET /api/graphs/reconciliation`.
+
+It never closes, opens or forgets a position, and `tests/test_reconciliation.py`
+asserts that against the module's own source. Every automatic "fix" is itself a
+trade: forgetting a local position abandons a real one if the venue read was
+stale, and closing an unknown venue position fires a market order nobody asked for
+— possibly on the operator's own manual trade in the same account.
+
+**`None` from `open_positions()` is not an empty book.** None means "could not
+ask"; `[]` means "the venue holds nothing". Collapsing them would flag every real
+position as a phantom on one timeout, and anything acting on that report would
+flatten the book on a network blip.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

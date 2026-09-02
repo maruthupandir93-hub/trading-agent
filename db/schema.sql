@@ -738,6 +738,11 @@ CREATE TABLE IF NOT EXISTS monitored_positions (
   take_profit  numeric,
   peak_price   numeric,
   opened_at    timestamptz,
+  -- The venue's id for the RESTING stop-loss order protecting this position.
+  -- Persisted because a restart must be able to CANCEL it: an orphaned stop
+  -- becomes an order to OPEN the opposite position the next time price touches
+  -- it. NULL for paper positions, which have no venue order.
+  stop_order_id text,
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_monitored_positions_status ON monitored_positions (status);
@@ -768,6 +773,11 @@ ALTER TABLE missions ADD COLUMN IF NOT EXISTS baseline_equity_usd numeric;
 -- distinguishable in the table the Evaluation layer averages over.
 ALTER TABLE reflections ADD COLUMN IF NOT EXISTS lesson_source text;
 ALTER TABLE reflections ADD COLUMN IF NOT EXISTS lesson_detail text;
+
+-- The venue's resting stop-loss order id. See the `monitored_positions` CREATE
+-- block: without it a restart cannot cancel the stop it left behind, and an
+-- orphaned stop is an order to open the opposite position.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS stop_order_id text;
 
 
 -- ============================================================================

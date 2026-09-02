@@ -296,11 +296,23 @@ async def lifespan(app: FastAPI):
         "WILL" if position_monitoring_enabled() else "will NOT",
     )
 
+    from backend.services import reconciliation
+
     worker_tasks = [
         asyncio.create_task(monitor_worker.start()),
         asyncio.create_task(curiosity_worker.start()),
         asyncio.create_task(trigger_worker.start()),
         asyncio.create_task(position_worker.start()),
+        # Reconciliation: ask the VENUE what it holds and compare it to what this
+        # process believes. Nothing else in the system ever asked, so a position
+        # closed by hand, liquidated or ADL'd left the monitor guarding something
+        # that no longer existed. It REPORTS ONLY — see the module docstring for
+        # why an automatic repair would itself be an unrequested trade.
+        #
+        # Started unconditionally; the loop itself no-ops while LIVE_TRADING is
+        # off, so a paper-only process does not spend a private call per minute
+        # comparing two empty lists.
+        asyncio.create_task(reconciliation.run_forever()),
     ]
 
     # Phase 36 — Polymarket poller. Started ONLY when the feature is enabled.

@@ -85,6 +85,11 @@ class _Tracked:
     __slots__ = (
         "tar_id", "symbol", "side", "tab", "qty", "entry_price",
         "stop_loss", "take_profit", "opened_at", "peak_price",
+        # The venue's id for the RESTING stop protecting this position, when one
+        # was placed. None for paper (there is no venue order) and None when the
+        # venue refused it — which is a materially less safe position and is
+        # logged as such rather than left to be inferred from a null.
+        "stop_order_id",
     )
 
     def __init__(self, **kw):
@@ -306,6 +311,45 @@ class PositionMonitorAgent(BaseAgent):
             return
         loop.create_task(self.persist_watch_list())
 
+    async def _replace_resting_stop(self, pos: "_Tracked") -> None:
+        """Move the venue-side stop to `pos.stop_loss`. Cancel first, then place.
+
+        A TIGHTENED STOP THAT IS NOT MOVED AT THE VENUE IS THE WORST OF BOTH.
+        The operator is told the stop is now tighter, the in-process monitor
+        enforces the tighter level, and the order actually resting at the exchange
+        is still at the ORIGINAL level. If the process then dies, the position is
+        protected at a level the operator was told it had moved away from — a
+        larger loss than they believe is possible.
+
+        Cancel-then-place, in that order and not the reverse: two live reduce-only
+        stops on one position means the second one, after the first fires and
+        flattens, becomes an order to OPEN the opposite position. A brief window
+        with NO stop is recoverable; a duplicate that opens a reversed position is
+        not.
+        """
+        if pos.tab != "real" or pos.stop_loss is None:
+            return
+        await self._cancel_resting_stop(pos, "stop tightened")
+        await self._place_resting_stop(pos)
+
+    def _replace_resting_stop_soon(self, pos: "_Tracked") -> None:
+        """Schedule `_replace_resting_stop` from a SYNCHRONOUS caller.
+
+        Same compromise as `_persist_soon`, and stated as plainly: `tighten_stop`
+        is sync and widely depended on, so this returns immediately and the venue
+        order moves a moment later. Until it does, the exchange still holds the
+        OLDER, WIDER stop — which is less protection than the operator was just
+        told they have, but never more. A failure is logged at CRITICAL by
+        `_place_resting_stop`, so it does not pass silently.
+        """
+        if pos.tab != "real":
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._replace_resting_stop(pos))
+
     async def restore(self) -> int:
         """Reload the watch list at startup. Returns how many positions resumed.
 
@@ -373,6 +417,10 @@ class PositionMonitorAgent(BaseAgent):
                 # position. The entry is the one value guaranteed to have been
                 # reached, so it is the honest conservative floor.
                 peak_price=row["peak_price"] if row["peak_price"] is not None else row["entry_price"],
+                # Restored so a close after a restart can CANCEL the stop this
+                # process left resting at the venue. An orphaned stop is an order
+                # to open the opposite position the next time price touches it.
+                stop_order_id=row.get("stop_order_id"),
             )
             resumed += 1
 
@@ -444,6 +492,86 @@ class PositionMonitorAgent(BaseAgent):
             logger.error(
                 "Failed to persist the closing trade for %s (realized %+.2f): %s",
                 pos.symbol, realized, exc,
+            )
+
+    async def _place_resting_stop(self, pos: "_Tracked") -> None:
+        """Put the stop-loss ON THE EXCHANGE for a real position.
+
+        THIS CLOSES THE GAP CLAUDE.md HAS ALWAYS NAMED. Every stop in this system
+        was enforced by `_check_price` reacting to ticks IN THIS PROCESS. That
+        works while the process is alive and does nothing whatsoever while it is
+        not: a crash, a deploy, an OOM or a restart left a real position open with
+        no stop anywhere in the world. Restoring the watch list narrowed the window
+        from "forever, silently" to "the length of the restart" — only an order
+        resting at the venue closes it, because the venue keeps working when we do
+        not.
+
+        PAPER POSITIONS GET NOTHING, and that is correct rather than an omission:
+        there is no venue order behind a simulated fill, so there is nothing to
+        rest. The in-process monitor is the whole mechanism there and always was.
+
+        A FAILURE HERE DOES NOT CLOSE OR REJECT THE POSITION. The position is
+        already open and the money has already moved; refusing to track it would
+        leave it open AND unwatched, which is strictly worse. It is logged at
+        CRITICAL because the operator is now relying on this process staying up.
+        """
+        if pos.tab != "real" or pos.stop_loss is None:
+            return
+
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        if not venue.has_credentials():
+            return
+
+        # The EXIT side: a long is closed by selling.
+        exit_side = "sell" if pos.side == "buy" else "buy"
+        result = await venue.place_stop_loss(
+            symbol=pos.symbol,
+            side=exit_side,
+            qty=pos.qty,
+            stop_price=pos.stop_loss,
+            client_order_id=f"sl_{pos.tar_id}"[:36],
+        )
+
+        if result.ok:
+            pos.stop_order_id = result.order_id
+            logger.warning(
+                "Resting stop placed at %s for %s %s @ %s (order %s). The position is now "
+                "protected even if this process stops.",
+                venue.id, pos.symbol, pos.qty, pos.stop_loss, result.order_id,
+            )
+        else:
+            pos.stop_order_id = None
+            logger.critical(
+                "NO RESTING STOP AT THE VENUE for %s (%s): %s. The in-process monitor is the "
+                "ONLY thing enforcing this stop, so a crash or restart leaves this REAL "
+                "position unprotected until the process returns.",
+                pos.symbol, pos.tar_id, result.error,
+            )
+
+    async def _cancel_resting_stop(self, pos: "_Tracked", reason: str) -> None:
+        """Remove the venue-side stop once the position it protected is gone.
+
+        A stop left resting after its position closes is an order to OPEN the
+        opposite position the next time price touches that level. Cancelling is
+        therefore not tidy-up, it is the second half of the close.
+        """
+        if not pos.stop_order_id:
+            return
+
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        ok = await venue.cancel_order(pos.stop_order_id, pos.symbol)
+        if ok:
+            pos.stop_order_id = None
+        else:
+            logger.critical(
+                "COULD NOT CANCEL the resting stop %s for %s after %s. It may still be live at "
+                "%s, where it would OPEN an opposite position if price reaches it. Cancel it "
+                "manually.",
+                pos.stop_order_id, pos.symbol, reason, venue.id,
             )
 
     async def track_manual_position(
@@ -518,6 +646,31 @@ class PositionMonitorAgent(BaseAgent):
         await self.persist_watch_list()
         return tar_id
 
+    async def clear_all(self, reason: str) -> bool:
+        """Forget every watched position, in memory AND in storage.
+
+        FOR AN OPERATOR RESET ONLY. This does NOT close anything — it stops
+        watching. On the paper book that is exactly right: the reset is throwing
+        the whole book away, so there is nothing left to protect. On a real book
+        it would be the worst possible action, leaving a live position open at the
+        venue with nothing enforcing its stop, which is why the only caller
+        (`api/admin.reset_paper`) refuses to run while `LIVE_TRADING` is on.
+
+        Pending approvals are cleared too. A TAR whose fill has not arrived yet
+        would otherwise open a position into a book that no longer expects it, and
+        be logged as UNPROTECTED for a position the operator believes they deleted.
+
+        Returns whether the empty list reached storage. False means memory is
+        clear but `monitored_positions` still holds rows — a restart would then
+        resurrect them, so the caller should say so rather than report success.
+        """
+        count = len(self._open)
+        self._open.clear()
+        self._pending.clear()
+        self._closing.clear()
+        logger.warning("Position monitor cleared: %s watched position(s) dropped (%s).", count, reason)
+        return await self.persist_watch_list()
+
     def snapshot_open(self) -> List[Dict[str, Any]]:
         """Plain-dict view of every watched position.
 
@@ -587,6 +740,7 @@ class PositionMonitorAgent(BaseAgent):
                 pos.symbol, new_stop,
             )
             self._persist_soon()
+            self._replace_resting_stop_soon(pos)
             return True, f"position had no stop; set to {new_stop:.8g}"
 
         # 'buy' means a long: a HIGHER stop is tighter. 'sell' is the mirror.
@@ -629,6 +783,10 @@ class PositionMonitorAgent(BaseAgent):
             acted=True,
         )
         self._persist_soon()
+        # The venue's resting order has to move too, or the exchange keeps
+        # protecting this position at the OLD, wider level while everything on
+        # screen says otherwise.
+        self._replace_resting_stop_soon(pos)
         return True, f"stop tightened {current:.8g} -> {new_stop:.8g}"
 
     async def handle_event(self, event: BaseEvent) -> None:
@@ -647,7 +805,12 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         if isinstance(event, OrderFilledEvent):
-            self._register_fill(event)
+            tracked = self._register_fill(event)
+            # Placed BEFORE the persist, so the row that lands carries the stop
+            # order id. Persisting first and placing after would leave a window
+            # where a crash loses the id and orphans the stop at the venue.
+            if tracked is not None:
+                await self._place_resting_stop(tracked)
             await self.persist_watch_list()
             return
 
@@ -655,7 +818,9 @@ class PositionMonitorAgent(BaseAgent):
             await self._check_price(event.symbol, event.price)
             return
 
-    def _register_fill(self, event: OrderFilledEvent) -> None:
+    def _register_fill(self, event: OrderFilledEvent) -> Optional["_Tracked"]:
+        """Join a fill to its approval. Returns the tracked position, or None when
+        there was no matching approval and nothing can be watched."""
         tar_id = str(event.tar_id)
         approved = self._pending.pop(tar_id, None)
 
@@ -674,7 +839,7 @@ class PositionMonitorAgent(BaseAgent):
                 {"orderId": event.order_id, "tarId": tar_id},
                 acted=False,
             )
-            return
+            return None
 
         tracked = _Tracked(
             tar_id=tar_id,
@@ -700,6 +865,7 @@ class PositionMonitorAgent(BaseAgent):
             {"tarId": tar_id, "stopLoss": approved["stop_loss"], "takeProfit": approved["take_profit"]},
             acted=True,
         )
+        return tracked
 
     async def _check_price(self, symbol: str, price: float) -> None:
         if price <= 0:
@@ -766,6 +932,17 @@ class PositionMonitorAgent(BaseAgent):
             sign = 1 if pos.side == "buy" else -1
             realized = (fill_price - pos.entry_price) * pos.qty * sign
             held = (datetime.datetime.utcnow() - pos.opened_at).total_seconds()
+
+            # CANCEL THE RESTING STOP BEFORE FORGETTING THE POSITION.
+            #
+            # A stop left at the venue after its position closes is not litter —
+            # it is a live reduce-only order that, on a venue now flat, becomes an
+            # order to OPEN the opposite position the next time price touches that
+            # level. Cancelling is the second half of the close, not tidy-up.
+            #
+            # Done here rather than after `_open.pop` so the id is still in hand,
+            # and awaited so a failure is logged while the symbol is still known.
+            await self._cancel_resting_stop(pos, f"close by {reason}")
 
             self._open.pop(pos.tar_id, None)
             # Persisted BEFORE POSITION_CLOSED is published. A crash between the

@@ -285,26 +285,62 @@ class ExecutionAgent(BaseAgent):
             filled_qty = tar.approved_size
             fee = (fill_price * tar.approved_size) * 0.0004  # 4 bps, simulated
         else:
-            client = get_exchange_client()
-            order = await client.create_market_order(
-                symbol=tar.symbol,
-                side=side,
-                amount=tar.approved_size,
-                client_order_id=idempotency_key,
-            )
+            from backend.services.venue import get_venue
 
-            if order is None:
-                # create_market_order returns None on failure and no longer
-                # fabricates a fill, so this branch now means what it says.
+            venue = get_venue()
+
+            # LEVERAGE IS SET ON THE VENUE BEFORE THE ORDER, AND A FAILURE ABORTS.
+            #
+            # The Risk Gateway sized this position for `approved_leverage`. The
+            # exchange applies whatever was last set in its own UI — possibly 20x
+            # when the agent sized for 3x. Every margin and liquidation figure the
+            # system then computes describes a position that does not exist, and
+            # the real one liquidates far closer to entry than anything here
+            # believes. Placing the order anyway would be trading on a number we
+            # know to be wrong, so this returns instead.
+            if not await venue.ensure_leverage(tar.symbol, tar.approved_leverage):
                 logger.error(
-                    "TAR %s was NOT filled — the exchange rejected or failed the order. "
-                    "No position was opened and nothing is being recorded as a trade.",
-                    tar.tar_id,
+                    "TAR %s NOT executed: %s would not accept %sx leverage on %s. The position "
+                    "was sized for that leverage, so filling it at the venue's current setting "
+                    "would stake a different amount of margin than the Risk Gateway approved.",
+                    tar.tar_id, venue.id, tar.approved_leverage, tar.symbol,
                 )
                 return
 
-            order_id = order.get("id", order_id)
-            raw_fill = order.get("average") or order.get("price")
+            result = await venue.market_order(
+                symbol=tar.symbol,
+                side=side,
+                qty=tar.approved_size,
+                reduce_only=False,
+                client_order_id=idempotency_key,
+                expected_price=expected_price,
+            )
+
+            if not result.ok:
+                # `ok=False` carries no price by construction, so this cannot be
+                # mistaken for a fill the way a fabricated order dict once was.
+                logger.error(
+                    "TAR %s was NOT filled — %s rejected or failed the order: %s. "
+                    "No position was opened and nothing is being recorded as a trade.",
+                    tar.tar_id, venue.id, result.error,
+                )
+                return
+
+            # The venue's step size may have trimmed the size. Booking what was
+            # ASKED FOR rather than what filled would leave the local book holding
+            # a quantity the exchange does not have, and the reconciler would then
+            # report a phantom discrepancy on every tick.
+            if result.adjusted_qty is not None and result.requested_qty is not None:
+                if abs(result.adjusted_qty - result.requested_qty) > 1e-12:
+                    logger.warning(
+                        "TAR %s: %s rounded the size from %s to %s to meet %s's step. "
+                        "The fill is being booked at the rounded size.",
+                        tar.tar_id, venue.id, result.requested_qty, result.adjusted_qty, tar.symbol,
+                    )
+
+            order = result.raw or {}
+            order_id = result.order_id or order_id
+            raw_fill = result.average_price
             if not raw_fill or float(raw_fill) <= 0:
                 # An accepted order with no usable fill price. Recording 0.0
                 # here would silently book a position at zero cost, showing
@@ -501,24 +537,43 @@ class ExecutionAgent(BaseAgent):
             )
             return fill_price
 
-        client = get_exchange_client()
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
         # Idempotency key includes the reason so a stop-triggered close and a
         # later manual close of the same symbol are distinct orders, while a
         # retry of the SAME close reuses its key.
         client_order_id = f"close_{symbol.replace('/', '')}_{reason}"[:36]
-        order = await client.create_market_order(
-            symbol=symbol, side=exit_side, amount=qty, client_order_id=client_order_id
+
+        # `reduce_only=True` IS WHAT MAKES THIS A CLOSE.
+        #
+        # Without it this is merely an opposite-side market order. If `qty` is even
+        # slightly larger than what the venue actually holds — a partial fill, a
+        # fee taken in the base asset, a stop that already trimmed the position —
+        # the surplus does not close anything. It OPENS a position the other way.
+        # The operator asked to flatten and is now short.
+        #
+        # `Venue._order_params` translates this per venue: Binance hedge mode
+        # rejects `reduceOnly` and expresses the same intent through `positionSide`.
+        result = await venue.market_order(
+            symbol=symbol,
+            side=exit_side,
+            qty=qty,
+            reduce_only=True,
+            client_order_id=client_order_id,
+            expected_price=self._last_prices.get(symbol, 0.0),
         )
-        if order is None:
+        order = result.raw or {}
+        if not result.ok:
             # Loud, because the position is still open and still exposed.
             logger.critical(
-                "FAILED TO CLOSE %s (%s %s, reason=%s). THE POSITION IS STILL OPEN and still "
-                "carries risk. Manual intervention required.",
-                symbol, exit_side, qty, reason,
+                "FAILED TO CLOSE %s (%s %s, reason=%s): %s. THE POSITION IS STILL OPEN and "
+                "still carries risk. Manual intervention required.",
+                symbol, exit_side, qty, reason, result.error,
             )
             return None
 
-        raw = order.get("average") or order.get("price")
+        raw = result.average_price
         if not raw or float(raw) <= 0:
             logger.error(
                 "Close order %s for %s was accepted but returned no usable fill price. "

@@ -18,7 +18,8 @@ to the inverse case — the bot is very much awake and they want it to stop.
 import logging
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.core.auth import auth_status, require_write_auth
 # `settings` was USED BY THREE ROUTES AND NEVER IMPORTED, so each raised
@@ -33,6 +34,7 @@ from backend.core.auth import auth_status, require_write_auth
 # dead. Found by sweeping every endpoint rather than by any test: nothing
 # imported these three functions, so an import-time NameError could not surface.
 from backend.core.config import settings
+from backend.core.db import get_db_pool
 
 from backend.core.system_state import (
     is_emergency_stopped,
@@ -165,6 +167,135 @@ async def emergency_stop() -> Dict[str, Any]:
 # confirmation string so it cannot be flipped by a stray click, a browser
 # extension, or a test runner hitting every endpoint.
 # ---------------------------------------------------------------------------
+
+class ResetPaperRequest(BaseModel):
+    """Everything defaults to the safe thing; nothing is reset implicitly."""
+
+    startingCash: float = Field(10_000.0, gt=0)
+    # Off by default. The trade log is the audit trail of what the agent did, and
+    # wiping it is a separate decision from resetting the book.
+    clearTradeLog: bool = False
+    # Required, and checked against the literal string. A reset is irreversible
+    # and this route is reachable over HTTP; a stray POST should not be able to
+    # erase a book.
+    confirm: str = Field(..., description="must be exactly 'RESET PAPER'")
+
+
+@router.post("/reset-paper", dependencies=[Depends(require_write_auth)])
+async def reset_paper(req: ResetPaperRequest) -> Dict[str, Any]:
+    """Reset the PAPER book: cash back to a chosen figure, no positions, watch list empty.
+
+    WHY DELETING THE DATABASE ROWS DID NOT WORK
+    -------------------------------------------
+    This endpoint exists because the obvious approach silently fails. Truncating
+    `agent_positions` / `agent_paper_account` / `monitored_positions` while the
+    backend is RUNNING does nothing lasting:
+
+      * `portfolio_store` holds the book in a module-level `_portfolio` dict and
+        `_persist()` REPLACES the rows from memory after every fill. The next
+        write puts the deleted position straight back.
+      * `PositionMonitorAgent` holds its watch list in `self._open` and calls
+        `save_watch_list`, which is a `DELETE` + re-`INSERT` of everything it is
+        holding. Same result.
+
+    So a reset has to clear the IN-MEMORY state first and let it persist itself
+    down to empty. That ordering is the whole point of this route, and it is why
+    "I reset the DB but the position is still there" is the expected outcome of
+    doing it by hand against a live process.
+
+    PAPER ONLY, AND REFUSED WHEN LIVE_TRADING IS ON
+    -----------------------------------------------
+    The real book is the exchange's, not ours; there is nothing here that could
+    reset it and pretending otherwise would be dangerous. With `LIVE_TRADING=true`
+    the agent's positions may be REAL, and clearing the watch list would stop the
+    stop-loss monitor watching a live position while leaving it open on the venue.
+    That is the single worst thing this file could do, so it refuses outright
+    rather than resetting "just the paper part" of a live process.
+
+    WHAT IT DOES NOT TOUCH
+    ----------------------
+    Decisions, reflections, graph traces and the volatility history are all
+    observability, not the book. Wiping them would delete the record of how the
+    agent reached the state being reset — which is the part worth keeping.
+    """
+    if req.confirm != "RESET PAPER":
+        raise HTTPException(
+            status_code=400,
+            detail="confirm must be exactly 'RESET PAPER'. This erases the paper book.",
+        )
+
+    if settings.LIVE_TRADING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "LIVE_TRADING is ON, so open positions may be REAL. Clearing the "
+                "watch list would stop the stop-loss monitor watching a position "
+                "that is still open on the exchange. Turn live trading off first."
+            ),
+        )
+
+    from backend.agents.position_monitor import get_position_monitor
+    from backend.services import portfolio_store
+
+    report: Dict[str, Any] = {}
+
+    # 1. THE WATCH LIST FIRST. It is the safety-critical structure, and clearing
+    #    it before the book means there is no window where the monitor is watching
+    #    a position the book no longer has.
+    monitor = get_position_monitor()
+    watched_before = len(monitor.snapshot_open())
+    cleared = await monitor.clear_all("operator reset the paper book")
+    report["watchedCleared"] = watched_before
+    report["watchListPersisted"] = cleared
+
+    # 2. The book in memory, then straight down to the database through the
+    #    module's own writer — so the rows match what the process believes.
+    positions_before = len(portfolio_store._portfolio.get("paper", {}).get("positions") or [])
+    await portfolio_store.update_portfolio(
+        {
+            "paper": {"cash": float(req.startingCash), "positions": []},
+            "real": portfolio_store._portfolio.get("real", {"positions": []}),
+        }
+    )
+    report["positionsCleared"] = positions_before
+    report["cash"] = float(req.startingCash)
+
+    # 3. The trade log, only if asked.
+    report["tradesDeleted"] = None
+    if req.clearTradeLog:
+        pool = get_db_pool()
+        if pool is None:
+            report["tradesDeleted"] = "no database — the trade log was not touched"
+        else:
+            async with pool.acquire() as conn:
+                deleted = await conn.fetchval(
+                    "WITH d AS (DELETE FROM trades WHERE tab = 'paper' RETURNING 1) "
+                    "SELECT count(*) FROM d"
+                )
+            report["tradesDeleted"] = int(deleted or 0)
+
+    logger.warning(
+        "OPERATOR RESET THE PAPER BOOK: cash=%.2f, %s position(s) cleared, "
+        "%s watched position(s) cleared, trades deleted=%s",
+        req.startingCash, positions_before, watched_before, report["tradesDeleted"],
+    )
+
+    return {
+        "status": "success",
+        **report,
+        "meaning": (
+            "The paper book is now empty at the chosen cash figure and the stop-loss "
+            "watch list holds nothing. Decisions, reflections and graph traces are "
+            "deliberately untouched — they are the record of how the agent reached "
+            "the state you just reset."
+        ),
+        "note": (
+            "Deleting these rows in SQL while the backend is running does NOT work: "
+            "the in-memory book and watch list are re-persisted over the top on the "
+            "next write. This route clears memory first, which is why it sticks."
+        ),
+    }
+
 
 @router.get("/trading-mode")
 async def get_trading_mode() -> Dict[str, Any]:

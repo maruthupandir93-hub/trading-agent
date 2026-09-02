@@ -18,6 +18,7 @@ import { useState, useCallback } from 'react';
 import { useAppState } from '@/components/AppState';
 import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
+import { ResetPaperBookPanel } from '@/components/operator/ResetPaperBookPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
@@ -247,6 +248,10 @@ export default function SettingsPage() {
           there is no chat at all, and no server-side fallback.
         </div>
       </Card>
+
+      {/* Housed here, beside the live-trading toggle, because this is already the
+          page for controls that change state irreversibly rather than display it. */}
+      <ResetPaperBookPanel liveTrading={live} />
 
       <NotAvailable
         what="Notification settings"
