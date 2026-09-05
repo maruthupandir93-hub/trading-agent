@@ -108,6 +108,11 @@ class ReconciliationReport:
         }
 
 
+def _norm(symbol: Any) -> str:
+    """`SOL/USDT:USDT` and `SOL/USDT` are the same instrument. Compare them as one."""
+    return str(symbol or "").split(":")[0]
+
+
 def _compare(
     local: List[Dict[str, Any]], venue_positions: List[Dict[str, Any]]
 ) -> List[Discrepancy]:
@@ -118,8 +123,16 @@ def _compare(
     at all.
     """
     out: List[Discrepancy] = []
-    by_symbol_venue = {p["symbol"]: p for p in venue_positions if p.get("symbol")}
-    by_symbol_local = {p["symbol"]: p for p in local if p.get("symbol")}
+    # NORMALISED ON BOTH SIDES. The local book holds "SOL/USDT"; ccxt's unified
+    # symbol for the same perpetual is "SOL/USDT:USDT". Keying on the raw strings
+    # matched nothing, so every real position was reported as CRITICAL "missing at
+    # venue" AND the venue's own position as unknown — a false alarm on precisely
+    # the alert that is supposed to mean a liquidation or a manual close.
+    #
+    # `Venue.open_positions` already returns the display form; this normalises
+    # again so a caller passing raw venue rows cannot resurrect the bug.
+    by_symbol_venue = {_norm(p["symbol"]): p for p in venue_positions if p.get("symbol")}
+    by_symbol_local = {_norm(p["symbol"]): p for p in local if p.get("symbol")}
 
     for symbol, lp in by_symbol_local.items():
         vp = by_symbol_venue.get(symbol)

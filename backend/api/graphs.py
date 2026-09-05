@@ -335,6 +335,23 @@ async def reconciliation_status(refresh: bool = Query(False)) -> Dict[str, Any]:
     return {"available": True, **report.as_dict()}
 
 
+@router.get("/strategy-performance")
+async def strategy_performance_summary() -> Dict[str, Any]:
+    """Realised results per strategy — the feedback loop, made visible.
+
+    Every profile used to carry `historical_success_rate=None` and scoring said so
+    on every run. This is what closed that: deterministic arithmetic over closed
+    trades, gated on a sample floor before it may influence selection.
+
+    `usable: false` means the strategy has not closed enough trades for its win
+    rate to steer anything yet. It is still reported — an operator should be able
+    to see a young strategy's record without it moving the agent.
+    """
+    from backend.services import strategy_performance
+
+    return await strategy_performance.summary()
+
+
 @router.post("/run/{symbol:path}")
 async def run_analysis(
     symbol: str,

@@ -1,13 +1,13 @@
 {
     "monitoring_cycles": [
         {
-            "ts": "2026-09-01T17:10:44.634176",
+            "ts": "2026-09-05T01:32:05.173336",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -21,13 +21,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:11:44.683993",
+            "ts": "2026-09-05T01:33:05.181688",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -41,13 +41,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:12:44.734055",
+            "ts": "2026-09-05T01:34:05.206858",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -61,13 +61,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:13:44.784925",
+            "ts": "2026-09-05T01:35:05.231744",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -81,13 +81,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:14:44.842927",
+            "ts": "2026-09-05T01:36:05.257707",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -101,13 +101,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:02.346365",
+            "ts": "2026-09-05T01:37:05.280259",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -121,13 +121,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:13.420849",
+            "ts": "2026-09-05T01:38:05.323210",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -141,13 +141,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:22.257316",
+            "ts": "2026-09-05T01:39:05.348639",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -161,13 +161,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:31.229711",
+            "ts": "2026-09-05T01:40:05.365113",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -181,13 +181,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:40.340736",
+            "ts": "2026-09-05T01:41:05.383393",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -201,13 +201,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:44.884361",
+            "ts": "2026-09-05T01:42:05.398437",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -221,13 +221,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:49.356359",
+            "ts": "2026-09-05T01:43:05.407397",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -241,13 +241,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:15:58.696727",
+            "ts": "2026-09-05T01:44:05.426095",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -261,13 +261,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:08.057565",
+            "ts": "2026-09-05T01:45:05.436882",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -281,13 +281,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:17.241345",
+            "ts": "2026-09-05T01:46:05.457360",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -301,13 +301,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:26.288008",
+            "ts": "2026-09-05T01:46:42.905566",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -321,13 +321,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:36.001953",
+            "ts": "2026-09-05T01:47:42.911259",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -341,13 +341,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:44.925792",
+            "ts": "2026-09-05T01:48:34.029053",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -361,13 +361,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:45.463024",
+            "ts": "2026-09-05T01:48:45.464124",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -381,13 +381,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:16:54.820067",
+            "ts": "2026-09-05T01:48:57.053130",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -401,13 +401,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:03.900732",
+            "ts": "2026-09-05T01:49:08.531972",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -421,13 +421,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:13.113260",
+            "ts": "2026-09-05T01:49:19.560280",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -441,13 +441,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:25.007381",
+            "ts": "2026-09-05T01:49:31.152980",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -461,13 +461,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:33.975434",
+            "ts": "2026-09-05T01:56:05.785811",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -481,13 +481,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:43.166588",
+            "ts": "2026-09-05T01:56:16.910138",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -501,13 +501,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:44.967212",
+            "ts": "2026-09-05T01:56:26.403421",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -521,13 +521,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:17:52.041585",
+            "ts": "2026-09-05T01:56:36.556143",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -541,13 +541,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:01.248578",
+            "ts": "2026-09-05T01:56:46.442955",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -561,13 +561,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:10.338412",
+            "ts": "2026-09-05T01:56:57.299187",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -581,13 +581,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:19.339871",
+            "ts": "2026-09-05T01:57:08.257862",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -601,13 +601,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:28.623573",
+            "ts": "2026-09-05T01:57:18.721281",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -621,13 +621,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:37.901614",
+            "ts": "2026-09-05T01:57:28.540419",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -641,13 +641,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:45.030421",
+            "ts": "2026-09-05T01:57:37.952779",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -661,13 +661,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:47.086636",
+            "ts": "2026-09-05T01:57:47.047307",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -681,13 +681,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:18:56.055455",
+            "ts": "2026-09-05T01:57:56.449221",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -701,13 +701,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:05.172993",
+            "ts": "2026-09-05T01:58:05.720253",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -721,13 +721,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:14.400591",
+            "ts": "2026-09-05T01:58:15.339004",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -741,13 +741,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:23.546748",
+            "ts": "2026-09-05T01:58:25.051030",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -761,13 +761,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:32.494103",
+            "ts": "2026-09-05T01:58:34.533508",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -781,13 +781,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:42.645705",
+            "ts": "2026-09-05T01:58:44.505385",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -801,13 +801,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:45.084408",
+            "ts": "2026-09-05T01:58:53.761406",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -821,13 +821,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:19:51.800742",
+            "ts": "2026-09-05T01:59:03.032394",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -841,13 +841,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:00.925938",
+            "ts": "2026-09-05T01:59:12.452806",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -861,13 +861,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:10.163664",
+            "ts": "2026-09-05T01:59:21.136748",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -881,13 +881,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:19.352379",
+            "ts": "2026-09-05T01:59:30.396145",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -901,13 +901,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:28.884721",
+            "ts": "2026-09-05T01:59:39.619491",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -921,11 +921,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:35.359809",
+            "ts": "2026-09-05T01:59:49.182052",
             "tab": "paper",
             "positions": [],
             "observations": [
-                "No open positions."
+                "No open positions.",
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -939,13 +941,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:20:45.130885",
+            "ts": "2026-09-05T01:59:58.588350",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -959,13 +961,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:21:45.197988",
+            "ts": "2026-09-05T02:00:07.832944",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -979,13 +981,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:22:28.517396",
+            "ts": "2026-09-05T02:00:17.451236",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -999,13 +1001,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:23:28.560087",
+            "ts": "2026-09-05T02:00:27.127584",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1019,13 +1021,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:24:28.594001",
+            "ts": "2026-09-05T02:00:36.684585",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1039,13 +1041,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:25:28.640246",
+            "ts": "2026-09-05T02:00:45.971073",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1059,13 +1061,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:26:28.679610",
+            "ts": "2026-09-05T02:00:55.526508",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1079,13 +1081,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:27:28.731153",
+            "ts": "2026-09-05T02:01:05.160561",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1099,13 +1101,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:28:28.768975",
+            "ts": "2026-09-05T02:01:14.387006",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1119,13 +1121,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:29:28.816826",
+            "ts": "2026-09-05T02:01:24.236459",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1139,13 +1141,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:30:28.875648",
+            "ts": "2026-09-05T02:01:33.646785",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1159,13 +1161,13 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:31:28.924649",
+            "ts": "2026-09-05T02:01:43.777689",
             "tab": "paper",
             "positions": [],
             "observations": [
                 "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+                "4 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
+                "10 open research task(s)."
             ],
             "concerns": [],
             "unanswered": [
@@ -1179,15 +1181,22 @@
             "note": "Reporting only. This loop does not open, close, or resize positions \u2014 exits are handled by the Position Monitor on every tick, not once a minute."
         },
         {
-            "ts": "2026-09-01T17:32:28.967397",
+            "ts": "2026-09-05T02:01:52.435625",
             "tab": "paper",
-            "positions": [],
-            "observations": [
-                "No open positions.",
-                "2 hypothesis/hypotheses awaiting human review (nothing applied automatically).",
-                "5 open research task(s)."
+            "positions": [
+                {
+                    "symbol": "BTC/USDT",
+                    "qty": 0.060000000000000005,
+                    "pnlPct": null,
+                    "priced": false
+                }
             ],
-            "concerns": [],
+            "observations": [
+                "1 open position(s) on the paper book."
+            ],
+            "concerns": [
+                "BTC/USDT: no live price \u2014 this position cannot be valued or monitored."
+            ],
             "unanswered": [
                 "What am I missing? \u2014 requires semantic reflection not currently in the monitor loop.",
                 "Is my prediction still valid? \u2014 requires comparing TradeThesis against live price action.",

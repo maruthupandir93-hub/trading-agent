@@ -251,6 +251,94 @@ def real_balance_error() -> Optional[str]:
     return _real_balance_cache.get("error")
 
 
+async def equity_breakdown(tab: str) -> Dict[str, Any]:
+    """Equity split into its three parts, so a flat number is self-explaining.
+
+    WHY THIS EXISTS. The panel showed one figure — "Account now" — and an operator
+    watching it sit at 10,000 could not tell whether the book was FLAT (correct,
+    nothing open) or the number was STUCK (a bug). Those look identical and have
+    completely different responses. The parts make it obvious: free cash 10,000 /
+    locked 0 / unrealized 0 is plainly an idle account.
+
+    It also shows where the money went the moment a position opens: cash drops by
+    the margin, locked rises by the same, and unrealized starts moving with price.
+    """
+    from backend.services.market_data import get_price
+    from backend.services.portfolio_store import book_equity, get_portfolio
+
+    portfolio = await get_portfolio()
+    book = (portfolio or {}).get(tab) or {}
+
+    cash = book.get("cash")
+    if not isinstance(cash, (int, float)) and tab == "real":
+        cash = await real_account_balance()
+
+    marks: Dict[str, float] = {}
+    for pos in book.get("positions") or []:
+        symbol = pos.get("symbol")
+        if not symbol:
+            continue
+        price = get_price(symbol)
+        if price and price > 0:
+            marks[symbol] = float(price)
+
+    result = book_equity({**book, "cash": cash}, marks)
+    return {
+        "freeCash": result["cash"],
+        "lockedMargin": result["marginLocked"],
+        "unrealized": result["unrealized"],
+        "equity": result["equity"],
+        "openPositions": len([p for p in (book.get("positions") or []) if p.get("qty")]),
+        "unpricedSymbols": result["unpricedSymbols"],
+        "meaning": (
+            "equity = free cash + locked margin + unrealized. Cash alone does not "
+            "move while a position is open — the margin is locked, not spent, and "
+            "the profit or loss is in `unrealized` until the position closes."
+        ),
+    }
+
+
+def session_progress(session: "TradingSession", equity: Optional[float]) -> Dict[str, Any]:
+    """How far a session has come toward its target.
+
+    Computed HERE rather than in the panel so the number the operator reads and
+    the number the stop check uses come from one place. A progress bar that
+    disagreed with the condition that ends the session would be worse than none.
+
+    `fraction` is clamped to 0-1 for rendering, but `gained` and `remaining` are
+    NOT clamped — a session that is down should say so rather than showing 0%.
+    """
+    start = session.start_equity
+    target = session.target_equity
+    span = target - start
+
+    if equity is None or span <= 0:
+        return {
+            "fraction": None,
+            "percent": None,
+            "gained": None,
+            "remaining": None,
+            "reason": (
+                "equity is not measurable right now"
+                if equity is None else
+                "the target is not above the starting amount"
+            ),
+        }
+
+    gained = equity - start
+    return {
+        "fraction": max(0.0, min(1.0, gained / span)),
+        "percent": round(max(0.0, min(1.0, gained / span)) * 100, 1),
+        # Signed and unclamped: down $12 reads as -12.00, not as 0.
+        "gained": gained,
+        "remaining": target - equity,
+        "startEquity": start,
+        "targetEquity": target,
+        "currentEquity": equity,
+        "reason": None,
+    }
+
+
 async def current_equity(tab: str) -> Optional[float]:
     """Cash plus the marked value of open positions, or None if unmarkable.
 
@@ -278,19 +366,32 @@ async def current_equity(tab: str) -> Optional[float]:
         # No cash figure and no exchange to ask. Say so instead of guessing.
         return None
 
-    total = float(cash)
+    # FREE CASH + LOCKED MARGIN + UNREALIZED, via the one implementation.
+    #
+    # This used to be `cash + qty * price`, which is only correct at 1x. The book
+    # deducts MARGIN from cash, so cash is free cash; adding the full notional
+    # back double-counts the leveraged part. At 10x a $7,000 position funded by
+    # $700 reported $6,300 of equity that did not exist — and a session compares
+    # its target against this number, so its progress was overstated by the same
+    # amount, in the direction that flatters the account.
+    #
+    # It also could not value a SHORT: `qty * price` ignores direction, so a
+    # short moving against the operator read as equity going UP.
+    from backend.services.portfolio_store import book_equity
+
+    marks: Dict[str, float] = {}
     for pos in book.get("positions") or []:
         symbol = pos.get("symbol")
-        qty = pos.get("qty")
-        if not isinstance(qty, (int, float)) or not symbol:
+        if not symbol:
             return None
         price = get_price(symbol)
-        if not price or price <= 0:
-            # Unmarkable position. Refuse rather than value it at cost, which
-            # would report a losing position as flat.
-            return None
-        total += float(qty) * float(price)
-    return total
+        if price and price > 0:
+            marks[symbol] = float(price)
+
+    result = book_equity({**book, "cash": cash}, marks)
+    # None when any position could not be marked. Refused rather than valued at
+    # cost, which would report a losing position as flat.
+    return result["equity"]
 
 
 # ---------------------------------------------------------------------------

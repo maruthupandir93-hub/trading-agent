@@ -107,18 +107,37 @@ function fromRow(r: Row): DecisionRecord {
   };
 }
 
+/**
+ * How many decisions a single read may return.
+ *
+ * THIS QUERY HAD NO LIMIT AND THAT IS WHAT MADE THE DECISIONS PAGE LAG. The
+ * table reached 80,525 rows — all of them `rejected`, all inside one day,
+ * because the agent records a decision on every evaluation it declines. The page
+ * fetched every one, serialised them over the wire, and laid out tens of
+ * thousands of rows.
+ *
+ * A cap is the right shape rather than pagination-by-default: nobody scrolls to
+ * the 4,000th rejection, and the panel's purpose is "what has the agent been
+ * deciding lately". `total` is returned alongside so a truncated view says so
+ * instead of quietly looking complete.
+ */
+export const DECISIONS_PAGE_LIMIT = 300;
+
 export async function listDecisions(filter?: {
   symbol?: string;
   tab?: string;
   outcome?: string;
+  limit?: number;
 }): Promise<DecisionRecord[]> {
+  const limit = Math.max(1, Math.min(filter?.limit ?? DECISIONS_PAGE_LIMIT, 2000));
   const found = await rows<Row>(
     `SELECT ${COLUMNS} FROM decisions
       WHERE ($1::text IS NULL OR symbol = $1)
         AND ($2::text IS NULL OR tab = $2)
         AND ($3::text IS NULL OR outcome = $3)
-      ORDER BY ts DESC`,
-    [filter?.symbol ?? null, filter?.tab ?? null, filter?.outcome ?? null],
+      ORDER BY ts DESC
+      LIMIT $4`,
+    [filter?.symbol ?? null, filter?.tab ?? null, filter?.outcome ?? null, limit],
   );
   if (found) return found.map(fromRow);
 
@@ -130,7 +149,25 @@ export async function listDecisions(filter?: {
         (!filter?.tab || d.tab === filter.tab) &&
         (!filter?.outcome || d.outcome === filter.outcome),
     )
-    .sort((a, b) => b.ts - a.ts);
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, limit);
+}
+
+/** Total matching rows, so a capped list can report what it left out. */
+export async function countDecisions(filter?: {
+  symbol?: string;
+  tab?: string;
+  outcome?: string;
+}): Promise<number | null> {
+  const found = await rows<{ n: string | number }>(
+    `SELECT count(*) AS n FROM decisions
+      WHERE ($1::text IS NULL OR symbol = $1)
+        AND ($2::text IS NULL OR tab = $2)
+        AND ($3::text IS NULL OR outcome = $3)`,
+    [filter?.symbol ?? null, filter?.tab ?? null, filter?.outcome ?? null],
+  );
+  if (found === null) return null;
+  return toNumber(found[0]?.n) ?? 0;
 }
 
 export async function getDecision(id: string): Promise<DecisionRecord | null> {

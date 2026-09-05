@@ -75,8 +75,19 @@ async def session_status() -> Dict[str, Any]:
     # editable without having to infer that from the tab.
     real_balance = await sessions.real_account_balance() if tab == "real" else None
 
+    # The three parts of equity. A single "Account now" figure sitting at 10,000
+    # looks identical whether the book is FLAT or the number is STUCK, and those
+    # have opposite responses.
+    breakdown = await sessions.equity_breakdown(tab)
+
     return {
         "active": active.as_dict() if active else None,
+        "equityBreakdown": breakdown,
+        # Progress toward the stop condition, computed in the service so the
+        # number the operator reads and the one that ends the session cannot
+        # disagree. None when there is no session — not 0, which would read as
+        # "started and got nowhere".
+        "progress": sessions.session_progress(active, equity) if active else None,
         "recent": [s.as_dict() for s in sessions.list_sessions(limit=10)],
         "tab": tab,
         "liveTrading": settings.LIVE_TRADING,

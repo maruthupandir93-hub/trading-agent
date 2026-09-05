@@ -68,17 +68,49 @@ logger = logging.getLogger(__name__)
 
 # Score weights. They sum to 1.0 so a score is directly readable as 0-1, which is
 # what the spec's example (0.91, 0.84, 0.32) implies.
-WEIGHT_SIGNAL = 0.5        # does this strategy actually see a setup right now
-WEIGHT_TREND_ALIGN = 0.3   # does its direction agree with the higher timeframe
-WEIGHT_VOL_FIT = 0.2       # is current volatility suited to it
+WEIGHT_SIGNAL = 0.4        # does this strategy actually see a setup right now
+WEIGHT_TREND_ALIGN = 0.25  # does its direction agree with the higher timeframe
+WEIGHT_VOL_FIT = 0.15      # is current volatility suited to it
+# TRACK RECORD — the loop that was open.
+#
+# Every profile carried `historical_success_rate=None` and this component did not
+# exist, so the agent picked strategies purely on how well they FIT current
+# conditions and nothing it learned from an outcome ever reached that choice. It
+# had reflection, hypotheses and a memory system, and none of them closed the one
+# loop that decides what gets traded.
+#
+# 0.2 deliberately: enough to separate a strategy that works on this account from
+# one that does not, not enough for a single bad run to bury a strategy that is
+# merely out of favour. Conditions still carry 0.8 of the score.
+WEIGHT_TRACK_RECORD = 0.2
 
 # Reported on every run. Section 11.3 lists historical success rate as a required
 # field and every profile has it as None, so it CANNOT contribute to a score.
 HISTORICAL_UNAVAILABLE = (
-    "strategy scoring excludes historical success rate: no profile has been "
-    "validated on this system's own data (all 9 carry historical_success_rate=None), "
-    "so scores reflect current-conditions fit only"
+    "strategy scoring excludes historical success rate: no strategy has closed "
+    "enough trades on this system's own data yet, so scores reflect "
+    "current-conditions fit only"
 )
+
+
+def _track_record_score(win_rate: Optional[float]) -> Tuple[float, str]:
+    """Map a realised win rate to a 0-1 score.
+
+    NEUTRAL (0.5) WHEN THERE IS NO USABLE RECORD, not zero. Scoring an unmeasured
+    strategy as a failure would permanently freeze out every strategy that has
+    not traded yet — including the one that would have worked. A new strategy has
+    to be allowed to compete on conditions alone.
+
+    Anchored on 0.5 as break-even for a 2:1 payoff system rather than on 50% being
+    "good": at 2:1, a third of trades winning is roughly break-even, so 33% maps
+    near the middle and the scale rewards genuine improvement on that.
+    """
+    if win_rate is None:
+        return 0.5, "track record: not enough closed trades (neutral)"
+    # 0.20 -> 0.0, 0.55 -> 1.0, clamped. Linear between.
+    score = (win_rate - 0.20) / 0.35
+    score = max(0.0, min(1.0, score))
+    return score, f"track record: {win_rate:.0%} realised win rate"
 
 # A strategy scoring below this is not worth proposing. Not a tuned number — it is
 # the point below which the score is mostly the absence of contradiction rather
@@ -142,7 +174,7 @@ def enumerate_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
 # 2. Strategy Scoring
 # ===========================================================================
 
-def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
+async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
     """Score each eligible candidate and select the best.
 
     Deterministic. The spec's example shows numeric scores (0.91, 0.84, 0.32),
@@ -169,6 +201,23 @@ def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
     mtf_trend = technical.multi_timeframe_trend if technical else None
     volatility = regime_state.volatility if regime_state else None
 
+    # REALISED PERFORMANCE, read once for the whole scoring pass.
+    #
+    # Cached for five minutes inside the service, so this is not a query per
+    # candidate. `None` for a strategy means "not enough closed trades to judge"
+    # — never "it lost" — and `_track_record_score` treats it as neutral so a
+    # strategy that has never traded can still compete on conditions.
+    from backend.services import strategy_performance
+
+    perf = await strategy_performance.performance()
+    any_usable = bool(perf) and any(s["usable"] for s in perf.values())
+
+    def _rate(name: str) -> Optional[float]:
+        if not perf:
+            return None
+        entry = perf.get(name)
+        return float(entry["winRate"]) if entry and entry["usable"] else None
+
     scored: List[StrategyCandidate] = []
     for candidate in candidates:
         if not candidate.eligible:
@@ -176,7 +225,9 @@ def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
             scored.append(candidate)
             continue
 
-        score, detail = _score_one(candidate.name, bars, mtf_trend, volatility)
+        score, detail = _score_one(
+            candidate.name, bars, mtf_trend, volatility, _rate(candidate.name)
+        )
         scored.append(
             StrategyCandidate(
                 name=candidate.name,
@@ -195,8 +246,11 @@ def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
 
     out: Dict[str, Any] = {
         "candidate_strategies": scored,
-        # Always reported — see HISTORICAL_UNAVAILABLE.
-        "unavailable": [HISTORICAL_UNAVAILABLE],
+        # Reported only while nothing has a usable record. It used to be
+        # unconditional, which was correct when every profile carried
+        # `historical_success_rate=None` — and would now be a false statement
+        # about a system that HAS started learning from its own results.
+        "unavailable": [] if any_usable else [HISTORICAL_UNAVAILABLE],
     }
 
     if not ranked:
@@ -230,11 +284,18 @@ def _score_one(
     bars: List[Dict[str, Any]],
     mtf_trend: Optional[str],
     volatility: Optional[str],
+    win_rate: Optional[float] = None,
 ) -> Tuple[Optional[float], str]:
-    """Score one strategy from current conditions. Returns (score, explanation).
+    """Score one strategy. Returns (score, explanation).
 
-    Three components, all measurable. Track record is excluded — see
-    HISTORICAL_UNAVAILABLE.
+    FOUR components now. `win_rate` is this strategy's REALISED rate from closed
+    trades, supplied by `services/strategy_performance` and already gated on its
+    sample floor — None here means "not enough evidence", never "it lost".
+
+    Deterministic throughout: no model is consulted, and the same inputs always
+    produce the same score. That is what keeps this on the right side of
+    invariant 5 — the system counts its own results, it does not let a model
+    rewrite its own rules.
     """
     fn = STRATEGY_FUNCTIONS.get(name)
     if fn is None:
@@ -282,10 +343,14 @@ def _score_one(
     vol_score, vol_detail = _volatility_fit(name, volatility)
     parts.append(vol_detail)
 
+    record_score, record_detail = _track_record_score(win_rate)
+    parts.append(record_detail)
+
     score = (
         signal_score * WEIGHT_SIGNAL
         + align_score * WEIGHT_TREND_ALIGN
         + vol_score * WEIGHT_VOL_FIT
+        + record_score * WEIGHT_TRACK_RECORD
     )
     return round(score, 3), "; ".join(parts)
 

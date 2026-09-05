@@ -16,6 +16,7 @@ to the inverse case — the bot is very much awake and they want it to stop.
 """
 
 import logging
+import os
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -293,6 +294,168 @@ async def reset_paper(req: ResetPaperRequest) -> Dict[str, Any]:
             "Deleting these rows in SQL while the backend is running does NOT work: "
             "the in-memory book and watch list are re-persisted over the top on the "
             "next write. This route clears memory first, which is why it sticks."
+        ),
+    }
+
+
+@router.get("/venue")
+async def venue_status() -> Dict[str, Any]:
+    """Which exchange the agent trades on, and what switching would cost.
+
+    Reports credentials PER VENUE and whether a switch is currently safe, so the
+    operator sees the blocker before pressing anything rather than after.
+    """
+    from backend.services.venue import SUPPORTED, Venue, configured_venue, get_venue
+
+    current = configured_venue()
+    live = get_venue()
+
+    # Credentials are read per venue WITHOUT building a full client for each —
+    # constructing one opens a ccxt session, and this endpoint is polled.
+    from backend.services.venue import _credentials, key_variable
+
+    # The NETWORK decides which key pair each venue reads, so the panel must
+    # report the variable that is actually in force. Naming the mainnet one while
+    # the process signs testnet requests sends the operator to set a key that
+    # will never be read.
+    testnet = live.testnet
+
+    venues = []
+    for name in SUPPORTED:
+        key, secret = _credentials(name, testnet=testnet)
+        venues.append({
+            "id": name,
+            "current": name == current,
+            "credentialsConfigured": bool(key and secret),
+            "keyVariable": key_variable(name, testnet=testnet),
+        })
+
+    # THE BLOCKER. Switching venue while a position is open orphans it: the
+    # monitor would go on enforcing a stop against an account we are no longer
+    # talking to, and reconciliation would compare the local book to the WRONG
+    # exchange and report every real position as a phantom.
+    from backend.agents.position_monitor import get_position_monitor
+
+    open_positions = get_position_monitor().snapshot_open()
+    real_open = [p for p in open_positions if p.get("tab") == "real"]
+
+    return {
+        "current": current,
+        "venues": venues,
+        "liveTrading": settings.LIVE_TRADING,
+        "openPositions": len(open_positions),
+        "realOpenPositions": len(real_open),
+        "canSwitch": not real_open,
+        "blockedReason": (
+            f"{len(real_open)} REAL position(s) are open on {current}. Switching venue "
+            f"would leave them at that exchange with this process watching a different "
+            f"account — the stop would stop being enforced and reconciliation would "
+            f"report them as phantoms. Close them first."
+        ) if real_open else None,
+        "meaning": (
+            "These are DIFFERENT ACCOUNTS holding DIFFERENT MONEY. Switching changes "
+            "which exchange every order, balance read and position query goes to. It "
+            "does not move funds, and it does not close anything."
+        ),
+    }
+
+
+class SwitchVenueRequest(BaseModel):
+    venue: str = Field(..., min_length=2)
+    # Required, and checked against the venue name. Switching accounts from a
+    # stray POST is not something a confirmation flag should be able to miss.
+    confirm: str = Field(..., description="must equal the venue being switched to")
+
+
+@router.post("/venue", dependencies=[Depends(require_write_auth)])
+async def switch_venue(req: SwitchVenueRequest) -> Dict[str, Any]:
+    """Switch the exchange the agent trades on. Persists to `.env`.
+
+    REFUSES WHILE A REAL POSITION IS OPEN, and that refusal is the point of the
+    route. Binance and Bybit are different accounts holding different money — a
+    position opened on one does not exist on the other. Switching underneath an
+    open position would leave it at the old venue while:
+
+      * `PositionMonitorAgent` keeps enforcing its stop by placing orders on the
+        NEW venue, where the position does not exist;
+      * the resting stop this process left behind stays live and uncancellable
+        through the new client;
+      * reconciliation compares the local book against the wrong exchange and
+        reports every real position as a phantom.
+
+    Paper positions do not block it: they have no venue counterpart at all.
+
+    THE CLIENT IS REBUILT, not reconfigured. `reset_venue()` drops the singleton
+    so the next call re-reads the environment — the old instance holds the other
+    venue's markets, credentials and cached position mode, and reusing it would
+    place orders with one venue's parameters against the other's API.
+    """
+    from backend.services.venue import SUPPORTED, configured_venue, get_venue, reset_venue
+
+    target = req.venue.strip().lower()
+    if target not in SUPPORTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.venue!r} is not supported. Choose one of: {', '.join(SUPPORTED)}.",
+        )
+    if req.confirm.strip().lower() != target:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirm must equal {target!r}. This switches which exchange account trades.",
+        )
+
+    current = configured_venue()
+    if target == current:
+        return {"status": "unchanged", "current": current, "note": f"already trading on {current}"}
+
+    from backend.agents.position_monitor import get_position_monitor
+
+    real_open = [p for p in get_position_monitor().snapshot_open() if p.get("tab") == "real"]
+    if real_open:
+        held = ", ".join(str(p.get("symbol")) for p in real_open[:5])
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"cannot switch venue: {len(real_open)} REAL position(s) open on {current} "
+                f"({held}). They exist at that exchange and not at {target}; switching would "
+                f"leave them unwatched while this process places orders on a different "
+                f"account. Close them first."
+            ),
+        )
+
+    settings._persist_env("EXCHANGE_ID", target)
+    os.environ["EXCHANGE_ID"] = target
+    reset_venue()
+
+    from backend.services.venue import _credentials, key_variable
+
+    testnet = get_venue().testnet
+    key, secret = _credentials(target, testnet=testnet)
+    configured = bool(key and secret)
+    variable = key_variable(target, testnet=testnet)
+
+    logger.warning(
+        "OPERATOR SWITCHED VENUE: %s -> %s. LIVE_TRADING=%s, credentials %s.",
+        current, target, settings.LIVE_TRADING,
+        "configured" if configured else "MISSING",
+    )
+
+    return {
+        "status": "success",
+        "previous": current,
+        "current": target,
+        "credentialsConfigured": configured,
+        # Said plainly rather than left to fail at the first order.
+        "warning": None if configured else (
+            f"{target} has no API credentials configured "
+            f"({variable} / its _SECRET are empty). "
+            f"Market data still works — it needs no key — but every order, balance read "
+            f"and position query will be refused until they are set."
+        ),
+        "meaning": (
+            "Every order, balance read and position query now goes to "
+            f"{target}. No funds moved and nothing was closed — this changed which "
+            "account the agent talks to, not what it holds."
         ),
     }
 

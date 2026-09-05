@@ -78,6 +78,26 @@ type Status = {
   /** False on the real book, where the amount comes from the venue. */
   startAmountEditable: boolean;
   startAmountMeaning: string;
+  /** The three parts of equity. One flat number cannot distinguish an idle book
+   *  from a stuck one; these can. */
+  equityBreakdown?: {
+    freeCash: number | null;
+    lockedMargin: number;
+    unrealized: number;
+    equity: number | null;
+    openPositions: number;
+    unpricedSymbols: string[];
+    meaning: string;
+  };
+  /** Progress toward the stop condition, computed server-side so it cannot
+   *  disagree with the check that actually ends the session. */
+  progress?: {
+    fraction: number | null;
+    percent: number | null;
+    gained: number | null;
+    remaining: number | null;
+    reason: string | null;
+  } | null;
   decisionIntervalSeconds: number;
   maxSessionHours: number;
   maxTrades: number;
@@ -229,15 +249,15 @@ export function AutonomousSessionPanel() {
     }
   }, [load]);
 
-  // Progress from start toward target. Clamped, and NOT shown as a promise —
-  // the label says "toward the stop condition", because a progress bar implies
-  // the agent is on a schedule and it is not.
-  const progress = useMemo(() => {
-    if (!active || equity === null) return null;
-    const span = active.target_equity - active.start_equity;
-    if (span <= 0) return null;
-    return Math.max(0, Math.min(1, (equity - active.start_equity) / span));
-  }, [active, equity]);
+  // COMPUTED SERVER-SIDE, not here. The bar an operator reads and the check that
+  // ends the session must come from one place — a progress display that
+  // disagreed with the stop condition would be worse than none at all.
+  //
+  // Still NOT shown as a promise: the label says "toward the stop condition",
+  // because a progress bar implies the agent is on a schedule and it is not.
+  const progress = status?.progress ?? null;
+  const fraction = progress?.fraction ?? null;
+  const breakdown = status?.equityBreakdown ?? null;
 
   return (
     <Card>
@@ -288,6 +308,12 @@ export function AutonomousSessionPanel() {
               <span style={{ color: 'var(--text-muted)' }}>
                 floor ${active.floor_equity.toFixed(2)}
               </span>
+              {/* The number, not just a bar. A bar alone cannot say how far. */}
+              <span className="mono text-[12px]" style={{ color: 'var(--text-primary)' }}>
+                {progress?.percent === null || progress?.percent === undefined
+                  ? '—'
+                  : `${progress.percent.toFixed(1)}%`}
+              </span>
               <span style={{ color: 'var(--text-muted)' }}>
                 target ${active.target_equity.toFixed(2)}
               </span>
@@ -296,17 +322,65 @@ export function AutonomousSessionPanel() {
               <div
                 className="h-full"
                 style={{
-                  width: `${(progress ?? 0) * 100}%`,
+                  width: `${(fraction ?? 0) * 100}%`,
                   background: 'var(--positive)',
                   transition: 'width 400ms ease',
                 }}
               />
             </div>
-            <div className="text-[10px] mt-1" style={{ color: 'var(--text-muted)' }}>
-              Progress toward the stop condition. The agent does not size up when behind —
-              the target never reaches the Risk Gateway.
+
+            <div className="flex items-baseline justify-between text-[10.5px] mt-1.5">
+              <span style={{ color: 'var(--text-muted)' }}>
+                gained{' '}
+                {/* SIGNED AND UNCLAMPED. The bar floors at 0% so it cannot render
+                    backwards, but a session that is DOWN must say so — showing 0%
+                    with no other signal would read as "no progress yet". */}
+                <span
+                  className="mono"
+                  style={{
+                    color:
+                      progress?.gained == null
+                        ? 'var(--text-muted)'
+                        : progress.gained >= 0
+                          ? 'var(--positive)'
+                          : 'var(--negative)',
+                  }}
+                >
+                  {progress?.gained == null
+                    ? '—'
+                    : `${progress.gained >= 0 ? '+' : ''}${progress.gained.toFixed(2)}`}
+                </span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                still needed{' '}
+                <span className="mono">
+                  {progress?.remaining == null ? '—' : `$${progress.remaining.toFixed(2)}`}
+                </span>
+              </span>
+            </div>
+
+            <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              {progress?.reason
+                ? progress.reason
+                : 'Progress toward the stop condition. The agent does not size up when behind — the target never reaches the Risk Gateway.'}
             </div>
           </div>
+
+          {/* WHERE THE MONEY IS. One "Account now" figure sitting at its starting
+              value looks identical whether the book is FLAT or the number is
+              STUCK, and those have opposite responses. Cash also does NOT move
+              while a position is open — the margin is locked, not spent — which
+              reads as a frozen balance unless the parts are shown. */}
+          {breakdown ? (
+            <div className="grid grid-cols-3 gap-2 mb-3 p-2 rounded" style={{ background: 'var(--bg-surface-2)' }}>
+              <Stat label="Free cash" value={<Num value={breakdown.freeCash} digits={2} prefix="$" />} />
+              <Stat label="Locked margin" value={<Num value={breakdown.lockedMargin} digits={2} prefix="$" />} />
+              <Stat
+                label="Unrealised"
+                value={<Num value={breakdown.unrealized} digits={2} prefix="$" colored signed />}
+              />
+            </div>
+          ) : null}
 
           <div className="mb-3 p-2 rounded" style={{ background: 'var(--bg-surface-2)' }}>
             <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>

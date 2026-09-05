@@ -155,6 +155,21 @@ class MarketSnapshot:
     # (`services/microstructure_feed`), so this is cheap per run.
     headlines: List[Dict[str, Any]] = field(default_factory=list)
 
+    # -- The benchmark (BTC), the market's beta -----------------------------
+    #
+    # Alts follow Bitcoin. `triggers.py` already treats BTC's regime as
+    # market-wide rather than symbol-specific — but that only ever produced BTC
+    # triggers; it never became CONTEXT for a decision on another coin.
+    #
+    # Fetched here, on the write-once snapshot, for the same Section 39.4 reason
+    # as the book and the tape: a node that fetched it would reason over a
+    # different BTC on a replayed checkpoint than on the original run.
+    #
+    # Empty when the symbol IS the benchmark (comparing BTC to itself measures
+    # nothing) or when the fetch failed — `feed_problems['benchmark']` says which.
+    benchmark_symbol: Optional[str] = None
+    benchmark_candles: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+
     # Why any of the above is missing, phrased for a specialist to quote. Kept
     # separate from the run-level `unavailable` list because a specialist needs
     # the reason for ITS OWN feed, not the union of every problem in the run.
@@ -599,6 +614,14 @@ class ExecutionPlan:
     # Derived from decision identity, never from thread_id — see Section 39.3
     # and the note in runtime.py.
     idempotency_basis: Optional[str] = None
+    # A COMPACT SNAPSHOT OF WHAT THE AGENT SAW, in the format
+    # `learningDashboard.classifyEntryContext` already parses. Carried on the
+    # plan because this is the last node that has `technical_analysis` and
+    # `market_regime` in hand — by the time the fill is written, the graph state
+    # is gone and the trade row could only ever record WHAT happened, never WHY.
+    # That is why "How this trade happened" showed market data and execution with
+    # an unknown middle.
+    entry_context: Optional[str] = None
 
 
 @dataclass

@@ -68,6 +68,9 @@ _FIELDS = (
     "peak_price",
     "opened_at",
     "stop_order_id",
+    "strategy",
+    "run_id",
+    "entry_context",
 )
 
 
@@ -147,9 +150,10 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
                         INSERT INTO monitored_positions (
                           tar_id, status, symbol, tab, side, qty,
                           entry_price, stop_loss, take_profit, peak_price,
-                          opened_at, stop_order_id, updated_at
+                          opened_at, stop_order_id, strategy, run_id,
+                          entry_context, updated_at
                         )
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                         ON CONFLICT (tar_id) DO UPDATE SET
                           status      = EXCLUDED.status,
                           symbol      = EXCLUDED.symbol,
@@ -162,6 +166,9 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
                           peak_price  = EXCLUDED.peak_price,
                           opened_at   = EXCLUDED.opened_at,
                           stop_order_id = EXCLUDED.stop_order_id,
+                          strategy    = EXCLUDED.strategy,
+                          run_id      = EXCLUDED.run_id,
+                          entry_context = EXCLUDED.entry_context,
                           updated_at  = EXCLUDED.updated_at
                         """,
                         *[row.get(f) for f in _FIELDS],
@@ -203,7 +210,8 @@ async def load_watch_list() -> List[Dict[str, Any]]:
             records = await conn.fetch(
                 """
                 SELECT tar_id, status, symbol, tab, side, qty, entry_price,
-                       stop_loss, take_profit, peak_price, opened_at, stop_order_id
+                       stop_loss, take_profit, peak_price, opened_at, stop_order_id,
+                       strategy, run_id, entry_context
                 FROM monitored_positions
                 """
             )
@@ -236,6 +244,11 @@ async def load_watch_list() -> List[Dict[str, Any]]:
                 # the whole watch list, which is a far worse outcome than a null
                 # stop order id on one restored position.
                 "stop_order_id": (r["stop_order_id"] if "stop_order_id" in r.keys() else None),
+                # Same tolerant read, same reason: a database that has not yet
+                # applied the ALTERs must lose attribution, never the watch list.
+                "strategy": (r["strategy"] if "strategy" in r.keys() else None),
+                "run_id": (r["run_id"] if "run_id" in r.keys() else None),
+                "entry_context": (r["entry_context"] if "entry_context" in r.keys() else None),
             }
         )
     return out

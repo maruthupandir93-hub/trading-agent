@@ -1,4 +1,10 @@
-import { listDecisions, getDecision, addDecision } from '@/lib/decisionStore.server';
+import {
+  DECISIONS_PAGE_LIMIT,
+  countDecisions,
+  listDecisions,
+  getDecision,
+  addDecision,
+} from '@/lib/decisionStore.server';
 import type { NewDecisionRecord } from '@/lib/decisionStore.server';
 
 // Complete Audit Trail (Production Readiness Review #9) — every
@@ -17,8 +23,30 @@ export async function GET(req: Request) {
   const symbol = searchParams.get('symbol') ?? undefined;
   const tab = searchParams.get('tab') ?? undefined;
   const outcome = searchParams.get('outcome') ?? undefined;
-  const all = await listDecisions({ symbol, tab, outcome });
-  return Response.json({ decisions: all });
+  // CAPPED. This route used to return every row, and the table had reached
+  // 80,525 — all rejections from a single day, because the agent records a
+  // decision on every evaluation it declines. The page fetched all of them and
+  // then laid them out, which is what made it lag.
+  //
+  // `total` and `truncated` travel with the response so a capped view SAYS it is
+  // capped. A silently shortened list is how a reader concludes the agent has
+  // been idle.
+  const requested = Number.parseInt(searchParams.get('limit') ?? '', 10);
+  const limit = Number.isFinite(requested) && requested > 0 ? requested : DECISIONS_PAGE_LIMIT;
+
+  const [all, total] = await Promise.all([
+    listDecisions({ symbol, tab, outcome, limit }),
+    countDecisions({ symbol, tab, outcome }),
+  ]);
+
+  return Response.json({
+    decisions: all,
+    limit,
+    // null when there is no database to count in — not 0, which would claim the
+    // table is empty.
+    total,
+    truncated: total !== null && total > all.length,
+  });
 }
 
 export async function POST(req: Request) {

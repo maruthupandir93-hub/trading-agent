@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from backend.core.risk_manager import (
@@ -98,6 +99,88 @@ DEFAULT_RISK_FRACTION = 0.02
 # Still passed through `max_leverage_ceiling` so the value can never exceed the
 # hard limit even if this constant is edited carelessly.
 GRAPH_REQUESTED_LEVERAGE = 1
+
+
+from backend.algorithms.market_context import assess as assess_alignment
+from backend.algorithms.market_context import build as build_market_context
+from backend.services.tradeable_universe import refusal_reason as untradeable_reason
+
+# Refuse an entry that fights the 1h/4h consensus. Configurable because it is a
+# hypothesis about selectivity rather than a safety invariant — an operator
+# testing whether it helps must be able to turn it off without editing code.
+REQUIRE_HTF_ALIGNMENT: bool = (
+    os.getenv("REQUIRE_HTF_ALIGNMENT", "true").strip().lower() == "true"
+)
+
+
+def build_entry_context(
+    *,
+    symbol: str,
+    technical: Any,
+    regime_state: Any,
+    volatility: Any,
+    strategy: Optional[str],
+    market_context: Any = None,
+) -> str:
+    """A compact snapshot of what the agent saw, for the trade row.
+
+    WHY THIS EXISTS. "How this trade happened" could only ever show market data
+    and execution with an unknown middle — and that was not a display bug.
+    `trades.entry_context` existed and nothing wrote it, and a join could not have
+    recovered the values either: the run trace records which node ran and what
+    state KEYS it wrote, not what was in them. The graph state holding the
+    indicators is gone by the time a fill is booked.
+
+    The gateway is where this belongs because it is the last node holding
+    `technical_analysis`, `market_regime` and `volatility` together.
+
+    PURE, so it can be tested without driving the whole node — the gateway has
+    real dependencies (the live book, the ledger) that make end-to-end synthetic
+    approval brittle, and the thing worth pinning here is the FORMAT.
+
+    A MISSING INPUT IS OMITTED, NEVER DEFAULTED. An invented RSI would be the most
+    persuasive fabrication available in this system, because it would look exactly
+    like evidence. The frontend renders "not recorded" for what is absent.
+
+    The format is the one `learningDashboard.classifyEntryContext` and
+    `lib/viz/entryContext.parseEntryContext` already read — one shape of snapshot
+    in the system, not two.
+    """
+    bits: List[str] = [f"{symbol} @ 15m:"]
+
+    if technical is not None:
+        if getattr(technical, "rsi", None) is not None:
+            bits.append(f"RSI(14)={technical.rsi:.1f},")
+        if getattr(technical, "atr", None) is not None:
+            bits.append(f"ATR(14)={technical.atr:.4g},")
+        if getattr(technical, "multi_timeframe_trend", None):
+            bits.append(f"structure trend={technical.multi_timeframe_trend},")
+
+    if regime_state is not None and getattr(regime_state, "regime", None):
+        bits.append(f"regime={regime_state.regime},")
+
+    if volatility is not None and getattr(volatility, "regime", None):
+        percentile = getattr(volatility, "percentile", None)
+        bits.append(
+            f"volatility={volatility.regime}"
+            + (f" ({percentile:.0f}th pct)" if percentile is not None else "")
+            + ","
+        )
+
+    # APPENDED LAST, and only when it measured something. The existing fields
+    # are what the two frontend parsers already read by regex; adding this at the
+    # end leaves every one of those patterns matching exactly as before, which is
+    # what `test_entry_context` asserts. A snapshot the frontend cannot parse is
+    # the same as no snapshot at all.
+    if market_context is not None:
+        described = market_context.describe()
+        if described:
+            bits.append(f"context: {described},")
+
+    if strategy:
+        bits.append(f"strategy={strategy}")
+
+    return " ".join(bits).rstrip(",")
 
 
 def gate(state: TradingState) -> Optional[Dict[str, Any]]:
@@ -140,6 +223,85 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     # ---- EXIT: invariant 4, no gate ---------------------------------------
     if decision.action == "EXIT":
         return _exit_plan(state, decision, portfolio, symbol, tab)
+
+    # ---- TRADEABLE-INSTRUMENT GATE ---------------------------------------
+    #
+    # Placed AFTER the EXIT branch and FIRST among the entry checks, and both
+    # positions are deliberate.
+    #
+    # After EXIT, because invariant 4 is absolute: a close is never blocked. A
+    # position already open in a symbol the operator has since excluded must
+    # still be closable — refusing the exit would leave them holding exactly the
+    # instrument they asked to stop holding.
+    #
+    # First among entry checks, for the reason the volatility gate gives: a
+    # refusal that is a property of the INSTRUMENT rather than of the proposed
+    # trade must not be reachable by making the trade smaller or moving its stop.
+    # No size is acceptable, so nothing should be sized.
+    refusal = untradeable_reason(symbol)
+    if refusal is not None:
+        return {
+            "risk_assessment": RiskAssessment(
+                approved=False,
+                rejection_reasons=[refusal],
+                checks={
+                    "TradeableInstrument": {
+                        "status": "reject",
+                        "detail": (
+                            f"{symbol} may be watched and reasoned about but not opened. "
+                            f"This is an instrument preference, not a risk limit."
+                        ),
+                    }
+                },
+            )
+        }
+
+    # ---- HIGHER-TIMEFRAME ALIGNMENT --------------------------------------
+    #
+    # 1h and 4h candles have been fetched on every run since the beginning, and
+    # `TIMEFRAMES`' own comment says they exist to "cut conviction on a
+    # counter-trend read". Nothing ever cut anything: the consensus was computed,
+    # written to `TechnicalAnalysis.multi_timeframe_trend`, RECORDED in the entry
+    # context, and never gated on.
+    #
+    # WHAT THE LEDGER SHOWS. 12 closed trades, 3 wins, -57.01 net. The 9 losses
+    # average -26.04 and are tightly clustered — stop-outs at a consistent risk,
+    # not disasters. All 3 wins landed in one 30-minute window. That is a
+    # trend-follower being run in conditions that are not trending, and the lever
+    # is selectivity.
+    #
+    # UNKNOWN AND MIXED DO NOT BLOCK. See `market_context.assess` for why this
+    # differs from the volatility gate directly below: an unmeasured
+    # higher-timeframe trend costs conviction, whereas an unmeasured volatility
+    # means the loss cannot be bounded at all.
+    #
+    # THIS IS A HYPOTHESIS AND IS LABELLED ONE. It will reduce the number of
+    # trades. Whether it raises EXPECTANCY rather than merely win rate depends on
+    # how many removed trades would have won, and 12 trades cannot answer that.
+    # `strategy_performance` is what will, now that a close records its strategy.
+    if REQUIRE_HTF_ALIGNMENT and snapshot is not None and thesis is not None:
+        context = build_market_context(
+            candles=snapshot.candles,
+            benchmark_symbol=snapshot.benchmark_symbol,
+            benchmark_candles=snapshot.benchmark_candles,
+        )
+        alignment = assess_alignment(decision.direction, context)
+        if alignment.blocks:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[alignment.detail],
+                    checks={
+                        "HigherTimeframeAlignment": {
+                            "status": "reject",
+                            "detail": (
+                                f"{alignment.detail} Context: "
+                                f"{market_context.describe() or 'none measured'}."
+                            ),
+                        }
+                    },
+                )
+            }
 
     # ---- VOLATILITY GATE, before anything is sized ------------------------
     #
@@ -360,6 +522,13 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         return out
 
     out["execution_plan"] = ExecutionPlan(
+        entry_context=build_entry_context(
+            symbol=symbol,
+            technical=state.get("technical_analysis"),
+            regime_state=state.get("market_regime"),
+            volatility=state.get("volatility"),
+            strategy=thesis.strategy,
+        ),
         symbol=symbol,
         side=side,
         size=size,

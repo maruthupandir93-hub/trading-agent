@@ -144,8 +144,22 @@ STOP_ATR_MULTIPLE = {
     "EXTREME": 2.0,
 }
 
-# Trading is refused outright in this regime.
-BLOCKED_REGIMES = frozenset({"EXTREME"})
+# Trading is refused outright in these regimes.
+#
+# EXTREME: a stop placed here is as likely to be gapped through as touched, so
+# sizing cannot bound the loss it exists to bound.
+#
+# VERY_LOW ADDED FROM EVIDENCE. The operator's losses clustered in quiet,
+# directionless sessions — five of six stopped out by moves of 0.45-0.79% while
+# the three wins all landed inside one 30-minute trending window. A market in the
+# bottom fifth of its own recent range has no momentum to carry a position to a
+# 5-ATR target, so the trade is a coin flip paying the spread and the fees.
+#
+# THE COST IS FEWER TRADES, and that is the intended effect rather than a side
+# effect: standing aside in chop is the cheapest available improvement to a
+# trend-following system's expectancy. It is also reversible — this frozenset is
+# the whole mechanism.
+BLOCKED_REGIMES = frozenset({"EXTREME", "VERY_LOW"})
 
 # A shock is an ATR expansion of at least this ratio against the recent baseline.
 # 2.0 — the market is moving twice its recent normal. Below that is ordinary

@@ -26,6 +26,7 @@ from backend.graphs.nodes.opportunity import (
     WEIGHT_SIGNAL,
     WEIGHT_TREND_ALIGN,
     WEIGHT_VOL_FIT,
+    WEIGHT_TRACK_RECORD,
     _gather_evidence,
     _narrative_prompt,
     _score_one,
@@ -259,25 +260,40 @@ def test_no_regime_gates_nothing_and_says_so():
 # ===========================================================================
 
 def test_the_score_weights_sum_to_one():
-    """So a score reads directly as 0-1, matching the spec's 0.91 / 0.84 / 0.32."""
-    assert WEIGHT_SIGNAL + WEIGHT_TREND_ALIGN + WEIGHT_VOL_FIT == pytest.approx(1.0)
+    """So a score reads directly as 0-1, matching the spec's 0.91 / 0.84 / 0.32.
+
+    A FOURTH WEIGHT was added when strategy scoring started using the realised
+    win rate (`WEIGHT_TRACK_RECORD`); the other three were reduced to make room
+    rather than the total being allowed to drift above 1.
+    """
+    assert (
+        WEIGHT_SIGNAL + WEIGHT_TREND_ALIGN + WEIGHT_VOL_FIT + WEIGHT_TRACK_RECORD
+    ) == pytest.approx(1.0)
 
 
-def test_scoring_always_reports_that_track_record_was_excluded():
-    """All 9 profiles carry historical_success_rate=None. A score that silently
-    included an invented win rate would be the most persuasive fabrication in the
-    system, because it would look like evidence."""
+@pytest.mark.asyncio
+async def test_scoring_reports_track_record_excluded_until_something_has_a_record():
+    """A score that silently included an invented win rate would be the most
+    persuasive fabrication in the system, because it would look like evidence.
+
+    This used to be unconditional, and correctly so while every profile carried
+    `historical_success_rate=None`. Now that scoring CAN use realised results, the
+    note is conditional — leaving it unconditional would be a false statement
+    about a system that has started learning. With no database in a unit test
+    there is no usable record, so the note must still appear here.
+    """
     state = _full_state()
     state.update(enumerate_candidates(state))
-    out = score_candidates(state)
+    out = await score_candidates(state)
     assert any(HISTORICAL_UNAVAILABLE == u for u in out["unavailable"])
 
 
-def test_a_gated_out_candidate_keeps_score_none_not_zero():
+@pytest.mark.asyncio
+async def test_a_gated_out_candidate_keeps_score_none_not_zero():
     """Zero reads as "scored and found worthless" when it was never scored."""
     state = _full_state(regime="Trending Bullish")
     state.update(enumerate_candidates(state))
-    out = score_candidates(state)
+    out = await score_candidates(state)
     mr = next(c for c in out["candidate_strategies"] if c.name == "MeanReversion")
     assert mr.eligible is False
     assert mr.score is None
@@ -289,7 +305,10 @@ def test_a_hold_signal_scores_zero_on_the_signal_component():
     flat = [{"open": 100.0, "high": 100.1, "low": 99.9, "close": 100.0, "volume": 1000.0}] * 120
     score, detail = _score_one("Trend", flat, "Bullish", "LOW")
     assert "HOLD" in detail
-    assert score <= WEIGHT_TREND_ALIGN + WEIGHT_VOL_FIT
+    # The track-record component contributes its NEUTRAL half when there is no
+    # usable record, so the ceiling includes it. A HOLD still cannot earn the
+    # signal weight, which is the property being tested.
+    assert score <= WEIGHT_TREND_ALIGN + WEIGHT_VOL_FIT + WEIGHT_TRACK_RECORD
 
 
 def test_a_broken_strategy_scores_none_not_zero(monkeypatch):
@@ -330,7 +349,8 @@ def test_unknown_volatility_contributes_neutrally():
     assert "unknown" in detail
 
 
-def test_a_weak_best_score_selects_nothing_rather_than_the_least_bad():
+@pytest.mark.asyncio
+async def test_a_weak_best_score_selects_nothing_rather_than_the_least_bad():
     """The highest of several weak scores is still a weak setup, and proposing it
     would turn "nothing is happening" into a trade."""
     state = _full_state()
@@ -340,17 +360,18 @@ def test_a_weak_best_score_selects_nothing_rather_than_the_least_bad():
     flat = [{"open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0, "volume": 1.0}] * 120
     state["market_data"] = MarketSnapshot(symbol="BTC/USDT", price=100.0, candles={"15m": flat})
 
-    out = score_candidates(state)
+    out = await score_candidates(state)
     if "selected_strategy" in out:
         assert out["selected_strategy"].score >= MIN_SCORE_TO_SELECT
     else:
         assert any("below the" in u for u in out["unavailable"])
 
 
-def test_scoring_with_no_market_data_reports_unavailable():
+@pytest.mark.asyncio
+async def test_scoring_with_no_market_data_reports_unavailable():
     state = new_state("r", "BTC/USDT", _trigger(), 0.0)
     state["candidate_strategies"] = [StrategyCandidate(name="Trend", eligible=True)]
-    out = score_candidates(state)
+    out = await score_candidates(state)
     assert any("no market data" in u for u in out["unavailable"])
 
 

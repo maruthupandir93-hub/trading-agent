@@ -179,6 +179,22 @@ class TarSubmittedEvent(BaseEvent):
     stop_loss: float
     tab: Literal['paper', 'real']
     take_profit: Optional[float] = None
+    # THE GRAPH RUN THAT PRODUCED THIS TRADE.
+    #
+    # `ExecutionPlanReadyEvent` already carried it, described as "for
+    # traceability back to the reasoning that produced this" — and then the TAR
+    # dropped it one hop later, so by the time `ExecutionAgent` wrote the trade
+    # row there was nothing left to trace to. That is why the trade-detail
+    # page's "How this trade happened" could only ever show the entry and the
+    # outcome: the middle of the story was not lost, it was never carried.
+    run_id: Optional[str] = None
+    # WHICH STRATEGY CHOSE THIS TRADE. Carried for the same reason and needed for
+    # a second one: without it, no realised win rate can be attributed to a
+    # strategy, and `historical_success_rate` stays None forever — which is
+    # exactly why strategy scoring has never used its own results.
+    strategy: Optional[str] = None
+    # What the agent saw at decision time. See `ExecutionPlan.entry_context`.
+    entry_context: Optional[str] = None
     entry_price: Optional[float] = None
 
 # 6. TAR_APPROVED / TAR_REJECTED
@@ -197,6 +213,28 @@ class TarApprovedEvent(BaseEvent):
     stop_loss: float
     tab: Literal['paper', 'real']
     take_profit: Optional[float] = None
+    # ATTRIBUTION. THESE THREE WERE MISSING, AND THAT ONE OMISSION DISABLED THE
+    # LEARNING LOOP, THE "HOW THIS TRADE HAPPENED" VIEW AND RUN TRACEABILITY —
+    # on every trade the agent has ever made.
+    #
+    # `TarSubmittedEvent` declares all three and `cro_agent` passes all three to
+    # this constructor. Pydantic IGNORES unknown keyword arguments by default, so
+    # nothing raised: the CRO believed it forwarded them, and the event that came
+    # out the other side simply did not have them.
+    #
+    # It stayed hidden because every reader is defensive —
+    # `getattr(tar, "strategy", None)` in `execution_agent` and in the position
+    # monitor. A defensive read of a field that does not exist is
+    # indistinguishable from a field that is legitimately absent, so the whole
+    # chain reported None and looked like it was working.
+    #
+    # Measured on the live database before the fix: `strategy`, `run_id` and
+    # `entry_context` were NULL on all 30 trade rows, opening and closing alike,
+    # and `strategy_performance.aggregate()` returned {} on an account that had
+    # traded for three days.
+    run_id: Optional[str] = None
+    strategy: Optional[str] = None
+    entry_context: Optional[str] = None
 
 class TarRejectedEvent(BaseEvent):
     event_type: Literal['TAR_REJECTED'] = 'TAR_REJECTED'
@@ -266,6 +304,16 @@ class PositionClosedEvent(BaseEvent):
     exit_reason: str
     strategies: List[str] = Field(default_factory=list)
     held_seconds: Optional[float] = None
+    # ATTRIBUTION, carried to the reflection so it can name a REAL cause instead
+    # of the generic template. Without `entry_context` the reflection reasons over
+    # symbol/side/pnl alone — which cannot distinguish "stopped inside the noise
+    # band in a range" from "counter-trend entry against the 4h" — and falls back
+    # to "check if losses cluster in this regime". These are the same three fields
+    # the trade row already records; the reflection was the one reader not given
+    # them.
+    strategy: Optional[str] = None
+    run_id: Optional[str] = None
+    entry_context: Optional[str] = None
 
 # 8c. TRIGGER_FIRED — Phase 31 (spec Section 14)
 #
@@ -326,6 +374,7 @@ class ExecutionPlanReadyEvent(BaseEvent):
     strategy: Optional[str] = None
     rationale: Optional[str] = None
     entry_price: Optional[float] = None
+    entry_context: Optional[str] = None
 
 
 # 9. REFLECTION_COMPLETED

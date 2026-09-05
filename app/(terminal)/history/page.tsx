@@ -15,6 +15,8 @@ import { useMemo, useState } from 'react';
 import { TradeJourney } from '@/components/viz/TradeJourney';
 import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/components/ui/primitives';
 import { realised, type Trade } from '@/lib/api/portfolio';
+import { Badge } from '@/components/ui/Badge';
+import { annotateTrades, statusBadgeState, statusLabel } from '@/lib/tradeStatus';
 import { useSameOrigin } from '@/lib/api/useSameOrigin';
 import { DEFAULT_PAGE, page, pageLabel } from '@/lib/ui/paging';
 import { buildJourney } from '@/lib/viz/journey';
@@ -34,8 +36,12 @@ export default function HistoryPage() {
   const [tab, setTab] = useState<'all' | 'paper' | 'real'>('all');
 
   const all = trades.data?.trades ?? [];
+  // ANNOTATED BEFORE THE TAB FILTER, and the order matters. A row's status
+  // depends on the whole ledger — filtering to one book first would orphan every
+  // close whose entry sits in the other and report it as unpaired.
   const rows = useMemo(
-    () => [...all].filter((t) => tab === 'all' || t.tab === tab).sort((a, b) => b.ts - a.ts),
+    () =>
+      annotateTrades(all as never).filter((t) => tab === 'all' || t.tab === tab),
     [all, tab],
   );
   const pnl = realised(rows);
@@ -98,15 +104,21 @@ export default function HistoryPage() {
             </span>
           }
         >
-          Closed trades
+          Trades
         </SectionTitle>
         <TermTable
           columns={[
             { key: 't', label: 'When' },
             { key: 's', label: 'Symbol' },
             { key: 'd', label: 'Side' },
+            // WHAT THIS ROW IS AND WHETHER IT IS FINISHED. The table had neither,
+            // so an open entry and a completed exit rendered identically and the
+            // "—" in the P&L column read as missing data rather than as "this leg
+            // has no result yet, by definition".
+            { key: 'st', label: 'Status' },
             { key: 'q', label: 'Qty', num: true },
             { key: 'p', label: 'Price', num: true },
+            { key: 'h', label: 'Held', num: true },
             { key: 'l', label: 'P&L', num: true },
             { key: 'tb', label: 'Tab' },
             { key: 'a', label: '' },
@@ -122,10 +134,28 @@ export default function HistoryPage() {
                   {t.side?.toUpperCase()}
                 </span>
               </td>
+              <td>
+                <Badge state={statusBadgeState(t)} label={statusLabel(t)} />
+              </td>
               <td className="num"><Num value={t.qty} digits={6} /></td>
               <td className="num"><Num value={t.price} /></td>
               <td className="num">
-                {typeof t.pnl === 'number' ? <Num value={t.pnl} colored signed /> : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                {t.holdMs === null ? (
+                  <span style={{ color: 'var(--text-muted)' }}>—</span>
+                ) : (
+                  <span className="mono text-[11px]">{formatHold(t.holdMs)}</span>
+                )}
+              </td>
+              <td className="num">
+                {typeof t.pnl === 'number' ? (
+                  <Num value={t.pnl} colored signed />
+                ) : (
+                  // An open position has no result yet. Said in words rather than
+                  // shown as a dash, which is indistinguishable from missing data.
+                  <span className="text-[10.5px]" style={{ color: 'var(--text-muted)' }}>
+                    {t.status === 'OPEN' ? 'running' : '—'}
+                  </span>
+                )}
               </td>
               <td className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{t.tab}</td>
               <td>
@@ -175,4 +205,14 @@ export default function HistoryPage() {
       <HistoryOperator />
     </div>
   );
+}
+
+/** Hold time as something a human reads at a glance, not raw milliseconds. */
+function formatHold(ms: number): string {
+  const minutes = ms / 60_000;
+  if (minutes < 1) return `${Math.round(ms / 1000)}s`;
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const hours = minutes / 60;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(1)}d`;
 }

@@ -90,6 +90,20 @@ class _Tracked:
         # venue refused it — which is a materially less safe position and is
         # logged as such rather than left to be inferred from a null.
         "stop_order_id",
+        # ATTRIBUTION, carried from the approval so the CLOSING trade row can
+        # record it.
+        #
+        # THE LEARNING LOOP WAS STRUCTURALLY DEAD WITHOUT THIS.
+        # `strategy_performance` aggregates `WHERE pnl IS NOT NULL AND strategy
+        # IS NOT NULL`. Only a CLOSE carries a pnl, and only an OPEN carried a
+        # strategy — so the intersection was always empty, every profile's
+        # `historical_success_rate` stayed None forever, and the 0.2 track-record
+        # weight in strategy scoring was permanently neutral. The agent could not
+        # learn from a single one of its own outcomes.
+        #
+        # Confirmed against the live database before fixing: 12 closed trades,
+        # strategy NULL on all 12.
+        "strategy", "run_id", "entry_context",
     )
 
     def __init__(self, **kw):
@@ -255,6 +269,12 @@ class PositionMonitorAgent(BaseAgent):
                 "take_profit": appr.get("take_profit"),
                 "peak_price": None,
                 "opened_at": None,
+                # A pending approval has no venue order yet — the stop is placed
+                # on the FILL — so this is genuinely None rather than dropped.
+                "stop_order_id": None,
+                "strategy": appr.get("strategy"),
+                "run_id": appr.get("run_id"),
+                "entry_context": appr.get("entry_context"),
             })
 
         for pos in self._open.values():
@@ -270,6 +290,20 @@ class PositionMonitorAgent(BaseAgent):
                 "take_profit": pos.take_profit,
                 "peak_price": pos.peak_price,
                 "opened_at": pos.opened_at,
+                # WAS MISSING ENTIRELY, and `save_watch_list` binds by name from
+                # `_FIELDS` — so `stop_order_id` was written as NULL on every
+                # single row. The column existed, the schema comment explained
+                # why it mattered, and nothing ever put a value in it.
+                #
+                # The consequence is the one that column was added to prevent: a
+                # restart could not cancel the stop this process left resting at
+                # the venue, and a reduce-only stop left on a flat account is an
+                # order to OPEN a reversed position the next time price touches
+                # it. `_cancel_resting_stop` had no id to work with.
+                "stop_order_id": pos.stop_order_id,
+                "strategy": pos.strategy,
+                "run_id": pos.run_id,
+                "entry_context": pos.entry_context,
             })
 
         return rows
@@ -382,6 +416,9 @@ class PositionMonitorAgent(BaseAgent):
                         "take_profit": row["take_profit"],
                         "tab": row["tab"],
                         "symbol": row["symbol"],
+                        "strategy": row.get("strategy"),
+                        "run_id": row.get("run_id"),
+                        "entry_context": row.get("entry_context"),
                     }
                     pending += 1
                 continue
@@ -421,6 +458,13 @@ class PositionMonitorAgent(BaseAgent):
                 # process left resting at the venue. An orphaned stop is an order
                 # to open the opposite position the next time price touches it.
                 stop_order_id=row.get("stop_order_id"),
+                # Restored so a position that opened before a restart still
+                # attributes its eventual close to the strategy that chose it.
+                # Dropping them here would reopen the learning-loop gap one
+                # restart at a time.
+                strategy=row.get("strategy"),
+                run_id=row.get("run_id"),
+                entry_context=row.get("entry_context"),
             )
             resumed += 1
 
@@ -481,12 +525,22 @@ class PositionMonitorAgent(BaseAgent):
                 await conn.execute(
                     """
                     INSERT INTO trades
-                        (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note,
+                         strategy, run_id, entry_context)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     """,
                     str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, pos.qty, exit_price, realized,
                     "agent-close", f"closed by {reason} from entry {pos.entry_price:.8g}",
+                    # THE ROW THE LEARNING LOOP READS. `strategy_performance`
+                    # selects closed trades carrying a strategy; before this the
+                    # close was the only row with a pnl and the only row WITHOUT
+                    # a strategy, so that query could never return anything.
+                    #
+                    # None stays None — a manually tracked position genuinely has
+                    # no strategy, and inventing one would attribute a human's
+                    # outcome to an algorithm that never chose it.
+                    pos.strategy, pos.run_id, pos.entry_context,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -800,6 +854,13 @@ class PositionMonitorAgent(BaseAgent):
                 # between the approval and the fill — which is the whole reason
                 # pending approvals are persisted.
                 "symbol": event.symbol,
+                # THE APPROVAL IS THE LAST PLACE THESE EXIST. The chain carries
+                # them plan -> TAR -> CRO -> approval, and this handler was the
+                # hop that dropped them: the fill event does not carry them, so
+                # anything not kept here is gone by the time the position closes.
+                "strategy": getattr(event, "strategy", None),
+                "run_id": getattr(event, "run_id", None),
+                "entry_context": getattr(event, "entry_context", None),
             }
             await self.persist_watch_list()
             return
@@ -852,6 +913,9 @@ class PositionMonitorAgent(BaseAgent):
             take_profit=approved["take_profit"],
             opened_at=datetime.datetime.utcnow(),
             peak_price=event.fill_price,
+            strategy=approved.get("strategy"),
+            run_id=approved.get("run_id"),
+            entry_context=approved.get("entry_context"),
         )
         self._open[tar_id] = tracked
         logger.info(
@@ -1003,6 +1067,16 @@ class PositionMonitorAgent(BaseAgent):
                     realized_pnl=realized,
                     exit_reason=reason,
                     held_seconds=held,
+                    # `strategies` (the list the deterministic attribution reads)
+                    # AND the singular `strategy` — populated from the tracked
+                    # position, which now carries it from the approval. This list
+                    # was previously always empty, so `classify_outcome`'s
+                    # attribution never fired and the lesson had nothing to
+                    # attribute to.
+                    strategies=[pos.strategy] if pos.strategy else [],
+                    strategy=pos.strategy,
+                    run_id=pos.run_id,
+                    entry_context=pos.entry_context,
                 )
             )
         finally:

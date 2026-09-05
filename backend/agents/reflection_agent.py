@@ -232,6 +232,14 @@ class ReflectionAgent(BaseAgent):
             "exit_reason": event.exit_reason,
             "strategies": list(event.strategies),
             "held_seconds": event.held_seconds,
+            # The snapshot of WHAT THE AGENT SAW at entry — RSI, ATR, structure,
+            # regime, volatility, higher-timeframe trend, BTC benchmark. This is
+            # the difference between "check if losses cluster" and "stopped out
+            # 0.6% away while 15m ATR was 0.5% AND the entry was counter to the 4h
+            # downtrend". The reflection prompt reads it directly.
+            "entry_context": getattr(event, "entry_context", None),
+            "strategy": getattr(event, "strategy", None),
+            "run_id": getattr(event, "run_id", None),
         }
 
         # The GRAPH is called directly here rather than through

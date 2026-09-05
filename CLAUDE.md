@@ -706,6 +706,713 @@ ask"; `[]` means "the venue holds nothing". Collapsing them would flag every rea
 position as a phantom on one timeout, and anything acting on that report would
 flatten the book on a network blip.
 
+### THE AGENT NEVER UPDATED THE PAPER BOOK, and that was four bugs in one
+
+`execution_agent` wrote a row to `trades`, handed the position to
+`PositionMonitorAgent`, and never touched `portfolio_store`. Only the OPERATOR's
+manual panel ever moved the book. On the paper account that produced four
+separate "broken panels" from one absent write:
+
+* cash sat at its starting figure forever, however many trades filled
+* `positions` stayed empty, so the dashboard's "Open positions" read 0
+* there was no unrealized P&L to move when price moved
+* `current_equity()` is cash + marked positions, so a session's progress toward
+  its target never moved either
+
+And it could not simply call `buy_paper`, which is LONG-ONLY: this agent shorts,
+`sell_paper` rejects a sell with no long open, and its P&L formula is
+(exit - entry) — the opposite sign for a short. So
+`portfolio_store.apply_paper_fill` is the general, direction-aware, margin-aware
+implementation, and `buy_paper`/`sell_paper` stay as the operator's manual API.
+
+**Positions now carry a `side`** (`agent_positions.side`, defaulting to `'buy'`
+so pre-existing rows read as the longs they were). Without it the book cannot
+represent a short at all.
+
+### Equity is FREE CASH + LOCKED MARGIN + UNREALIZED — `cash + qty*price` is 1x-only
+
+`buy_paper` deducts MARGIN from cash, so cash is free cash. Adding the full
+notional back double-counts the leveraged part: at 10x a $7,000 position funded
+by $700 reported **$6,300 of equity that did not exist**, and every percentage
+derived from it — session progress, drawdown, risk-per-trade — was wrong by the
+same factor, in the direction that flatters the account. The old form also
+ignored DIRECTION, so a short moving against the operator read as equity going
+UP.
+
+Fixed in `portfolio_store.book_equity` and mirrored in `lib/api/portfolio.ts`'s
+`equity()`/`unrealised()`. `tests/test_trading_session.py`'s equity test had been
+ASSERTING the buggy formula and was rewritten.
+
+### `decisions` grew to 80,525 rows in one day and nothing pruned it
+
+All of them `rejected` — the agent records a decision on every evaluation it
+declines. `listDecisions` had **no LIMIT**, so the Decisions page fetched every
+row and laid them out. That is a growth problem, not a page problem.
+
+Two fixes, both needed: `/api/decisions` caps at `DECISIONS_PAGE_LIMIT` (300) and
+returns `total`/`truncated` so a capped view says so; and
+`backend/services/retention.py` prunes hourly.
+
+**The retention bound is a COUNT, not an age.** A 14-day window was written first
+and would have deleted NOTHING — every row was from a single day. An age window
+is sensitive to how hard the agent happened to be working, which is the one thing
+the bound must not depend on. `MIN_KEEP = 2000` is both a floor (a quiet week
+cannot blank the page) and a cap. Decisions that EXECUTED a trade are never
+pruned, and `trades` is never touched at all. First live pass deleted 78,602 and
+left 2,003.
+
+### `/log` was deleted in the UI migration and `TradeLogPanel` still linked at it
+
+`components/TradeLogPanel.tsx` — mounted on `/history` via `HistoryOperator` —
+linked to `/log/${id}` and `/log?tab=`. `app/log/` no longer exists; the trade
+detail page's own header says it is "the replacement for the old /log/[id]". So
+every Detail click from that panel hit Next's 404. Repointed at `/history`.
+
+### A fill row does not say whether its position is still open
+
+`trades` is a fill log, not a position log. The history table rendered every row
+under a heading reading "Closed trades" with `—` in the P&L column for most of
+them, so an open entry and a completed exit looked identical and the em-dash read
+as missing data rather than "no result yet, by definition".
+
+`lib/tradeStatus.ts::annotateTrades` walks the ledger per `(tab, symbol)` and
+tags each row `role` (open/close), `status` (OPEN/CLOSED), the id of its
+counterpart leg, `holdMs` and `direction`. Closes consume open legs FIFO. It
+never recomputes P&L from the pairing — the row's own `pnl` was calculated at
+close time against the real entry and is authoritative. Must be annotated BEFORE
+any tab filter: a row's status depends on the whole ledger, and filtering first
+orphans every close whose entry sits in the other book.
+
+### A CHECK constraint silently discarded every closing trade
+
+This is the one that blanked the entire P&L dashboard, and it was in the SCHEMA,
+not in any of the code that reads it.
+
+`trades_origin_tag_check` permitted five `origin_tag` values. The code writes
+SEVEN, and the two missing ones were the two that mattered:
+
+    agent-close    `position_monitor._persist_closed_trade` — the ONLY writer of
+                   a row carrying a realized `pnl`
+    manual-panel   `api/operator_trade` — a manual paper trade
+
+A CHECK that omits a value the code emits does not degrade. It REJECTS the
+INSERT. Every close the agent ever made was rolled back with
+
+    new row for relation "trades" violates check constraint
+    "trades_origin_tag_check"
+
+logged at ERROR and swallowed — correctly, because by then the position was
+already closed and the money had moved, so raising would have made the caller
+retry an exit for a flat position. **The positions closed correctly every time;
+only the record of them was lost.**
+
+The symptom appeared three pages away and looked like arithmetic: `trades` held
+nothing but opening fills, `realised()` found no row carrying a pnl, and the P&L
+panel, win rate, expectancy and max drawdown were all blank on an account that
+had been trading. Sessions were spent auditing the reconstruction logic that
+reads this table.
+
+**`CREATE TABLE IF NOT EXISTS` CANNOT WIDEN A CHECK ON A LIVE TABLE.** That is
+the trap: adding the tag to the CREATE block does nothing to an existing
+database, exactly as it did nothing for `execution_quality`. The fix is a
+`DO $$ ... $$` block that DROPs and re-ADDs the constraint, which is idempotent
+under `init_db`'s apply-on-every-startup.
+
+`tests/test_origin_tag_constraint.py` compares the three copies of this list —
+the schema CREATE block, the schema constraint block, and
+`TradeLogEntry['originTag']` — and scans the writers for tags none of them
+permit. Its first run immediately caught a false positive
+(`manual-position-tracked`, a `record_decision` kind), which is why the scan is
+scoped to `INSERT INTO trades` windows rather than matching hyphenated literals.
+
+Verified end to end after the fix: a monitored long, stop fired, and the log
+recorded `manual-panel` entry -> `agent-close` exit carrying a pnl, with
+`/api/stats` reporting `totalClosedTrades: 1` and a measured hold time for the
+first time.
+
+### The trade waited ~18 seconds for prose about itself
+
+`run_analysis_graph` did `await graph.ainvoke(...)` and published
+`EXECUTION_PLAN_READY` afterwards — so the order reached the bus only once all 24
+nodes had finished. Measured on a live BTC/USDT run:
+
+    trade_thesis_narrative   7.6s -> 10.2s   LLM
+    external_consultation    2.4s ->  8.3s   LLM
+    data_validation          2.3s            upstream fetches
+    memory_loader            0.8s
+    the other 20 nodes       0.04s           combined
+
+Both LLM nodes run AFTER `risk_gateway`, and neither contributes to the trade.
+Their contracts say so structurally — `trade_thesis_narrative` writes
+`("thesis_narrative",)`, `external_consultation` writes
+`("consultation", "llm_calls_made", "llm_tokens_used")`. Not `execution_plan`,
+not `risk_assessment`, not `decision`.
+
+The graph is now STREAMED (`astream(..., stream_mode="values")`) and the plan is
+published the moment the gateway's output appears. Measured after:
+
+    decision complete, plan on the bus     4.8s
+    the two explanation nodes (after)     18.5s
+    HTTP response, whole run              23.6s
+
+So the TRADE leaves at ~4.8s instead of ~23.6s. **The HTTP response still takes
+the full run** — that endpoint reports the run, and the reporting path is not the
+trading path. Do not "fix" that by returning early; the summary needs the final
+state.
+
+Three things keep this sound, all in `tests/test_analysis_latency.py`:
+
+* **Publishing stays in the RUNNER, never in a node.** The original reason holds:
+  a node that published would make emitting an execution request part of
+  reasoning, and a future node could emit one before the gateway ran. The guard
+  is still `execution_plan` being present, and only the gateway produces one.
+* **Published exactly once.** `stream_mode="values"` re-offers the whole
+  accumulated state after every superstep, so the plan appears in every chunk
+  from the gateway onward — without the caller's `published` flag, one decision
+  becomes a dozen identical submissions. `_publish_plan` returns `bool` for this;
+  every refusal path returns False so the post-stream retry still gets a chance.
+* **An explanation node may not write a decision key.** Asserted against the
+  registered `NodeContract`. If one ever could, the published plan could be stale
+  by the time the graph ended — the system would submit one trade and record
+  another.
+
+`tests/test_sections_26_to_39.py::test_streaming_is_separate_from_the_invoking_runners`
+used to assert `"astream" not in` the runner's source. That was checking the
+implementation rather than the property; it now asserts the CONTRACT — that
+`stream_run` is an async generator and `run_analysis_graph` is not. The runner
+still returns a single dict, so it is still an invoking runner to every caller.
+
+### A hardcoded symbol list meant most instruments had no enforceable stop
+
+`live_market_data` watched a literal `['BTC/USDT', 'ETH/USDT', 'SOL/USDT']`.
+`PositionMonitorAgent` enforces every stop by reacting to `TICK_RECEIVED`, and
+this module is the ONLY publisher of that event — so a position in any other
+instrument received no ticks, `_check_price` never ran for it, and **its stop
+could never fire**.
+
+Nothing reported it. The monitor listed the position as watched and the dashboard
+showed its stop, so the operator had every reason to believe it was protected.
+
+The subscription set is now derived from what needs watching — open positions,
+the running session's symbol, the book, plus `DEFAULT_SYMBOLS` — and reconciled
+every 20s, because positions open and close while the process runs. A set
+computed once at startup is the same bug with extra steps.
+
+Three properties, pinned by `tests/test_tick_subscription.py`:
+
+* **The set is a UNION and an open position is always in it.** A reconcile that
+  dropped a live position's feed would silently disarm its stop, which is worse
+  than never subscribing — it looks protected the whole time. A failure reading
+  the monitor therefore keeps the existing feeds rather than shrinking the set.
+* **A dead watcher is restarted.** A crashed task left in `_watchers` would leave
+  its symbol unwatched while still appearing subscribed.
+* **Unsubscribing PURGES the cached price.** `get_live_price` carries no
+  timestamp, so a value left behind is served forever as a live websocket price
+  — `/api/market/price` even labels its source `websocket`. Dropping it makes
+  `get_price` fall through to the polled cache, which knows how old it is.
+
+Verified live: opening an XRP/USDT position flipped its price source from
+`polled-http-cache` to `websocket` within 10 seconds.
+
+### The stress simulation OOM was REJECTING TRADES, not just failing
+
+    Stress simulation failed for SOL/USDT: Unable to allocate 3.05 MiB for an
+    array with shape (2000, 200) and data type float64
+
+`SimulationAgent` FAILS CLOSED by design, so an allocation error is a REJECTED
+TRADE. The OOM was manufacturing rejections — and `decisions` held 80,525 rows
+that day, every one of them `rejected`.
+
+`monte_carlo_trade_sequence` is SEEDED and otherwise pure, and the agent calls it
+with the same arguments every time (`settings.RISK_PER_TRADE` plus two module
+constants). It re-derived one number that cannot change, thousands of times a
+day, allocating six full 2000x200 float64 arrays (~16 MB) on each call.
+
+Two changes, and the results are bit-identical — verified against a captured
+baseline before/after:
+
+* **`lru_cache`.** Exact rather than approximate, because the function is seeded;
+  `tests/test_algorithm_library.py` already asserts that determinism. The
+  returned dict is now SHARED — callers must not mutate it.
+* **Row-blocked simulation** (`_SIM_BLOCK_ROWS = 250`), so peak memory does not
+  scale with `num_simulations`. `rng.random` fills row-major, so sequential row
+  blocks from one generator yield the same numbers as one big draw.
+
+Measured: peak 16 MB -> 2.78 MB, cold call 37.5ms, cached call 0.24us.
+
+### The trade detail page shows a LIFECYCLE, not one row
+
+`/history/[id]` rendered the clicked fill's price, quantity and timestamp and
+nothing else — so an entry leg showed a P&L of `—` with no way to tell that
+meant "still running" rather than "missing".
+
+It now annotates the WHOLE ledger (`annotateTrades`) and renders the round trip:
+opened/closed timestamps, hold time, direction, entry and exit price, origin,
+which leg this fill is, and a link to the counterpart. Absences are dimmed and
+worded — "still open", "not in this log" — rather than dashed, because a dash and
+a missing measurement look identical.
+
+`usePortfolio().tradeLog` already reads `/api/trades`, the same source the
+history table uses, so the page resolves any trade in the database. The 404 was
+never a lookup failure — it was the dead `/log/` link in `TradeLogPanel`.
+
+ONE CONSEQUENCE OF `reset-paper` WORTH KNOWING: it forgets positions without
+closing them, so it writes no closing row. Entries that were open at reset time
+stay OPEN in the trade log forever. That is accurate rather than a bug — they
+genuinely never closed — but it means the history can show open legs that the
+book no longer has. Writing a synthetic close would mean inventing an exit price
+and a P&L, which invariant 6 forbids.
+
+### The three changes that came out of reading the live ledger
+
+Nine closed trades, 33% win rate, +$24.67 net. Five of six losses were stop-outs
+of 0.45-0.79% while SOL's 15m ATR% was ~0.43 — the stop sat INSIDE the noise
+band. The three wins all landed in one 30-minute trending window.
+
+**1. THE SIZING CAP WAS OVERRIDING RISK SIZING ON EVERY TRADE.**
+`max_qty_by_cash = equity * 0.5 / price` — half the NOTIONAL, ignoring leverage.
+Measured: the risk sizer wanted 310 SOL, the cap allowed 50, on every trade. Two
+consequences, the second dangerous:
+
+  * `RISK_PER_TRADE` did nothing. Actual risk was ~0.3% while it said 2%.
+  * Widening the stop would have INCREASED risk, not held it: same quantity over
+    twice the distance is twice the loss. 1.5 -> 3.0 ATR doubled risk from $32 to
+    $64 while looking like a safety improvement.
+
+Now `MAX_MARGIN_FRACTION_PER_TRADE = 0.20` on MARGIN, which scales with leverage
+(the old notional cap got STRICTER as leverage rose). `position_size_detail`
+reports whether the cap bound, so a size that ignores the risk setting is visible
+instead of silent.
+
+**2. STOP AND TARGET WIDENED TOGETHER.** 1.5/3.0 -> 2.5/5.0. The stop moves
+outside the noise band; the target had to move with it because widening only the
+stop makes the payoff 1.2:1, which at a 33% win rate is reliably losing. 2:1 is
+preserved. `RISK_PER_TRADE` dropped 2% -> 0.5%, which is the level at which risk
+sizing GOVERNS rather than the cap — that is what makes a wider stop
+automatically reduce size and hold dollar risk constant.
+
+**3. VERY_LOW JOINED `BLOCKED_REGIMES`.** A market in the bottom fifth of its own
+recent range has no momentum to carry a position to a 5-ATR target. Fewer trades
+is the intended effect.
+
+All three are HYPOTHESES. A wider stop takes fewer noise stop-outs and a wider
+target is hit less often; which dominates is empirical and nine trades cannot
+say. That is why the learning loop below exists.
+
+### The learning loop — `historical_success_rate` is real now
+
+All nine profiles carried `historical_success_rate=None` and the scorer reported
+it on every run. The agent picked strategies purely on current-conditions fit and
+nothing it learned from an outcome ever reached that choice.
+
+Two things blocked it, both fixed: `trades` did not record WHICH strategy
+produced a fill (`trades.strategy` now exists, carried plan -> TAR -> CRO ->
+approval -> row, alongside `trades.run_id`), and nothing aggregated
+(`backend/services/strategy_performance.py`).
+
+Scoring gained a fourth weight: signal 0.4, trend 0.25, volatility 0.15,
+**track record 0.2**. Conditions still carry 0.8.
+
+**WHY THIS IS NOT AN INVARIANT-5 VIOLATION.** That invariant forbids an
+LLM-authored HYPOTHESIS rewriting a strategy (`Loss -> AI rewrites strategy ->
+Live`). This is deterministic arithmetic over closed trades: no model is
+consulted, the same ledger always gives the same numbers, and it cannot invent,
+edit or disable a strategy — it supplies the measured win rate the profile
+already declares and Section 11.3 already lists as required for a score. A test
+asserts the module contains no model call.
+
+**THE SAMPLE FLOOR IS THE SAFETY ARGUMENT.** `MIN_SAMPLE = 20`. Below it the rate
+is reported but must not steer selection — one lucky run would otherwise entrench
+a bad strategy, which is how naive adaptive systems destroy themselves. And no
+record scores NEUTRAL (0.5), never zero: zero would permanently freeze out every
+strategy that has not traded yet, including the one that would have worked.
+
+Read through `GET /api/graphs/strategy-performance`.
+
+### Cash does NOT move while a position is open, and that looked like a bug
+
+The operator reported paper cash "static at 10000". It was not stuck — the panel
+showed one figure and that figure genuinely does not move:
+
+    cash $9790.86 | locked $209.14 | unreal $+0.000 | equity $10000.000
+    cash $9790.86 | locked $209.14 | unreal $+0.400 | equity $10000.400
+    cash $9790.86 | locked $209.14 | unreal $+0.700 | equity $10000.700
+
+Margin is LOCKED, not spent. Cash moves exactly twice per position — out on open,
+back plus P&L on close — and everything that moves in between lives in
+`unrealized`. A single "Account now" number therefore looks identical whether the
+book is FLAT or the number is STUCK, and those have opposite responses.
+
+`equity_breakdown()` returns the three parts and the panel renders them. On an
+idle book it reads free cash 10,000 / locked 0 / unrealised 0 / 0 positions,
+which is plainly idle rather than broken.
+
+`session_progress()` is computed SERVER-SIDE for the same reason the plan is
+published from the runner: the number the operator reads and the check that ends
+the session must come from one place. `gained` is signed and unclamped so a
+session that is down says so; only `fraction` is clamped, because a bar cannot
+render backwards.
+
+### "How this trade happened" — the middle was never recorded, not lost
+
+The journey view showed market data and execution with an unknown middle. Not a
+display bug: `trades.entry_context` existed and NOTHING WROTE IT.
+
+A join could not have recovered it either. `trades` now carries `run_id`, but the
+run trace records which node ran and which state KEYS it wrote — not the values —
+and the graph state holding the indicators is gone by the time a fill is booked.
+
+So `risk_gateway.build_entry_context` writes a snapshot at decision time, because
+the gateway is the last node holding `technical_analysis`, `market_regime` and
+`volatility` together. It travels plan -> TAR -> CRO -> approval -> trade row
+beside `run_id` and `strategy`.
+
+The format is the one `learningDashboard.classifyEntryContext` already parsed;
+`lib/viz/entryContext.ts` is the second reader. `tests/test_entry_context.py`
+duplicates the TypeScript regexes deliberately — a snapshot the frontend cannot
+parse is the same as no snapshot at all.
+
+**A MISSING INPUT IS OMITTED, NEVER DEFAULTED.** An invented RSI would be the most
+persuasive fabrication available here, because it would look exactly like
+evidence. The page says "this trade predates the snapshot" rather than rendering
+an empty journey that reads as a failure.
+
+TESTED AS A PURE FUNCTION AFTER THE FIRST ATTEMPT FAILED SILENTLY. Driving
+`gate()` with synthetic state made every test SKIP — the gateway reads the live
+book and ledger and refused the fabricated inputs. A test that always skips
+proves nothing, so the formatter was extracted and the WIRING is asserted
+separately against the node's source.
+
+### Switching venue is an ACCOUNT change, and it refuses with a position open
+
+`POST /api/admin/venue` (Settings -> Exchange) moves the agent between Binance and
+Bybit and persists `EXCHANGE_ID` to `.env`.
+
+**It refuses while a REAL position is open, and that refusal is the route's
+reason for existing.** The two venues are different accounts holding different
+money — a position opened on one does not exist on the other. Switching
+underneath one would leave it at the old venue while:
+
+* `PositionMonitorAgent` goes on enforcing its stop by placing orders on the NEW
+  venue, where the position is not;
+* the resting stop this process left behind stays live and cannot be cancelled
+  through the new client;
+* reconciliation compares the local book against the wrong exchange and reports
+  every real position as a phantom.
+
+None of those announce themselves — the switch would look like it worked. Paper
+positions do NOT block it: they have no venue counterpart at all.
+
+`reset_venue()` drops the singleton so the next call rebuilds the client. The old
+instance holds the other venue's markets, credentials and cached position mode,
+and reusing it would place orders with one venue's parameters against the other's
+API.
+
+The panel shows credentials PER VENUE and renders the blocker BEFORE the control,
+because discovering it from a 409 is worse than never being offered the action. A
+venue with no keys can still be selected — market data needs none — and the
+response says plainly that every private call will be refused until they are set.
+
+### The Bybit testnet round trip, and the three faults it found
+
+`scripts/bybit_testnet_roundtrip.py` — entry -> resting stop -> tighten -> close
+against Bybit's sandbox. It is a SCRIPT, not a test: `tests/conftest.py` blocks
+the network for every test on purpose, and this places real (testnet) orders.
+It refuses to run against mainnet — a hard exit, not a warning — and cleans up in
+a `finally`, because a run that dies at step 10 must not leave a position open
+with a stop resting behind it.
+
+**Every offline test passed while the real-money path was broken in three
+places.** That is the value of this file and the reason it stays. All three were
+invisible to a hand-built fixture because each depends on what the VENUE holds or
+what ccxt does with a parameter.
+
+**1. THE AGENT'S OWN SYMBOL RESOLVED TO THE SPOT MARKET.** Every caller says
+`SOL/USDT`, and that exact key is a SPOT market in ccxt's dict; the perpetual is
+`SOL/USDT:USDT`. `check_size` used a plain `dict.get`, so a perpetual order was
+filtered against spot limits. Measured live on Bybit testnet:
+
+    SOL/USDT       spot  minQty 0.001      <- what the code read
+    SOL/USDT:USDT  perp  minQty 0.1        <- what the venue enforces
+
+Worse, **the two venues disagree about where the order goes.** ccxt's binance
+honours `defaultType: future` inside `market()` and resolves the bare key to the
+swap; bybit's does NOT and returns spot. So the same call placed a perpetual on
+one venue and a SPOT order on the other, while `positionIdx`, `reduceOnly`, the
+leverage call, the stop and reconciliation all described a perpetual.
+
+`Venue.resolve_symbol` now maps the caller's form to the venue's perpetual and
+every order path goes through it. **It never falls back to spot** — a spot fill
+is a different instrument: no leverage, no reduce-only close, and no position to
+rest a stop against. Resolution lives in the venue layer rather than at the call
+sites because a symbol form is a venue detail, and thirty callers remembering to
+append `:USDT` is thirty chances to place a spot order with real money.
+
+**2. THE BYBIT STOP NEVER REACHED THE VENUE.** `place_stop_loss` sent
+`triggerPrice`, which makes ccxt treat the order as a GENERIC trigger order — and
+a generic trigger order requires an explicit direction:
+
+    ArgumentsRequired: bybit stop/trigger orders require a triggerDirection
+    parameter, either "ascending" or "descending"
+
+raised before any request left the process. The handler caught it and logged
+"stop-loss order REJECTED", which reads as the venue refusing a stop rather than
+as this process never having asked for one. It also passed `stopLoss` as a bare
+string where ccxt expects an object, which would have attached a SECOND
+position-level stop on top.
+
+Both venues now take the unified `stopLossPrice`, read out of ccxt 4.5's own
+source: binance turns it into `STOP_MARKET` + `stopPrice`, and bybit DERIVES
+`triggerDirection` from the order side (a sell stop triggers on a fall, a buy
+stop on a rise) and forces `reduceOnly`. The trigger is the MARK price on both
+now; it was set on Bybit only, leaving every Binance stop on last price, which a
+thin book can move on a single print.
+
+**3. RECONCILIATION COMPARED TWO SPELLINGS OF ONE POSITION.** The local book
+holds `SOL/USDT`; ccxt reports the same perpetual as `SOL/USDT:USDT`. `_compare`
+keyed on the raw strings, so every real position was reported CRITICAL
+`missing_at_venue` AND the venue's own position as unknown. That is a false alarm
+on precisely the alert that is supposed to mean a liquidation, an ADL or a close
+by hand — and an alert that fires on every position teaches an operator to ignore
+it, which is worse than not having it. `open_positions` returns the display form
+(keeping `venueSymbol` alongside) and `_compare` normalises both sides.
+
+`resting_stops()` exists so the script can assert **exactly one** stop rests
+after a tighten. Listing them is itself venue-specific: Binance returns
+STOP_MARKET orders from a plain `fetch_open_orders`, while Bybit keeps
+conditional orders in a separate book and returns nothing unless the request asks
+(`trigger=True` -> `orderFilter=StopOrder`). Asking Bybit the Binance way answers
+"no stops are resting" while a stop rests.
+
+**TESTNET KEYS ARE SEPARATE VARIABLES** (`BYBIT_TESTNET_API_KEY` / `_SECRET`).
+`_credentials(venue, testnet=)` reads them only in sandbox mode, and **mainnet
+never reads them** — the asymmetry is the point: verifying on testnet must not
+require pasting keys over the mainnet pair and putting them back, because that
+put-them-back step is where a real key ends up in play by accident. Testnet still
+falls back to the mainnet variable, which is what existed before and fails closed
+(a mainnet key is refused by a sandbox endpoint).
+
+`tests/test_venue_live_path.py` pins all of it offline, since the round trip
+needs testnet keys and a funded wallet and cannot run in CI. One thing that file
+learned the hard way: its first sizing fixture used `f"{amount:.1f}"`, which
+ROUNDS where ccxt truncates — so 0.05 became 0.1, cleared the perpetual's
+minimum, and the test asserting a refusal passed for the wrong reason. **A
+fixture kinder than the venue proves nothing.**
+
+**WHAT IS STILL NOT VERIFIED: Binance order placement.** ccxt dropped Binance
+futures testnet support, so the only way to exercise it is with real funds. The
+parameter matrix is shared and unit-tested, and the two faults above were fixed
+on both venues — but "tested on Bybit" is not "tested on Binance", and this note
+exists so nobody upgrades it to that.
+
+### One missing field declaration disabled the entire learning loop
+
+The learning-loop section above says `trades.strategy` is "carried plan -> TAR ->
+CRO -> approval -> row". It was not. Read from the live database:
+
+    30 trade rows. strategy, run_id AND entry_context NULL on EVERY one —
+    openings and closings alike. `strategy_performance.aggregate()` returned {}
+    on an account that had traded for three days.
+
+`strategy_performance` selects `WHERE pnl IS NOT NULL AND strategy IS NOT NULL`.
+Only a CLOSE carries a `pnl`; only an OPEN was ever going to carry a `strategy`.
+Even with the plumbing working those two sets never intersect — so the query
+could not return a row, every profile's `historical_success_rate` stayed None,
+and the 0.2 track-record weight was permanently neutral (0.5). The loop was wired
+end to end and structurally incapable of producing a number.
+
+The root cause was one hop earlier than the symptom and is a Pydantic footgun:
+**`TarApprovedEvent` did not DECLARE `run_id`, `strategy` or `entry_context`.**
+`TarSubmittedEvent` declared all three and `cro_agent` passed all three to the
+`TarApprovedEvent(...)` constructor — but Pydantic v2 IGNORES unknown keyword
+arguments by default, so nothing raised. The CRO believed it forwarded them; the
+event that came out simply did not have them.
+
+It stayed invisible because every reader is defensive: `getattr(tar, "strategy",
+None)` in `execution_agent`, and the same in the position monitor. **A defensive
+read of a field that does not exist is indistinguishable from a legitimate
+absence** — the whole chain reported None and looked like it was working. The
+frontend panel said "No strategy has closed a trade yet", which is exactly what an
+honest, empty, WORKING loop also says.
+
+Two more drops fixed on the way, both found by following the same thread:
+
+* THE CLOSING ROW NEVER RECORDED ATTRIBUTION AT ALL. `position_monitor`'s closing
+  INSERT named only ten columns; `strategy`/`run_id`/`entry_context` were absent
+  from the SQL. Now carried on `_Tracked` from the approval and written on close.
+  A MANUAL position closes with strategy NULL rather than a fabricated one — a
+  human's click was not chosen by an algorithm, and crediting one would poison the
+  measurement it feeds.
+
+* `stop_order_id` WAS NEVER PERSISTED. `save_watch_list` binds `row.get(f) for f
+  in _FIELDS`, and `_watch_rows` never emitted `stop_order_id` — so the column was
+  written NULL on every row despite the schema comment explaining precisely why it
+  had to survive a restart (to CANCEL the orphaned venue stop). Same class of bug:
+  a field named where it is consumed and silently never produced.
+  `tests/test_close_attribution.py::test_every_persisted_field_is_actually_emitted_by_the_watch_rows`
+  now asserts `_FIELDS` is a subset of `_watch_rows()` keys so a future addition
+  to one cannot silently NULL out the other.
+
+`tests/test_close_attribution.py` pins the whole chain, including that
+`OrderFilledEvent` is the LAST place attribution could be dropped (it does not
+carry these fields, so the TAR handler keeping them in `_pending` is load-bearing,
+not incidental).
+
+### BTC is a SIGNAL, not a tradeable instrument — and those are different sets
+
+The operator asked not to trade BTC/USDT. On the live ledger it earned that:
+
+    BTC/USDT    2 closed trades, 0 wins, -43.59
+    SOL/USDT   10 closed trades, 3 wins, -13.42
+
+Two of twelve trades produced 76% of the total loss. Two trades cannot prove BTC
+is a bad instrument and `tradeable_universe` does not claim they do — it makes the
+operator's preference a configured fact.
+
+**The important design point: this could NOT be done by removing BTC from a watch
+list.** BTC is the market's beta. `triggers.py` attributes regime triggers to
+`BTC_SYMBOL` because "the underlying condition is market-wide", `REGIME_WATCH`
+polls it, and `market_context` now reads it as the benchmark for every OTHER
+symbol's relative strength. Deleting it as an OBSERVED symbol would blind every
+alt decision. So two questions that were answered by one list are now separate:
+
+    OBSERVED   what needs prices and context?   (BTC stays in — live_market_data,
+                                                  REGIME_WATCH, the benchmark)
+    TRADEABLE  what may we open a position in?   (BTC excluded — the new module)
+
+`backend/services/tradeable_universe.py`. `UNTRADEABLE_SYMBOLS` env var, default
+`BTC/USDT`, read at CALL time (a frozen-at-import list is the `simulation_mode`
+bug again — the operator excludes an instrument, is told it worked, and the agent
+keeps trading it until a restart). The blocklist normalises the `:USDT` perpetual
+suffix, so a list matching one spelling is not bypassed by whichever hop resolves
+the symbol first.
+
+The gate is in `risk_gateway.gate`, placed AFTER the EXIT branch (invariant 4 — a
+position in a now-excluded symbol must still be closable) and FIRST among the
+entry checks (a refusal that is a property of the instrument must not be reachable
+by making the trade smaller). `analysis.subscribe_to_triggers` also skips the full
+24-node run early for an untradeable symbol WITH NOTHING OPEN in it — pure cost
+saving; the gate is what makes it correct, and a held position still runs so an
+EXIT can be reached.
+
+### Higher-timeframe alignment — the fetched-but-unused signal
+
+`validate_market_data` has fetched 15m, 1h and 4h since the beginning, and
+`_multi_timeframe_trend` computes their consensus into
+`TechnicalAnalysis.multi_timeframe_trend` — where `build_entry_context` RECORDED
+it and nothing GATED on it. The comment on `TIMEFRAMES` even said the higher ones
+exist "to cut conviction on a counter-trend read". Nothing cut anything.
+
+The ledger is the argument. 12 closed trades, 3 wins (25%), payoff 2.27:1 —
+break-even needs 30.6%. The 9 losses average -26.04 and are tightly clustered:
+stop-outs at a consistent risk, not disasters. All 3 wins landed in one 30-minute
+window on one day. That is a trend-follower run in conditions that are not
+trending, and the lever is SELECTIVITY.
+
+`backend/algorithms/market_context.py` (pure, deterministic, no I/O — reads
+candles `validate_market_data` already fetched; a node fetching its own data is
+not replay-safe, Section 39.4). `assess(direction, context)` blocks a CLEAR
+counter-trend entry — a 15m long into a 1h/4h downtrend — in `risk_gateway.gate`.
+
+Two deliberate non-blocks, and the reasoning differs from the volatility gate
+right beside it: UNKNOWN (fewer than two timeframes measurable) and MIXED (1h and
+4h disagree) both pass. Volatility feeds sizing and stop distance, so unmeasured
+volatility means the loss cannot be bounded at all — a hard block. An unmeasured
+higher-timeframe trend costs conviction, not bounding: the stop is still computed,
+enforced and sized against measured ATR. Blocking on it would halt trading
+whenever a 4h fetch was slow, and refusing every MIXED state refuses the turns
+this strategy exists to trade.
+
+`market_context.build` also reads BTC as the benchmark (fetched onto
+`MarketSnapshot.benchmark_candles` at the single fetch point) and computes the
+coin's relative strength. The context is appended to the entry-context snapshot —
+AFTER the existing fields, so every frontend parser regex still matches — so the
+learning loop can later answer whether the gate was worth having.
+
+`REQUIRE_HTF_ALIGNMENT` (env, default on) gates it; the context is BUILT
+unconditionally so turning the gate off does not also stop recording the data that
+would judge it. Gate, universe and benchmark are pinned by
+`tests/test_market_context.py`.
+
+**ALL THREE ARE HYPOTHESES.** They will reduce the number of trades and should
+raise the win rate. Whether they raise EXPECTANCY — the number that actually
+matters — depends on how many removed trades would have won, and 12 trades cannot
+say. The learning loop, now that it records a strategy, is what will. A win rate
+targeted directly (a tiny target, a huge stop) is trivially reachable and reliably
+loses money; these raise win rate as a CONSEQUENCE of selectivity, which is the
+only version worth having.
+
+### The learning kept repeating one canned lesson — three causes, all fixed
+
+The operator saw the same line on every loss:
+
+    "Check if losses cluster in this regime before changing weighting."
+
+That is `reflection.rule_based_lesson`'s FALLBACK — reached only when the model
+call did not produce an answer. So the learning was not shallow; the model was
+not being reached, or was reasoning over almost nothing. Three causes:
+
+**1. A MODEL DIED AND NOTHING SAID SO.** `openai/gpt-oss-120b` reached end of life
+on 2026-09-03 and the NVIDIA endpoint returns **HTTP 410 Gone**. It was the
+NARRATIVE tier AND the consultation model. So from that date the thesis narrative
+and every second opinion had been silently failing to their fallbacks. A live
+probe of the catalog found it gone; `nvidia/nemotron-3-super-120b-a12b` replaced
+it — a 120b-class NVIDIA reasoning model, verified live at ~2.9s, producing real
+causal analysis. **Verify a model is alive before trusting a config that names
+it** — the provider fails closed, so a dead model looks exactly like a quiet
+degradation. There are no hardcoded model ids in code; `.env` is the only place.
+
+**2. NOTHING RATE-LIMITED THE KEY.** `budget.py` caps calls PER RUN (loop
+protection) and says so: "Rate limiting across runs is the trigger layer's job."
+But the trigger layer limits trade ANALYSIS, not model CALLS, and the NVIDIA free
+tier is 40 requests/minute PER KEY, shared by the analysis narrative, the
+consultation panel and the reflection. A busy minute returned HTTP 429, and 429
+fell straight through to the canned fallback. `backend/llm/rate_limit.py` is a
+process-wide sliding-window limiter keyed by the API key (the main provider and
+the panel share one NVIDIA key, so they must share one bucket — a limiter per
+provider-id would let them spend 80/min between them). It WAITS for a slot rather
+than failing; every LLM call here is off the trading critical path (the trade is
+on the bus at ~4.8s, narration and reflection run after), so a wait costs latency
+on prose, never on a fill. `provider.complete` acquires a slot before the request
+and, on a 429 from usage this process cannot see (another client on the same key),
+honours `Retry-After` for ONE retry. `LLM_MAX_RPM` configures it. A live probe of
+kimi-k3 on 2026-09-05 returned 429 immediately — the limit is real and was being
+hit. `tests/test_rate_limit.py` pins it.
+
+**3. THE REFLECTION PROMPT WAS THIN.** Even when the model was reached it saw only
+symbol, side, pnl and exit reason — NOT the RSI/ATR/structure/regime/HTF-trend/BTC
+snapshot the Risk Gateway records at entry. A model given only the outcome cannot
+tell "stopped inside the noise band in a range" from "counter-trend against the
+4h", so it retreats to a category. Three fixes: `PositionClosedEvent` now carries
+`entry_context`/`strategy`/`run_id` (the receipt read them off an event that never
+had them — `strategies` was even published empty, so the deterministic attribution
+never fired); the lesson prompt includes the entry context and demands a specific
+CAUSE, naming the old canned line as what NOT to produce; and the lesson runs on
+the REASONING tier, not NARRATIVE — connecting an outcome to its context is the
+judgment Section 39.6 reserves the strongest model for, and it is off the critical
+path so the slower tier costs nothing a fill waits on. The contract is unchanged:
+the node still writes only `reflection_lesson` and cannot reach the calibration
+delta that feeds sizing.
+
+Verified end to end on 2026-09-05 against the fixed config — a losing SOL long
+with full entry context produced, from the model:
+
+    "The trade was stopped out because a long was entered while the 1h and 4h
+    trends and the 15m structure were bearish, putting the position against the
+    dominant direction; in a low-volatility range regime the price drifted down
+    ~0.6% (~1 ATR) and hit the stop-loss. This hypothesis can be checked by
+    comparing the stop-out rate of TrendFollowing longs taken when both
+    higher-timeframe trend and 15m structure are bearish versus when they are not."
+
+`tests/test_reflection_analysis.py` pins that the context reaches the prompt, that
+a missing context is stated rather than faked (invariant 6), and that the tier is
+REASONING.
+
+One model the operator asked for was NOT usable: `writer/palmyra-fin-70b-32k` (a
+finance model) is in the catalog but returns 404 "Not found for account" — it is
+not enabled on this key. If it is ever enabled, it is a natural fit for the
+consultation slot (a genuinely different, finance-specialised prior).
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -775,7 +1482,7 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 29 files / 439 tests, must all pass
+npm run test                        # vitest; 31 files / 457 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
@@ -783,7 +1490,7 @@ npm run build                       # catches route/provider issues tsc won't
 Vitest run alongside `tsc` or `next build` on a memory-constrained
 machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (29/29, 439/439, verified over five consecutive runs). The
+deterministic (31/31, 457/457, verified over five consecutive runs). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing

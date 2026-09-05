@@ -75,6 +75,13 @@ logger = logging.getLogger(__name__)
 TIMEFRAMES = ("15m", "1h", "4h")
 PRIMARY_TIMEFRAME = "15m"
 
+# The market's beta. Every alt follows it, so its trend is context for a decision
+# on any OTHER symbol. Deliberately the same constant `triggers.BTC_SYMBOL` uses:
+# BTC is the benchmark whether or not it is itself tradeable, and
+# `tradeable_universe` excluding it as an INSTRUMENT must not remove it as a
+# SIGNAL. That separation is the whole point of that module.
+BENCHMARK_SYMBOL = "BTC/USDT"
+
 # Minimums, and what each one gates. Stated as constants because a node that
 # silently proceeds on thin data produces a confident-looking regime derived
 # from almost nothing.
@@ -155,6 +162,21 @@ async def validate_market_data(state: TradingState) -> Optional[Dict[str, Any]]:
     # depends on for candles.
     book_bids, book_asks, tape, headlines, feed_problems = await _fetch_specialist_feeds(symbol)
 
+    # THE BENCHMARK, fetched at the single fetch point rather than by whoever
+    # needs it. Never fatal: BTC context sharpens a decision and no gate treats
+    # its absence as a reason to refuse (see `market_context.assess`).
+    benchmark_candles: Dict[str, List[Dict[str, Any]]] = {}
+    benchmark_symbol: Optional[str] = None
+    if symbol != BENCHMARK_SYMBOL:
+        benchmark_symbol = BENCHMARK_SYMBOL
+        for tf in TIMEFRAMES:
+            try:
+                bars = await fetch_klines(BENCHMARK_SYMBOL, tf, limit=120)
+                if bars:
+                    benchmark_candles[tf] = bars
+            except Exception as e:  # noqa: BLE001
+                feed_problems["benchmark"] = f"{BENCHMARK_SYMBOL} {tf} klines failed: {e}"
+
     snapshot = MarketSnapshot(
         symbol=symbol,
         price=price if price > 0 else None,
@@ -167,6 +189,8 @@ async def validate_market_data(state: TradingState) -> Optional[Dict[str, Any]]:
         order_book_asks=book_asks,
         trade_tape=tape,
         headlines=headlines,
+        benchmark_symbol=benchmark_symbol,
+        benchmark_candles=benchmark_candles,
         feed_problems=feed_problems,
     )
 

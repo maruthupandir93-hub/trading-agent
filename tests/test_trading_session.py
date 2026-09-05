@@ -258,11 +258,63 @@ def test_equity_is_none_when_a_position_cannot_be_priced(monkeypatch):
     assert asyncio.run(ts.current_equity("paper")) is None
 
 
-def test_equity_marks_open_positions_at_the_live_price(monkeypatch):
+def test_equity_is_free_cash_plus_locked_margin_plus_unrealized(monkeypatch):
+    """THIS TEST USED TO ASSERT THE BUG.
+
+    It expected `cash + qty * price` — 500 + 2*100 = 700 — which is only correct
+    at 1x leverage. The book deducts MARGIN from cash, so cash is FREE cash;
+    adding the whole notional back double-counts the leveraged part. At 10x a
+    7,000 position funded by 700 of margin reported 6,300 of equity that did not
+    exist, and a session compares its target against this number.
+
+    So: 500 free + 200 locked + 20 unrealized = 720.
+    """
+    async def fake_portfolio():
+        return {
+            "paper": {
+                "cash": 500.0,
+                "positions": [{
+                    "symbol": "BTC/USDT", "qty": 2.0, "avgCost": 100.0,
+                    "marginLocked": 200.0, "side": "buy",
+                }],
+            }
+        }
+
+    monkeypatch.setattr("backend.services.portfolio_store.get_portfolio", fake_portfolio)
+    monkeypatch.setattr("backend.services.market_data.get_price", lambda s: 110.0)
+
+    assert asyncio.run(ts.current_equity("paper")) == pytest.approx(720.0)
+
+
+def test_equity_values_a_SHORT_in_the_right_direction(monkeypatch):
+    """`qty * price` ignored direction, so a short moving AGAINST the operator
+    read as equity going up — and a session would have reported progress toward
+    its target while losing money."""
+    async def fake_portfolio():
+        return {
+            "paper": {
+                "cash": 500.0,
+                "positions": [{
+                    "symbol": "BTC/USDT", "qty": 2.0, "avgCost": 100.0,
+                    "marginLocked": 200.0, "side": "sell",
+                }],
+            }
+        }
+
+    monkeypatch.setattr("backend.services.portfolio_store.get_portfolio", fake_portfolio)
+    # Price UP is a LOSS on a short: 500 + 200 - 20 = 680.
+    monkeypatch.setattr("backend.services.market_data.get_price", lambda s: 110.0)
+
+    assert asyncio.run(ts.current_equity("paper")) == pytest.approx(680.0)
+
+
+def test_equity_refuses_a_position_with_no_cost_basis(monkeypatch):
+    """Unrealized P&L needs an entry price. Valuing it at notional instead — what
+    the old formula did — reports a losing position as flat."""
     async def fake_portfolio():
         return {"paper": {"cash": 500.0, "positions": [{"symbol": "BTC/USDT", "qty": 2.0}]}}
 
     monkeypatch.setattr("backend.services.portfolio_store.get_portfolio", fake_portfolio)
     monkeypatch.setattr("backend.services.market_data.get_price", lambda s: 100.0)
 
-    assert asyncio.run(ts.current_equity("paper")) == pytest.approx(700.0)
+    assert asyncio.run(ts.current_equity("paper")) is None

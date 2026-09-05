@@ -268,6 +268,11 @@ class ExecutionService:
             tab=event.tab,
             take_profit=event.take_profit,
             entry_price=event.entry_price,
+            # Carried so the fill can be traced back to the 24-node run that
+            # decided it. Without this the trade log records WHAT happened with
+            # no link to WHY.
+            run_id=getattr(event, "run_id", None),
+            entry_context=getattr(event, "entry_context", None),
         )
         # MessageBus.publish takes (topic, payload) — see agent_base.publish.
         await get_message_bus().publish("TAR_SUBMITTED", tar)

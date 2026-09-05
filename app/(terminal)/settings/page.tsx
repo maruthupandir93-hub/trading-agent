@@ -19,6 +19,7 @@ import { useAppState } from '@/components/AppState';
 import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
 import { ResetPaperBookPanel } from '@/components/operator/ResetPaperBookPanel';
+import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
@@ -248,6 +249,11 @@ export default function SettingsPage() {
           there is no chat at all, and no server-side fallback.
         </div>
       </Card>
+
+      {/* Directly under Trading Mode: which exchange the agent trades on is the
+          same class of decision as whether it trades for real, and reading them
+          together is how an operator knows what the next order actually does. */}
+      <VenueSwitchPanel />
 
       {/* Housed here, beside the live-trading toggle, because this is already the
           page for controls that change state irreversibly rather than display it. */}

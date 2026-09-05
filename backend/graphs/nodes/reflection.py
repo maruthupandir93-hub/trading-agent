@@ -194,21 +194,33 @@ def classify_outcome(state: TradingState) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _LESSON_SYSTEM_PROMPT = (
-    "You write one lesson from a trade that has ALREADY closed. You are not "
-    "deciding anything and no trade depends on your answer.\n"
+    "You are a professional futures trading analyst reviewing ONE trade that has "
+    "ALREADY closed. You are not deciding anything and no trade depends on your "
+    "answer — your job is to name the most likely CAUSE of this outcome, precisely "
+    "enough that someone could check it against history.\n"
+    "\n"
+    "You are given the entry context: the indicators, market structure, regime, "
+    "volatility, higher-timeframe trend and BTC benchmark that were true at entry, "
+    "plus how the trade exited. USE THEM. A good analysis connects the outcome to "
+    "something specific in that context.\n"
+    "\n"
     "Rules:\n"
     "- Use ONLY the facts supplied. Never introduce an indicator, price, level or "
-    "market condition that is not in the input.\n"
-    "- Anything marked 'unavailable' is UNKNOWN. Say it is unknown. Never treat "
-    "an unavailable execution score as a good or bad fill, and never guess why.\n"
-    "- One lesson, and it must be TESTABLE — a specific claim someone could "
-    "check against history. 'Manage risk better' is not a lesson. 'Trend entries "
-    "taken within 30 minutes of a funding flip lost more often' is.\n"
-    "- A single trade is weak evidence. Say what should be CHECKED, not what "
-    "should be changed.\n"
+    "market condition that is not in the input. If a fact you would need is "
+    "missing, say the analysis is limited by its absence — do not invent it.\n"
+    "- Anything marked 'unavailable' or 'not recorded' is UNKNOWN. Say so. Never "
+    "treat an unavailable execution score as a good or bad fill.\n"
+    "- Name the LIKELY CAUSE, not a generic category. Bad: 'losses cluster in this "
+    "regime'. Good: 'stopped out 0.6% below entry while 15m ATR was ~0.5%, so the "
+    "stop sat inside the noise band' or 'a long taken against a 4h downtrend — the "
+    "higher-timeframe context disagreed with the entry'.\n"
+    "- Make it TESTABLE: a claim that could be checked across similar trades.\n"
+    "- A single trade is weak evidence. Frame the cause as a hypothesis to CHECK, "
+    "not a change to make.\n"
     "- Never recommend a change to position size, leverage, or which strategy is "
     "enabled. Those are not yours to propose.\n"
-    "- 1 to 3 sentences. No preamble, no headings, no restating the numbers back."
+    "- 2 to 4 sentences. Lead with the cause. No preamble, no headings, no "
+    "restating the numbers back."
 )
 
 
@@ -258,6 +270,21 @@ def _lesson_prompt(state: TradingState, reflection: TradeReflection) -> str:
         "Deterministic attribution: "
         + ("; ".join(reflection.attribution) if reflection.attribution else "none"),
     ]
+
+    # THE ENTRY CONTEXT — the whole reason a real cause can be named instead of a
+    # template. This is the snapshot the Risk Gateway recorded at decision time:
+    # RSI, ATR, structure trend, regime, volatility percentile, higher-timeframe
+    # trend and the BTC benchmark. Absent only on trades that predate the snapshot
+    # or on manual positions, and said plainly when so rather than faked.
+    entry_context = receipt.get("entry_context")
+    if entry_context:
+        lines.append(f"Entry context (what the agent saw): {entry_context}")
+    else:
+        lines.append(
+            "Entry context: NOT RECORDED for this trade (it predates the snapshot "
+            "or was opened manually). Base the analysis on price action and exit "
+            "reason alone, and say the indicator context was unavailable."
+        )
 
     memory = state.get("memory_context")
     if memory is not None:
@@ -316,9 +343,16 @@ async def write_lesson(state: TradingState) -> Dict[str, Any]:
     result = await provider.complete(
         system=_LESSON_SYSTEM_PROMPT,
         user=_lesson_prompt(state, reflection),
-        tier=ModelTier.NARRATIVE,
-        # 300 tokens of LESSON, plus scratchpad room. See `request_budget`.
-        max_tokens=request_budget(300),
+        # REASONING tier, not NARRATIVE. This is the analytical judgment the
+        # operator is asking for — connecting an outcome to the entry context is
+        # exactly the "where judgment actually matters" that Section 39.6 reserves
+        # the strongest model for. It runs after the position has closed, entirely
+        # off the trading critical path, so the slower tier costs nothing a fill
+        # waits on. Pair it with a finance-capable model via LLM_MODEL_REASONING.
+        tier=ModelTier.REASONING,
+        # 400 tokens of analysis (2-4 sentences of real causal reasoning), plus
+        # the reasoning model's scratchpad room. See `request_budget`.
+        max_tokens=request_budget(400),
         temperature=DEFAULT_TEMPERATURE,
     )
 

@@ -686,13 +686,30 @@ def test_a_broken_stream_yields_an_error_event_rather_than_raising():
 
 
 def test_streaming_is_separate_from_the_invoking_runners():
-    """`ainvoke` returns a final state and `astream` returns a sequence of updates.
-    One function doing both would return a union every caller has to branch on."""
+    """An invoking runner returns a FINAL STATE; a streaming runner yields updates.
+
+    One function doing both would return a union every caller has to branch on.
+
+    THIS TEST USED TO ASSERT `"astream" not in` THE RUNNER'S SOURCE, and that was
+    checking the implementation instead of the property. `run_analysis_graph` now
+    consumes `astream` internally so it can publish the execution plan the moment
+    the Risk Gateway produces one, rather than waiting ~18s for two LLM nodes that
+    only write prose (see `tests/test_analysis_latency.py`). It still returns a
+    single dict, so it is still an invoking runner to every caller — which is the
+    thing worth protecting.
+
+    So the assertion is now on the CONTRACT: `stream_run` is an async generator,
+    `run_analysis_graph` is not.
+    """
     import inspect
 
     from backend.graphs import analysis, runtime
 
-    assert inspect.isasyncgenfunction(runtime.stream_run)
-    assert "astream" not in inspect.getsource(analysis.run_analysis_graph), (
-        "the invoking runner must stay an invoking runner"
+    assert inspect.isasyncgenfunction(runtime.stream_run), (
+        "the streaming runner must yield updates"
     )
+    assert not inspect.isasyncgenfunction(analysis.run_analysis_graph), (
+        "the invoking runner must return a final state, not yield a sequence — "
+        "otherwise every caller has to branch on which it got"
+    )
+    assert inspect.iscoroutinefunction(analysis.run_analysis_graph)

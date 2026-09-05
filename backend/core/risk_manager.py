@@ -102,31 +102,120 @@ def calculate_atr(klines: List[Dict[str, Any]], period: int = 14) -> float:
     recent_trs = true_ranges[-period:]
     return sum(recent_trs) / len(recent_trs) if recent_trs else 0.0
 
-def calculate_position_size(equity: float, price: float, atr: float, risk_per_trade_percent: float = 0.02) -> float:
-    """
-    Volatility-Based Sizing Agent:
-    Calculates the exact quantity to buy so that if the Stop Loss (1.5 * ATR) is hit,
-    the account only loses `risk_per_trade_percent` of total equity.
+# The most MARGIN a single position may lock, as a fraction of equity.
+#
+# THIS REPLACED A NOTIONAL CAP THAT SILENTLY OVERRODE RISK SIZING ON EVERY TRADE.
+# The old rule was `max_qty = equity * 0.5 / price` — half the account's NOTIONAL,
+# ignoring leverage entirely. Measured against the operator's live ledger it bound
+# on every single trade, by roughly 6x:
+#
+#     SOL at 100, ATR 0.43, 1.5x ATR stop, 2% risk
+#     risk-based qty  310    ->  capped to  50    (every trade was ~$5,000)
+#
+# Two consequences, and the second is the dangerous one:
+#
+#   1. `RISK_PER_TRADE` did nothing. The knob an operator reaches for to tune
+#      risk was disconnected; actual risk was ~0.3% while the setting said 2%.
+#   2. WIDENING THE STOP WOULD HAVE INCREASED RISK INSTEAD OF HOLDING IT. Risk
+#      sizing shrinks quantity as the stop widens, which keeps dollar risk
+#      constant. A fixed cap does not: same size over twice the distance is twice
+#      the loss. Going 1.5 -> 3.0 ATR under the old cap doubled risk per trade
+#      from $32 to $64 while looking like a safety improvement.
+#
+# So the cap is now on MARGIN, which is what actually leaves the account, and it
+# is expressed per position. It still exists — an unbounded risk sizer will
+# happily demand $31,000 of notional on a $10,000 account — but it no longer
+# masquerades as the risk setting.
+MAX_MARGIN_FRACTION_PER_TRADE = 0.20
+
+
+def position_size_detail(
+    equity: float,
+    price: float,
+    atr: float,
+    risk_per_trade_percent: float = 0.02,
+    leverage: float = 1.0,
+    stop_multiplier: float = None,
+) -> Dict[str, Any]:
+    """Size a position, and say WHY it came out that size.
+
+    Returns the risk-based quantity, the margin cap, which one won, and the
+    resulting dollar risk. The caller logs it when the cap binds — a size that
+    silently ignores the risk setting is how `RISK_PER_TRADE` came to mean
+    nothing for months.
     """
     if atr <= 0 or price <= 0:
-        return 0.0
+        return {
+            "qty": 0.0, "riskBasedQty": 0.0, "maxQtyByMargin": 0.0,
+            "capBound": False, "dollarRisk": 0.0,
+            "reason": f"unusable inputs (atr={atr}, price={price})",
+        }
+
+    multiplier = ATR_STOP_MULTIPLIER if stop_multiplier is None else stop_multiplier
+    stop_loss = price - (atr * multiplier)
+    stop_distance = price - stop_loss
 
     # Delegates the risk-per-unit arithmetic to
     # `algorithms/risk.volatility_adjusted_size` instead of repeating it. Both
     # functions existed and computed the same thing independently — the library
     # one had no callers at all (spec Section 20: "never duplicate logic").
-    stop_loss = price - (atr * ATR_STOP_MULTIPLIER)
-    qty = volatility_adjusted_size(
+    risk_qty = volatility_adjusted_size(
         equity=equity,
         risk_fraction=risk_per_trade_percent,
         entry_price=price,
         stop_loss=stop_loss,
     )
 
-    # Sanity check: don't allow buying more than 50% of buying power in a single trade
-    max_qty_by_cash = (equity * 0.5) / price
+    # Margin, not notional: at 5x a $5,000 position locks $1,000. Capping the
+    # notional instead made the ceiling 5x tighter than intended at 5x leverage,
+    # and 20x tighter at 20x — the cap got stricter exactly as leverage rose.
+    lev = leverage if leverage and leverage > 0 else 1.0
+    max_notional = equity * MAX_MARGIN_FRACTION_PER_TRADE * lev
+    max_qty_by_margin = max_notional / price
 
-    return min(qty, max_qty_by_cash)
+    qty = min(risk_qty, max_qty_by_margin)
+    cap_bound = max_qty_by_margin < risk_qty
+
+    return {
+        "qty": qty,
+        "riskBasedQty": risk_qty,
+        "maxQtyByMargin": max_qty_by_margin,
+        "capBound": cap_bound,
+        # What this position actually loses if the stop is hit, in dollars. The
+        # number the operator cares about and the one that was never reported.
+        "dollarRisk": qty * stop_distance,
+        "stopDistance": stop_distance,
+        "stopMultiplier": multiplier,
+        "reason": (
+            f"margin cap bound: risk sizing wanted {risk_qty:.6g} but "
+            f"{MAX_MARGIN_FRACTION_PER_TRADE:.0%} of equity at {lev:g}x allows "
+            f"{max_qty_by_margin:.6g}"
+        ) if cap_bound else "risk-based",
+    }
+
+
+def calculate_position_size(
+    equity: float,
+    price: float,
+    atr: float,
+    risk_per_trade_percent: float = 0.02,
+    leverage: float = 1.0,
+    stop_multiplier: float = None,
+) -> float:
+    """Quantity to trade so a stop-out costs `risk_per_trade_percent` of equity.
+
+    Thin wrapper over `position_size_detail`, kept because several call sites and
+    tests want a plain float. Callers that need to know whether the margin cap
+    overrode risk sizing should use the detailed form.
+    """
+    return position_size_detail(
+        equity=equity,
+        price=price,
+        atr=atr,
+        risk_per_trade_percent=risk_per_trade_percent,
+        leverage=leverage,
+        stop_multiplier=stop_multiplier,
+    )["qty"]
 
 
 def calculate_dynamic_risk(
@@ -218,8 +307,30 @@ def kelly_risk_fraction(
         ),
     }
 
-ATR_STOP_MULTIPLIER = 1.5
-ATR_TARGET_MULTIPLIER = 3.0
+# STOP AND TARGET MOVED TOGETHER, AND THE RATIO IS THE POINT.
+#
+# The operator's live ledger showed five of six losses stopped out by ordinary
+# noise. SOL's 15m ATR% is ~0.43%, so a 1.5-ATR stop sat ~0.65% away — INSIDE the
+# band price oscillates through in a sideways market. Measured from the fills:
+#
+#     stopped:  +0.74%  +0.79%  +0.60%  -0.45%  -0.50%   (all ~1-1.8 ATR)
+#     targets:  +1.09%  +1.12%  +1.42%                   (one trending window)
+#
+# So the stop widens to 2.5 ATR, outside that band.
+#
+# THE TARGET HAD TO WIDEN WITH IT. Stop 1.5 / target 3.0 is a 2:1 payoff, and at
+# a 33% win rate 2:1 is roughly break-even. Widening ONLY the stop to 2.5 while
+# leaving the target at 3.0 would have made it 1.2:1 — which at 33% is a reliably
+# losing system. 2.5/5.0 preserves 2:1.
+#
+# THIS IS A HYPOTHESIS, NOT A KNOWN IMPROVEMENT. A wider stop should take fewer
+# noise stop-outs (win rate up); a proportionally wider target is hit less often
+# (win rate down). Which dominates is an empirical question that nine trades
+# cannot answer. It is measurable now — `services/strategy_performance.py` records
+# the realised win rate per strategy, so the next fifty trades will say whether
+# this helped rather than leaving it to opinion.
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 5.0
 
 
 def compute_stop_loss_take_profit(price: float, atr: float, side: str) -> Optional[Dict[str, float]]:

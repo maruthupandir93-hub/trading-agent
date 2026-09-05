@@ -19,6 +19,11 @@ export type Position = {
   symbol?: string;
   qty?: number;
   avgCost?: number;
+  /** Margin actually locked — NOT qty*avgCost once leverage is involved. */
+  marginLocked?: number;
+  /** 'buy' is a long, 'sell' a short. Absent reads as a long, which is what
+   *  rows written before the backend recorded direction were. */
+  side?: 'buy' | 'sell';
   [k: string]: unknown;
 };
 
@@ -52,11 +57,29 @@ export function equity(
   let unmarked = 0;
 
   for (const p of book?.positions ?? []) {
-    const qty = isNum(p.qty) ? p.qty : null;
+    const qty = isNum(p.qty) ? Math.abs(p.qty) : null;
+    const cost = isNum(p.avgCost) ? p.avgCost : null;
     const symbol = typeof p.symbol === 'string' ? p.symbol : null;
     const price = symbol ? prices[symbol] : undefined;
-    if (qty !== null && isNum(price)) marked += qty * price;
-    else unmarked += 1;
+
+    if (qty === null || cost === null || !isNum(price)) {
+      unmarked += 1;
+      continue;
+    }
+
+    // LOCKED MARGIN + UNREALIZED, not the full notional.
+    //
+    // This was `qty * price`, which is only correct at 1x. The book deducts
+    // MARGIN from cash — so cash is FREE cash — and adding the whole notional
+    // back double-counts the leveraged part: at 10x a $7,000 position funded by
+    // $700 showed $6,300 of equity that does not exist, and every percentage
+    // derived from it was wrong in the direction that flatters the account.
+    //
+    // It also ignored DIRECTION, so a short moving against the operator read as
+    // equity going up.
+    const locked = isNum(p.marginLocked) ? (p.marginLocked as number) : qty * cost;
+    const dir = p.side === 'sell' ? -1 : 1;
+    marked += locked + (price - cost) * qty * dir;
   }
 
   return {
@@ -70,12 +93,15 @@ export function equity(
 
 /** Unrealised P&L for one position. `null` when it cannot be marked — never 0. */
 export function unrealised(p: Position, prices: Record<string, number>): number | null {
-  const qty = isNum(p.qty) ? p.qty : null;
+  const qty = isNum(p.qty) ? Math.abs(p.qty) : null;
   const cost = isNum(p.avgCost) ? p.avgCost : null;
   const symbol = typeof p.symbol === 'string' ? p.symbol : null;
   const price = symbol ? prices[symbol] : undefined;
   if (qty === null || cost === null || !isNum(price)) return null;
-  return (price - cost) * qty;
+  // SIGNED BY DIRECTION. A short gains when price falls; the unsigned form
+  // reported a losing short as a winner.
+  const dir = p.side === 'sell' ? -1 : 1;
+  return (price - cost) * qty * dir;
 }
 
 /** Realised P&L totals from the trade log.

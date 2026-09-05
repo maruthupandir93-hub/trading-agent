@@ -3,10 +3,18 @@
 // ---------------------------------------------------------------------
 // /strategies/performance — equity curve, drawdown, per-asset P&L.
 //
-// PER-REGIME AND PER-TIMEFRAME BREAKDOWNS ARE OMITTED. Both need the regime (or
-// timeframe) stamped on each trade record, and trades carry neither. Grouping by a
-// field that does not exist would put every trade in one bucket labelled with a
-// regime it may not have been opened in.
+// PER-STRATEGY IS NOW REAL; PER-TIMEFRAME IS STILL NOT.
+//
+// This used to say both were impossible because trades carried neither field.
+// That is no longer true of the strategy: `trades.strategy` is written by the
+// execution agent, and `StrategyPerformancePanel` reads the aggregate. The regime
+// is recoverable too — `trades.entry_context` records it at decision time — but
+// only for trades taken after that snapshot existed, so a regime breakdown would
+// silently describe a subset. Timeframe is still stamped nowhere.
+//
+// Grouping by a field that does not exist would put every trade in one bucket
+// labelled with a regime it may not have been opened in, which is why the
+// remaining two stay omitted rather than approximated.
 //
 // The equity curve is REALISED only — cumulative pnl over trades that carry one,
 // starting at zero. It is not account equity, and the axis label says so.
@@ -18,6 +26,7 @@ import { Sparkline } from '@/components/ui/Sparkline';
 import { Card, Num, NotAvailable, SectionTitle, StatCard, TermTable } from '@/components/ui/primitives';
 import { equityCurve, groupBy, maxDrawdownPct, realised, type Trade } from '@/lib/api/portfolio';
 import { useSameOrigin } from '@/lib/api/useSameOrigin';
+import { StrategyPerformancePanel } from '@/components/StrategyPerformancePanel';
 
 export default function PerformancePage() {
   const trades = useSameOrigin<{ trades?: Trade[] }>('/api/trades', { intervalMs: 60_000 });
@@ -44,6 +53,12 @@ export default function PerformancePage() {
         <StatCard label="Max drawdown" value={drawdown === null ? <span style={{ color: 'var(--text-muted)' }}>—</span> : <Num value={drawdown} digits={2} suffix="%" />} sub={drawdown === null ? 'needs 2+ trades' : 'of realised curve'} />
         <StatCard label="Curve points" value={<Num value={curve.length} digits={0} />} />
       </div>
+
+      {/* THE LEARNING LOOP. Placed above the curve because it answers a
+          different and more actionable question: the curve says how the account
+          has done, this says which strategy is doing it — and how close each is
+          to having enough evidence to steer the agent's own selection. */}
+      <StrategyPerformancePanel />
 
       <Card>
         <SectionTitle>Realised equity curve</SectionTitle>

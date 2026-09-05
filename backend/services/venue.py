@@ -120,19 +120,45 @@ def configured_venue() -> str:
     return raw
 
 
-def _credentials(venue: str) -> tuple[str, str]:
-    """Per-venue keys, so switching venue does not silently reuse the other's.
+def key_variable(venue: str, *, testnet: bool = False) -> str:
+    """The environment variable this venue/network reads its key from.
 
-    THE VENUE-SPECIFIC NAMES ARE CHECKED FIRST AND THAT MATTERS. Binance and Bybit
-    are different accounts holding different money. A single `API_KEY` pair shared
-    between them would authenticate against whichever venue happened to be
-    configured, and a key that is invalid there fails closed — but a key that is
-    valid on the WRONG venue would trade the wrong account. Keeping them in
-    separate variables makes that impossible to do by accident.
+    Exists so the Settings panel and every error message name the variable the
+    operator must actually set, rather than the mainnet one while the process is
+    signing testnet requests.
     """
-    if venue == "bybit":
-        return (os.getenv("BYBIT_API_KEY", "").strip(), os.getenv("BYBIT_SECRET", "").strip())
-    return (os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_SECRET", "").strip())
+    prefix = "BYBIT" if venue == "bybit" else "BINANCE"
+    return f"{prefix}_TESTNET_API_KEY" if testnet else f"{prefix}_API_KEY"
+
+
+def _credentials(venue: str, *, testnet: bool = False) -> tuple[str, str]:
+    """Per-venue, per-NETWORK keys.
+
+    THE VENUE-SPECIFIC NAMES MATTER. Binance and Bybit are different accounts
+    holding different money. A single `API_KEY` pair shared between them would
+    authenticate against whichever venue happened to be configured, and a key that
+    is invalid there fails closed — but a key that is valid on the WRONG venue
+    would trade the wrong account. Separate variables make that impossible.
+
+    THE NETWORK SPLIT IS THE SAME ARGUMENT ONE LEVEL DOWN. A venue's testnet keys
+    are different credentials against a different account with fake money. Holding
+    both means verifying on testnet does not require pasting testnet keys over the
+    mainnet ones and putting them back afterwards — and that put-them-back step is
+    exactly where a real key ends up in play by accident.
+
+    THE FALLBACK IS DELIBERATELY ONE-DIRECTIONAL. Testnet falls back to the
+    mainnet variable (that is the arrangement that existed before this split, and
+    a mainnet key sent to a sandbox endpoint is REFUSED — it fails closed). Mainnet
+    never reads the testnet variable, so a testnet key can never be reached by a
+    client that is about to spend real money.
+    """
+    prefix = "BYBIT" if venue == "bybit" else "BINANCE"
+    if testnet:
+        key = os.getenv(f"{prefix}_TESTNET_API_KEY", "").strip()
+        secret = os.getenv(f"{prefix}_TESTNET_SECRET", "").strip()
+        if key and secret:
+            return (key, secret)
+    return (os.getenv(f"{prefix}_API_KEY", "").strip(), os.getenv(f"{prefix}_SECRET", "").strip())
 
 
 @dataclass
@@ -173,15 +199,21 @@ class Venue:
 
     def __init__(self, venue_id: Optional[str] = None, *, testnet: Optional[bool] = None):
         self.id = venue_id or configured_venue()
-        api_key, secret = _credentials(self.id)
-        self._api_key = api_key
-        self._secret = secret
 
         # Defaults to testnet: anything that can move real money defaults to the
         # safe value and the operator opts IN to mainnet, never falls into it.
+        #
+        # RESOLVED BEFORE THE CREDENTIALS, because which network this client talks
+        # to decides which key pair it is allowed to read. Reading the keys first
+        # would hand a mainnet key to a sandbox client and vice versa.
         if testnet is None:
             testnet = (os.getenv("USE_TESTNET", "true").lower() == "true")
         self.testnet = testnet
+
+        api_key, secret = _credentials(self.id, testnet=testnet)
+        self._api_key = api_key
+        self._secret = secret
+        self.key_variable = key_variable(self.id, testnet=testnet)
 
         options = self._venue_options()
         klass = getattr(ccxt, self.id)
@@ -226,6 +258,10 @@ class Venue:
         # Symbols whose leverage this process has already set. Re-sending it on
         # every order is a wasted private call, and on Bybit an outright error.
         self._leverage_set: Dict[str, int] = {}
+        # caller's symbol -> this venue's perpetual market key. "" is a cached
+        # NEGATIVE result: the market list does not change while we run, so a
+        # symbol that has no perpetual today will not grow one.
+        self._resolved: Dict[str, str] = {}
 
     # -- config ---------------------------------------------------------
 
@@ -264,7 +300,98 @@ class Venue:
         return self._markets
 
     async def market(self, symbol: str) -> Optional[Dict[str, Any]]:
-        return (await self.markets()).get(symbol)
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return None
+        return (await self.markets()).get(resolved)
+
+    # -- symbol resolution ------------------------------------------------
+    #
+    # THE AGENT SAYS "SOL/USDT" AND THAT KEY IS A SPOT MARKET.
+    #
+    # ccxt's market dict holds BOTH `SOL/USDT` (spot) and `SOL/USDT:USDT` (the
+    # linear perpetual). Every caller in this system passes the first form, and
+    # `check_size` looked it up with a plain `dict.get` — so the filters applied
+    # were the SPOT contract's. Measured against real metadata:
+    #
+    #   Bybit  SOL/USDT   spot minAmount 0.001   vs  swap minAmount 0.1
+    #   Binance BTC/USDT  spot minCost    5.0    vs  swap minCost   50.0
+    #
+    # A size that cleared our check was therefore rejected by the venue, and the
+    # agent's log said only "order rejected".
+    #
+    # WORSE, THE TWO VENUES DISAGREE ABOUT WHERE THE ORDER GOES. ccxt's binance
+    # honours `defaultType: 'future'` inside `market()`, so `SOL/USDT` resolves to
+    # the swap there. Bybit's does NOT — `market('SOL/USDT')` returns the spot
+    # market despite `defaultType: 'swap'`. So the same call placed a perpetual
+    # order on one venue and a SPOT order on the other, while `positionIdx`,
+    # `reduceOnly`, the leverage call, the stop and reconciliation all described a
+    # perpetual.
+    #
+    # Resolution happens HERE rather than at the call sites: a symbol form is a
+    # venue detail, and thirty callers remembering to append `:USDT` is thirty
+    # chances to place a spot order with real money.
+    #
+    # IT NEVER FALLS BACK TO SPOT. A spot fill is a different instrument — no
+    # leverage, no reduce-only close, no position to place a stop against. If the
+    # perpetual cannot be found the honest answer is a refusal.
+
+    async def resolve_symbol(self, symbol: str) -> Optional[str]:
+        """The caller's symbol -> this venue's linear-perpetual market key."""
+        cached = self._resolved.get(symbol)
+        if cached is not None:
+            return cached or None
+
+        markets = await self.markets()
+
+        if ":" in symbol:
+            candidates = [symbol]
+        else:
+            quote = symbol.split("/")[-1] if "/" in symbol else "USDT"
+            # The contract form FIRST. When both exist, the perpetual is the one
+            # this system means.
+            candidates = [f"{symbol}:{quote}", symbol]
+
+        chosen: Optional[str] = None
+        for candidate in candidates:
+            mkt = markets.get(candidate)
+            if mkt is None:
+                continue
+            if mkt.get("swap") or mkt.get("contract"):
+                chosen = candidate
+                break
+            # Metadata that names no type at all is accepted rather than assumed
+            # spot; only an EXPLICIT spot market is refused below.
+            if mkt.get("type") != "spot" and chosen is None:
+                chosen = candidate
+
+        if chosen is None:
+            spot_only = (markets.get(symbol) or {}).get("type") == "spot"
+            logger.error(
+                "%s: %s has no linear perpetual market%s. Refusing rather than falling "
+                "back to spot — a spot fill carries no leverage, cannot be closed "
+                "reduce-only and has no position to rest a stop against.",
+                self.id, symbol, " (only a spot market exists)" if spot_only else "",
+            )
+            self._resolved[symbol] = ""  # negative-cached; the market list is static
+            return None
+
+        self._resolved[symbol] = chosen
+        if chosen != symbol:
+            logger.debug("%s: %s resolves to the perpetual %s", self.id, symbol, chosen)
+        return chosen
+
+    @staticmethod
+    def display_symbol(venue_symbol: str) -> str:
+        """The venue's symbol -> the form the rest of this system uses.
+
+        `SOL/USDT:USDT` -> `SOL/USDT`. Without this, reconciliation compares
+        `SOL/USDT` from the local book against `SOL/USDT:USDT` from the venue,
+        finds no match, and reports every single real position as CRITICAL
+        "missing at venue" — a false alarm on exactly the alert that is supposed
+        to mean a position was liquidated or closed by hand.
+        """
+        return venue_symbol.split(":")[0] if venue_symbol else venue_symbol
 
     # -- sizing ----------------------------------------------------------
 
@@ -280,12 +407,21 @@ class Venue:
         Rounding DOWN to the step is different and is done: it is the venue's own
         granularity, and the alternative is a rejected order.
         """
-        mkt = await self.market(symbol)
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return SizingCheck(
+                ok=False, qty=qty,
+                reason=f"{symbol} has no linear perpetual market on {self.id}",
+            )
+        mkt = (await self.markets()).get(resolved)
         if mkt is None:
             return SizingCheck(ok=False, qty=qty, reason=f"{symbol} is not a market on {self.id}")
 
         try:
-            rounded = float(self.public.amount_to_precision(symbol, qty))
+            # RESOLVED, not the caller's symbol: ccxt rounds to the market it looks
+            # up, and the spot step differs from the perpetual's (Bybit SOL: 0.001
+            # vs 0.1). Rounding to the wrong step is a rejected order.
+            rounded = float(self.public.amount_to_precision(resolved, qty))
         except Exception as exc:
             return SizingCheck(ok=False, qty=qty, reason=f"could not round to the venue's step: {exc}")
 
@@ -464,12 +600,20 @@ class Venue:
             return OrderResult(
                 ok=False,
                 error=(
-                    f"no {self.id} API credentials configured "
-                    f"({'BYBIT' if self.id == 'bybit' else 'BINANCE'}_API_KEY / _SECRET are empty)"
+                    f"no {self.id} API credentials configured for "
+                    f"{'testnet' if self.testnet else 'mainnet'} "
+                    f"({self.key_variable} / its _SECRET are empty)"
                 ),
             )
 
-        check = await self.check_size(symbol, qty, expected_price)
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return OrderResult(
+                ok=False, requested_qty=qty,
+                error=f"{symbol} has no linear perpetual market on {self.id}",
+            )
+
+        check = await self.check_size(resolved, qty, expected_price)
         if not check.ok:
             return OrderResult(ok=False, error=check.reason, requested_qty=qty)
 
@@ -479,12 +623,12 @@ class Venue:
         )
 
         try:
-            order = await self.private.create_order(symbol, "market", side, check.qty, None, params)
+            order = await self.private.create_order(resolved, "market", side, check.qty, None, params)
         except Exception as exc:
             logger.error(
                 "%s: order REJECTED — %s %s %s (reduceOnly=%s, params=%s): %s. "
                 "No position changed; reporting no fill.",
-                self.id, side, check.qty, symbol, reduce_only, params, exc,
+                self.id, side, check.qty, resolved, reduce_only, params, exc,
             )
             return OrderResult(ok=False, error=str(exc), requested_qty=qty, adjusted_qty=check.qty)
 
@@ -523,9 +667,19 @@ class Venue:
         `side` is the EXIT side — sell to close a long.
         """
         if not self.has_credentials():
-            return OrderResult(ok=False, error=f"no {self.id} API credentials configured")
+            return OrderResult(
+                ok=False,
+                error=f"no {self.id} credentials configured ({self.key_variable})",
+            )
 
-        check = await self.check_size(symbol, qty, stop_price)
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return OrderResult(
+                ok=False, requested_qty=qty,
+                error=f"{symbol} has no linear perpetual market on {self.id}",
+            )
+
+        check = await self.check_size(resolved, qty, stop_price)
         if not check.ok:
             return OrderResult(ok=False, error=check.reason, requested_qty=qty)
 
@@ -534,26 +688,48 @@ class Venue:
             side=side, reduce_only=True, hedge=hedge, client_order_id=client_order_id
         )
         try:
-            price_str = self.public.price_to_precision(symbol, stop_price)
+            price_str = self.public.price_to_precision(resolved, stop_price)
         except Exception:
             price_str = stop_price
 
-        if self.id == "binance":
-            order_type = "STOP_MARKET"
-            params["stopPrice"] = price_str
-            # Binance closes the WHOLE position when this fires. Not set here:
-            # `closePosition` and a quantity are mutually exclusive, and the
-            # monitor may legitimately be protecting part of a position.
-        else:
-            order_type = "market"
-            params["stopLoss"] = price_str
-            params["triggerPrice"] = price_str
-            # Mark price, matching how both venues evaluate liquidation. Last-price
-            # triggers can be moved by a thin book on a single print.
+        # `stopLossPrice` is ccxt's UNIFIED stop-loss trigger and is the right
+        # parameter on BOTH venues. From ccxt 4.5's own create_order source:
+        #
+        #   binance  isStopLoss -> uppercaseType becomes 'STOP_MARKET' on a
+        #            contract market and stopPrice = stopLossPrice. Identical to
+        #            spelling those out by hand, which is what this used to do.
+        #   bybit    isStopLossOrder -> DERIVES `triggerDirection` from the order
+        #            side (a sell stop triggers on a fall, a buy stop on a rise)
+        #            and forces reduceOnly.
+        #
+        # THE OLD BYBIT PATH NEVER PLACED AN ORDER AT ALL. It sent `triggerPrice`,
+        # which makes ccxt treat this as a GENERIC trigger order — and a generic
+        # trigger order requires an explicit direction:
+        #
+        #     ArgumentsRequired: bybit stop/trigger orders require a
+        #     triggerDirection parameter, either "ascending" or "descending"
+        #
+        # raised before any request left the process. The handler below caught it
+        # and logged "stop-loss order REJECTED", which reads as the venue refusing
+        # a stop rather than as this process never having asked for one. It also
+        # passed `stopLoss` as a bare string where ccxt expects an object, which
+        # would have attached a SECOND position-level stop on top of the first.
+        #
+        # Both venues omit `stopLossPrice` from the outgoing request, so neither
+        # sees an unknown parameter.
+        order_type = "market"
+        params["stopLossPrice"] = price_str
+        # Trigger on the MARK price on both venues, which is what each evaluates
+        # liquidation against. A last-price trigger can be moved by a thin book on
+        # a single print — exactly the move a stop exists to survive. This was
+        # previously set on Bybit only, leaving Binance stops on last price.
+        if self.id == "bybit":
             params["triggerBy"] = "MarkPrice"
+        else:
+            params["workingType"] = "MARK_PRICE"
 
         try:
-            order = await self.private.create_order(symbol, order_type, side, check.qty, None, params)
+            order = await self.private.create_order(resolved, order_type, side, check.qty, None, params)
         except Exception as exc:
             logger.error(
                 "%s: stop-loss order REJECTED for %s at %s (%s). The position has NO resting "
@@ -579,7 +755,12 @@ class Venue:
         """
         try:
             params = {"category": "linear"} if self.id == "bybit" else {}
-            await self.private.cancel_order(order_id, symbol, params)
+            # Resolved, so the cancel is addressed to the market the order was
+            # placed on. A cancel aimed at the spot symbol does not fail loudly —
+            # it reports "unknown order", which this method treats as success, and
+            # the stop would be left resting on a flat account.
+            resolved = await self.resolve_symbol(symbol) or symbol
+            await self.private.cancel_order(order_id, resolved, params)
             return True
         except Exception as exc:
             message = str(exc).lower()
@@ -588,6 +769,51 @@ class Venue:
                 return True
             logger.warning("%s: could not cancel order %s on %s: %s", self.id, order_id, symbol, exc)
             return False
+
+    async def resting_stops(self, symbol: str) -> Optional[List[Dict[str, Any]]]:
+        """The stop orders currently resting at the venue for `symbol`.
+
+        `None` when the venue could not be asked, a list otherwise — the same
+        None-is-not-empty rule `open_positions` follows, and for the same reason:
+        "no stop is resting" would justify placing another one, and "we could not
+        reach the venue" must never do that. Two live reduce-only stops means the
+        second, after the first fires and flattens, is an order to OPEN the
+        opposite position.
+
+        LISTING THEM IS ITSELF VENUE-SPECIFIC. Binance returns STOP_MARKET orders
+        from a plain `fetch_open_orders`. Bybit keeps conditional orders in a
+        separate book and returns NOTHING for them unless the request asks —
+        `trigger=True`, which ccxt maps to `orderFilter=StopOrder`. Asking Bybit
+        the Binance way answers "no stops are resting" while a stop rests.
+        """
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None or not self.has_credentials():
+            return None
+        try:
+            if self.id == "bybit":
+                orders = await self.private.fetch_open_orders(
+                    resolved, None, None, {"category": "linear", "trigger": True}
+                )
+            else:
+                orders = await self.private.fetch_open_orders(resolved)
+        except Exception as exc:
+            logger.warning("%s: could not list resting orders for %s: %s", self.id, symbol, exc)
+            return None
+
+        out: List[Dict[str, Any]] = []
+        for o in orders or []:
+            trigger = o.get("stopLossPrice") or o.get("triggerPrice") or o.get("stopPrice")
+            if trigger in (None, "", 0):
+                continue  # a plain resting limit order, not a stop
+            out.append({
+                "id": str(o.get("id")) if o.get("id") is not None else None,
+                "side": o.get("side"),
+                "qty": float(o["amount"]) if o.get("amount") else None,
+                "triggerPrice": float(trigger),
+                "reduceOnly": o.get("reduceOnly"),
+                "type": o.get("type"),
+            })
+        return out
 
     # -- account (PRIVATE) ------------------------------------------------
 
@@ -637,8 +863,12 @@ class Venue:
             contracts = p.get("contracts")
             if contracts in (None, "", 0, 0.0):
                 continue  # a flat row, which both venues return for touched symbols
+            venue_symbol = p.get("symbol") or ""
             out.append({
-                "symbol": p.get("symbol"),
+                # The caller's form. Reconciliation keys on this, and the local
+                # book holds "SOL/USDT" while the venue reports "SOL/USDT:USDT".
+                "symbol": self.display_symbol(venue_symbol),
+                "venueSymbol": venue_symbol,
                 "side": p.get("side"),
                 "qty": abs(float(contracts)),
                 "entryPrice": float(p["entryPrice"]) if p.get("entryPrice") else None,

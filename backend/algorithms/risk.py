@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import numpy as np
 
 def half_kelly_criterion(win_prob: float, payoff_ratio: float) -> float:
@@ -122,6 +124,27 @@ def monte_carlo_simulation(
     }
 
 
+# Simulations are drawn in ROW BLOCKS of this many rather than as one matrix.
+#
+# WHY: the vectorised form allocated six full (num_simulations x
+# trades_per_simulation) float64 arrays — the uniform draw, `step`, `equity`,
+# `peak`, `drawdowns`, plus the bool `wins`. At 2000x200 that is ~16 MB of
+# transient allocation per call, and the process was failing on it:
+#
+#     Stress simulation failed for SOL/USDT: Unable to allocate 3.05 MiB for an
+#     array with shape (2000, 200) and data type float64
+#
+# That is not a cosmetic failure. `SimulationAgent` FAILS CLOSED, so an
+# allocation error REJECTS THE TRADE — the OOM was manufacturing rejections.
+#
+# Blocking bounds peak memory at ~6 x block x trades x 8 bytes (about 2 MB at
+# these sizes) regardless of `num_simulations`. `rng.random` fills row-major, so
+# drawing sequential row blocks from one generator yields the SAME numbers as one
+# big draw — the results stay bit-identical, which the determinism tests rely on.
+_SIM_BLOCK_ROWS = 250
+
+
+@lru_cache(maxsize=32)
 def monte_carlo_trade_sequence(
     risk_fraction: float,
     win_prob: float = 0.5,
@@ -145,6 +168,22 @@ def monte_carlo_trade_sequence(
     the 1.5-ATR stop / 3.0-ATR target in `core/risk_manager` implies BEFORE
     costs. Assuming any edge beyond that would make the stress test
     rubber-stamp the strategy it exists to test.
+
+    MEMOIZED, AND THAT IS EXACT RATHER THAN AN APPROXIMATION
+    -------------------------------------------------------
+    This function is SEEDED (`seed=DEFAULT_SEED`) and otherwise pure, so identical
+    arguments produce an identical result — the determinism tests in
+    `tests/test_algorithm_library.py` already assert exactly that. Caching
+    therefore returns the same value the recomputation would have.
+
+    It matters because `SimulationAgent` calls this on EVERY risk evaluation with
+    the same arguments every time: `risk_fraction=settings.RISK_PER_TRADE` plus
+    two module constants. Thousands of times a day it re-derived one number that
+    cannot change, allocating ~16 MB each time — which is what exhausted memory
+    and, because the agent fails closed, turned into rejected trades.
+
+    The returned dict MUST NOT BE MUTATED by callers: with the cache in place they
+    share one object. Every current caller only reads.
     """
     if risk_fraction <= 0 or not (0.0 < win_prob < 1.0) or payoff_ratio <= 0:
         return {
@@ -158,18 +197,35 @@ def monte_carlo_trade_sequence(
         }
 
     rng = np.random.default_rng(seed)
-    # Vectorised: draw all outcomes at once rather than looping in Python.
-    wins = rng.random((num_simulations, trades_per_simulation)) < win_prob
-    step = np.where(wins, 1.0 + risk_fraction * payoff_ratio, 1.0 - risk_fraction)
-    equity = np.cumprod(step, axis=1)
 
-    ruined = np.any(equity < RUIN_EQUITY_FRACTION, axis=1)
-    prob_of_ruin = float(np.mean(ruined))
+    # Still vectorised — just in row blocks, so peak memory does not scale with
+    # `num_simulations`. See `_SIM_BLOCK_ROWS` for why, and why the numbers are
+    # unchanged.
+    ruined_count = 0
+    max_drawdown_sum = 0.0
+    worst_max_drawdown = 0.0
 
-    peak = np.maximum.accumulate(equity, axis=1)
-    drawdowns = (peak - equity) / peak
-    expected_max_drawdown = float(np.mean(np.max(drawdowns, axis=1)))
-    worst_max_drawdown = float(np.max(drawdowns))
+    remaining = num_simulations
+    while remaining > 0:
+        rows = min(_SIM_BLOCK_ROWS, remaining)
+        remaining -= rows
+
+        wins = rng.random((rows, trades_per_simulation)) < win_prob
+        step = np.where(wins, 1.0 + risk_fraction * payoff_ratio, 1.0 - risk_fraction)
+        equity = np.cumprod(step, axis=1)
+
+        ruined_count += int(np.count_nonzero(np.any(equity < RUIN_EQUITY_FRACTION, axis=1)))
+
+        peak = np.maximum.accumulate(equity, axis=1)
+        block_drawdowns = np.max((peak - equity) / peak, axis=1)
+        max_drawdown_sum += float(np.sum(block_drawdowns))
+        # `worst` is the max over the per-path maxima, which is the same value as
+        # the max over every element — a path's worst drawdown is one of its
+        # elements.
+        worst_max_drawdown = max(worst_max_drawdown, float(np.max(block_drawdowns)))
+
+    prob_of_ruin = ruined_count / num_simulations
+    expected_max_drawdown = max_drawdown_sum / num_simulations
 
     return {
         "available": True,

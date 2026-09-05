@@ -57,7 +57,7 @@ export function TradeLogPanel({ tab }: { tab: 'paper' | 'real' }) {
     <div className="flex flex-col gap-1.5">
       {preview.map((t) => (
         <div key={t.id} className="group flex items-center justify-between text-[11px] font-mono rounded px-1 -mx-1 py-0.5 hover:bg-bg3 transition">
-          <Link href={`/log/${t.id}`} className="flex flex-col min-w-0 flex-1">
+          <Link href={`/history/${t.id}`} className="flex flex-col min-w-0 flex-1">
             <span style={{ color: t.side === 'buy' ? 'var(--green)' : 'var(--red)' }}>
               {t.side.toUpperCase()} {t.symbol}
             </span>
@@ -90,7 +90,7 @@ export function TradeLogPanel({ tab }: { tab: 'paper' | 'real' }) {
       ))}
 
       <Link
-        href={`/log?tab=${tab}`}
+        href={`/history?tab=${tab}`}
         className="flex items-center justify-center gap-1 mt-1 pt-2 border-t border-line text-[10px] font-mono text-txt2 hover:text-amber transition"
       >
         View all {rows.length} {tab} trades <Icon name="chevron-down" size={11} className="-rotate-90" />

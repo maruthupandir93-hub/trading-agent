@@ -75,9 +75,23 @@ class Settings:
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 
     # Risk. Fraction of equity risked per trade, used for volatility-based
-    # sizing. Note this is the risk BUDGET, not the position size — a 0.02
-    # value means a trade whose stop is hit loses 2% of equity.
-    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
+    # sizing. This is the risk BUDGET, not the position size: a value of 0.005
+    # means a trade whose stop is hit loses 0.5% of equity.
+    #
+    # 0.5%, LOWERED FROM 2% — AND THE 2% WAS NEVER REAL.
+    #
+    # The old notional cap in `risk_manager` bound on every single trade, so
+    # actual risk was ~0.3% while this said 2%. Measured on the operator's live
+    # ledger: the risk sizer wanted 310 SOL and the cap allowed 50 — a 6x
+    # override, on every trade.
+    #
+    # At 2% with a 2.5-ATR stop the sizer demands ~3x the account in notional, so
+    # the margin cap would simply keep binding and this setting would go on
+    # meaning nothing. 0.5% is the level at which RISK SIZING GOVERNS, which is
+    # what makes a wider stop automatically reduce position size and hold dollar
+    # risk constant. It is also close to the ~0.3% the account has actually been
+    # risking, so this corrects the number's honesty rather than exposure.
+    RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.005"))
 
     # ---------------------------------------------------------------
     # Polymarket prediction-market feed (POLYMARKET_INTEGRATION_PLAN.md).

@@ -262,6 +262,11 @@ class CROAgent(BaseAgent):
             stop_loss=tar.stop_loss,
             take_profit=tar.take_profit,
             tab=tar.tab,
+            # Passed straight through. The CRO decides whether to approve, not
+            # which run this came from.
+            run_id=getattr(tar, "run_id", None),
+            strategy=getattr(tar, "strategy", None),
+            entry_context=getattr(tar, "entry_context", None),
         ))
 
     async def _persist_risk_event(self, tar_id: str, decision: str, rule_breached: str | None, rationale: str):

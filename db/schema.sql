@@ -85,7 +85,14 @@ CREATE TABLE IF NOT EXISTS trades (
   pnl             numeric,               -- realized P&L; only set on a closing/reducing row
   entry_context   text,                  -- indicator/structure snapshot captured at entry (buy rows only)
   debate_id       text,                  -- links to debate_records.id when acted on from the Debate System
-  origin_tag      text CHECK (origin_tag IN ('debate', 'chat-trade-action', 'agent-plan', 'user-command', 'manual-click')),
+  -- WHO originated this fill. MUST list every tag the code actually writes —
+  -- see the CONSTRAINT REPLACEMENT section below for what happens when it does
+  -- not. `agent-close` and `manual-panel` were missing, and a CHECK that omits a
+  -- tag the code emits does not degrade: it REJECTS the INSERT outright.
+  origin_tag      text CHECK (origin_tag IN (
+                      'debate', 'chat-trade-action', 'agent-plan', 'agent-close',
+                      'user-command', 'manual-click', 'manual-panel'
+                  )),
   -- Set only when this row was actually filled by a live Binance/Bybit
   -- order. Absent on paper rows and on manual 'real' ledger entries made
   -- without a connected exchange.
@@ -703,6 +710,12 @@ CREATE TABLE IF NOT EXISTS agent_positions (
   -- portfolio_store already tracks it and releases it proportionally on a
   -- partial close; dropping it here would make a restart over-report free cash.
   margin_locked  numeric,
+  -- WHICH DIRECTION. 'buy' is a long, 'sell' a short. Absent this the book
+  -- could only represent longs, and this agent trades perpetual futures and
+  -- takes shorts — whose P&L is (entry - exit), the opposite sign. Defaults to
+  -- 'buy' so rows written before this column existed read as the longs they
+  -- were, rather than as NULL-direction positions nothing can value.
+  side           text NOT NULL DEFAULT 'buy' CHECK (side IN ('buy', 'sell')),
   updated_at     timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (tab, symbol)
 );
@@ -743,8 +756,26 @@ CREATE TABLE IF NOT EXISTS monitored_positions (
   -- becomes an order to OPEN the opposite position the next time price touches
   -- it. NULL for paper positions, which have no venue order.
   stop_order_id text,
+  -- ATTRIBUTION, carried from the approval so the CLOSING trade row can record
+  -- it. Without these three the learning loop is structurally dead:
+  -- `strategy_performance` selects `WHERE pnl IS NOT NULL AND strategy IS NOT
+  -- NULL`, only closes carry a pnl, and only opens carried a strategy — so the
+  -- intersection was ALWAYS EMPTY and no strategy could ever accumulate a
+  -- measured win rate. Verified against the live database: 12 closed trades,
+  -- every one of them strategy NULL.
+  strategy      text,
+  run_id        text,
+  entry_context text,
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- CREATE TABLE IF NOT EXISTS cannot add a column to a live table, exactly as it
+-- could not widen the origin_tag CHECK. `init_db` applies this file on every
+-- startup, so the ALTERs below are the part that actually reaches an existing
+-- database.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS strategy      text;
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS run_id        text;
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS entry_context text;
 CREATE INDEX IF NOT EXISTS idx_monitored_positions_status ON monitored_positions (status);
 COMMENT ON TABLE monitored_positions IS 'Live stop-loss watch list. Rows are deleted on close — this is what must be watched NOW, not history.';
 
@@ -778,6 +809,71 @@ ALTER TABLE reflections ADD COLUMN IF NOT EXISTS lesson_detail text;
 -- block: without it a restart cannot cancel the stop it left behind, and an
 -- orphaned stop is an order to open the opposite position.
 ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS stop_order_id text;
+
+-- Position direction. See the `agent_positions` CREATE block: a book that cannot
+-- represent a short computes every short's realized P&L with the wrong sign.
+ALTER TABLE agent_positions ADD COLUMN IF NOT EXISTS side text NOT NULL DEFAULT 'buy';
+
+-- The graph run that produced this fill, so a trade can be traced back to the
+-- 24-node reasoning behind it. Without it the trade-detail page's "How this
+-- trade happened" can only show the entry and the outcome — the analysis,
+-- regime and specialist votes exist in `graph_traces` with no way to join.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS run_id text;
+
+-- Which strategy profile chose this trade. Without it no realised win rate can
+-- be attributed, `historical_success_rate` stays None on all nine profiles, and
+-- strategy scoring can never learn from its own results — which is the state the
+-- system shipped in.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy text;
+CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades (strategy) WHERE strategy IS NOT NULL;
+
+
+-- ---------------------------------------------------------------------
+-- CONSTRAINT REPLACEMENT
+--
+-- A CHECK constraint cannot be widened with `ADD ... IF NOT EXISTS`, and
+-- `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists — so a
+-- CHECK written too narrowly the first time stays too narrow forever unless it
+-- is explicitly dropped and re-added. That is what happened here, and it cost
+-- the operator every closing trade they ever made.
+--
+-- `trades_origin_tag_check` listed five tags. The code writes SEVEN. The two
+-- missing ones were the two that matter most:
+--
+--     agent-close    written by `position_monitor._persist_closed_trade` — the
+--                    ONLY writer of a row carrying a realized `pnl`
+--     manual-panel   written by `api/operator_trade` for a manual paper trade
+--
+-- A CHECK that omits a value the code emits does not degrade gracefully. It
+-- REJECTS the INSERT. So every close the agent ever made was rolled back with
+--
+--     new row for relation "trades" violates check constraint
+--     "trades_origin_tag_check"
+--
+-- logged at ERROR and swallowed — deliberately, because by then the position was
+-- already closed and the money had moved, and raising would have made the caller
+-- retry an exit for a flat position. The position closed correctly EVERY TIME;
+-- only the record of it was lost.
+--
+-- The visible symptom was three pages away and looked like arithmetic: `trades`
+-- held nothing but opening fills, so `realised()` found no row carrying a pnl,
+-- and the P&L panel, the win rate, expectancy and max drawdown were all blank on
+-- an account that had traded. Three sessions were spent looking at the
+-- reconstruction logic that reads this table.
+--
+-- Wrapped in a DO block so it is idempotent: `init_db` applies this file on EVERY
+-- startup, and a bare `ADD CONSTRAINT` would fail the second time.
+-- ---------------------------------------------------------------------
+
+DO $$
+BEGIN
+  ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_origin_tag_check;
+  ALTER TABLE trades ADD CONSTRAINT trades_origin_tag_check
+    CHECK (origin_tag IN (
+      'debate', 'chat-trade-action', 'agent-plan', 'agent-close',
+      'user-command', 'manual-click', 'manual-panel'
+    ));
+END $$;
 
 
 -- ============================================================================

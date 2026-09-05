@@ -221,7 +221,10 @@ async def test_a_size_that_rounds_to_zero_is_refused_with_a_readable_reason(size
 async def test_an_unknown_symbol_is_refused_rather_than_ordered(sized):
     check = await sized.check_size("DOGE/USDT", 100.0, 0.15)
     assert check.ok is False
-    assert "not a market" in (check.reason or "")
+    # "no linear perpetual market" rather than "not a market": a symbol may well
+    # exist as a SPOT market here, and saying "not a market" would send the
+    # reader looking for a typo instead of at the resolution.
+    assert "no linear perpetual market" in (check.reason or "")
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +233,13 @@ async def test_an_unknown_symbol_is_refused_rather_than_ordered(sized):
 
 @pytest.mark.asyncio
 async def test_an_order_without_credentials_refuses_and_names_the_variables():
-    result = await venue("bybit").market_order(symbol="BTC/USDT", side="buy", qty=1.0)
+    v = venue("bybit")
+    result = await v.market_order(symbol="BTC/USDT", side="buy", qty=1.0)
     assert result.ok is False
-    assert "BYBIT_API_KEY" in (result.error or "")
+    # The variable for the network IN FORCE. These clients are testnet, and
+    # naming the mainnet key would send the operator to set one nothing reads.
+    assert v.key_variable in (result.error or "")
+    assert v.key_variable == "BYBIT_TESTNET_API_KEY"
 
 
 @pytest.mark.asyncio

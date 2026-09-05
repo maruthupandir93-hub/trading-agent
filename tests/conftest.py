@@ -215,6 +215,24 @@ def candles():
 # A test that WANTS a configured provider still gets one: `monkeypatch.setenv`
 # inside the test runs after this fixture, and `set_provider()` bypasses the
 # environment entirely.
+# ---------------------------------------------------------------------------
+# The tradeable universe must not leak into unrelated tests
+# ---------------------------------------------------------------------------
+#
+# `tradeable_universe` defaults to blocking BTC/USDT, which is the operator's
+# preference and not a property of the risk gateway. Most fixtures in this suite
+# use BTC/USDT as a generic symbol, so without this every one of them would start
+# asserting against an instrument refusal instead of the thing it was written to
+# test — and worse, would start PASSING again if the operator later changed their
+# mind about BTC.
+#
+# Empty means "block nothing", which `blocked_symbols` honours as distinct from
+# the variable being absent. Tests that are ABOUT the universe set it themselves.
+@pytest.fixture(autouse=True)
+def isolate_tradeable_universe(monkeypatch):
+    monkeypatch.setenv("UNTRADEABLE_SYMBOLS", "")
+
+
 @pytest.fixture(autouse=True)
 def isolate_llm_configuration(monkeypatch):
     from backend.llm.provider import reset_provider

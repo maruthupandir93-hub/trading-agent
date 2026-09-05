@@ -463,10 +463,41 @@ class OpenAICompatibleProvider(LLMProvider):
             write=30.0, pool=_CONNECT_TIMEOUT_S,
         )
 
+        # RATE LIMIT, before the request leaves. The free NVIDIA tier is 40/min
+        # per key, and blowing past it returns 429 — which used to fall straight
+        # through to the deterministic floor and make the learning look shallow
+        # when the model simply was not reached. This blocks until a slot is free
+        # rather than failing; every LLM call here is off the trading critical
+        # path (the trade is on the bus long before narration or reflection runs),
+        # so a wait costs latency on prose, never on a fill. See rate_limit.py.
+        from backend.llm.rate_limit import get_rate_limiter, parse_retry_after
+
+        limiter = get_rate_limiter(api_key=self._api_key, provider_id=self._provider_id)
+
         started = time.monotonic()
-        try:
+
+        async def _post_once() -> "httpx.Response":
+            await limiter.acquire()
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
+                return await client.post(url, json=payload, headers=headers)
+
+        try:
+            response = await _post_once()
+            # ONE retry on 429, honouring Retry-After. The limiter keeps US under
+            # the ceiling but cannot see other processes on the same key (a second
+            # backend, a script, the frontend's chat), so a 429 can still arrive.
+            # A single, header-timed retry is the difference between recovering
+            # and a retry storm that keeps the key throttled.
+            if response.status_code == 429:
+                wait = parse_retry_after(response.headers.get("Retry-After"))
+                logger.warning(
+                    "LLM provider %s returned 429 (rate limited); waiting %.1fs and retrying once.",
+                    self._provider_id, wait,
+                )
+                import asyncio as _asyncio
+
+                await _asyncio.sleep(wait)
+                response = await _post_once()
         except httpx.TimeoutException:
             elapsed = (time.monotonic() - started) * 1000
             # The MODEL is named in the message, not just the provider. "nvidia

@@ -18,7 +18,7 @@
 
 import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { usePortfolio } from '@/components/Portfolio';
 import { useReflection } from '@/components/Reflection';
@@ -27,6 +27,8 @@ import { TradeJourney } from '@/components/viz/TradeJourney';
 import { Badge } from '@/components/ui/Badge';
 import { Card, Num, NotAvailable, SectionTitle, StatCard } from '@/components/ui/primitives';
 import { buildJourney } from '@/lib/viz/journey';
+import { annotateTrades, statusBadgeState, statusLabel } from '@/lib/tradeStatus';
+import { parseEntryContext } from '@/lib/viz/entryContext';
 
 // Code-split: HypothesisPanel is shown only after a row is selected, and it pulls
 // in the hypothesis provider and the LLM path. Eager-importing it doubled this
@@ -42,7 +44,30 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
 
-  const trade = tradeLog.find((t) => t.id === params.id);
+  // ANNOTATED OVER THE WHOLE LEDGER, not just this row.
+  //
+  // A fill row does not say whether its position is still open — `trades` is a
+  // fill log, not a position log. Status, hold time, direction and the entry
+  // price all come from walking the ledger, so the annotation has to see every
+  // row even though only one is being displayed.
+  const annotated = useMemo(() => annotateTrades(tradeLog), [tradeLog]);
+  const trade = annotated.find((t) => t.id === params.id);
+
+  // The other half of the round trip: an entry's exit, or an exit's entry.
+  const counterpartId = trade
+    ? (trade.role === 'close' ? trade.openedByTradeId : trade.closedByTradeId)
+    : null;
+  const counterpart = counterpartId ? annotated.find((t) => t.id === counterpartId) ?? null : null;
+
+  // Which of the two legs is the entry and which the exit, so the times below
+  // are labelled by what they MEAN rather than by which row was clicked.
+  const entryLeg = trade ? (trade.role === 'close' ? counterpart : trade) : null;
+  const exitLeg = trade ? (trade.role === 'close' ? trade : counterpart) : null;
+
+  // The snapshot lives on the ENTRY leg — it describes the decision to open, and
+  // an exit is not a decision the gateway made.
+  const entryContextRaw = entryLeg?.entryContext ?? trade?.entryContext ?? null;
+  const context = parseEntryContext(entryContextRaw);
   const reflection = trade ? getReflection(trade.id) : undefined;
   const generating = trade ? isGenerating(trade.id) : false;
 
@@ -86,10 +111,15 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
             {trade.side.toUpperCase()}
           </span>
         </h1>
-        <Badge
-          state={trade.tab === 'real' ? 'CRITICAL' : 'INFO'}
-          label={trade.tab === 'real' ? 'Real ledger' : 'Paper'}
-        />
+        <span className="flex items-center gap-2">
+          {/* Whether this position is still running. The page used to show a
+              price and a quantity with no indication of that at all. */}
+          <Badge state={statusBadgeState(trade)} label={statusLabel(trade)} />
+          <Badge
+            state={trade.tab === 'real' ? 'CRITICAL' : 'INFO'}
+            label={trade.tab === 'real' ? 'Real ledger' : 'Paper'}
+          />
+        </span>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -105,17 +135,81 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
               <span style={{ color: 'var(--text-muted)' }}>&mdash;</span>
             )
           }
-          sub={typeof trade.pnl === 'number' ? undefined : 'not recorded on this row'}
+          sub={
+            typeof trade.pnl === 'number'
+              ? undefined
+              : trade.status === 'OPEN'
+                // Not missing data — an open position HAS no realised result yet.
+                ? 'still running — no result yet'
+                : 'this is the entry leg; the result is on the exit'
+          }
         />
       </div>
 
       <Card>
-        <SectionTitle>Record</SectionTitle>
+        <SectionTitle>Lifecycle</SectionTitle>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11.5px]">
-          <Field label="Timestamp" value={new Date(trade.ts).toLocaleString()} />
+          <Field
+            label="Opened"
+            value={entryLeg ? new Date(entryLeg.ts).toLocaleString() : 'not in this log'}
+            muted={!entryLeg}
+          />
+          <Field
+            label="Closed"
+            value={
+              exitLeg
+                ? new Date(exitLeg.ts).toLocaleString()
+                : trade.status === 'OPEN'
+                  ? 'still open'
+                  : 'not in this log'
+            }
+            muted={!exitLeg}
+          />
+          <Field
+            label="Held for"
+            value={trade.holdMs === null ? 'unknown' : formatHold(trade.holdMs)}
+            muted={trade.holdMs === null}
+          />
+          <Field
+            label="Direction"
+            value={trade.direction === 'unknown' ? 'unknown' : trade.direction}
+            muted={trade.direction === 'unknown'}
+          />
+          <Field
+            label="Entry price"
+            value={entryLeg ? `$${entryLeg.price}` : 'not in this log'}
+            muted={!entryLeg}
+            mono
+          />
+          <Field
+            label="Exit price"
+            value={exitLeg ? `$${exitLeg.price}` : trade.status === 'OPEN' ? 'still open' : 'not in this log'}
+            muted={!exitLeg}
+            mono
+          />
+          <Field label="Origin" value={trade.originTag ?? 'unknown'} muted={!trade.originTag} mono />
+          <Field label="This fill" value={trade.role === 'close' ? 'exit' : 'entry'} />
           <Field label="Trade id" value={trade.id} mono />
+          {counterpart ? (
+            <Field
+              label={trade.role === 'close' ? 'Entry fill' : 'Exit fill'}
+              value={counterpart.id}
+              mono
+            />
+          ) : null}
           {trade.note ? <Field label="Note" value={trade.note} /> : null}
         </div>
+
+        {/* Stated rather than left to be inferred from the dashes above. An
+            unpaired leg is ordinary after a restart or a retention trim, and it
+            is not the same thing as missing data. */}
+        {!counterpart && trade.status === 'CLOSED' ? (
+          <p className="text-[10.5px] mt-2 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+            The other leg of this round trip is not in the current log — ordinary after a
+            restart or a retention trim. The realised P&amp;L above is still authoritative: it
+            was computed at close time against the real entry.
+          </p>
+        ) : null}
       </Card>
 
       <Card>
@@ -123,14 +217,37 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
         <TradeJourney
           steps={buildJourney({
             symbol: trade.symbol,
-            price: trade.price,
+            // The ENTRY leg's price, not this row's — a journey starts where the
+            // position was opened, and on an exit row `trade.price` is the exit.
+            price: entryLeg?.price ?? trade.price,
+            // RECORDED AT DECISION TIME by the Risk Gateway, which is the last
+            // node holding the indicators, the regime and the volatility reading
+            // together. Before this existed the middle of the journey was not
+            // lost — it was never written down.
+            indicators:
+              context.rsi !== null || context.atr !== null
+                ? { rsi: context.rsi, atr: context.atr }
+                : null,
+            regime: context.regime ? { regime: context.regime } : null,
+            strategy: context.strategy,
             execution: { submitted: true, status: 'filled' },
             outcome: typeof trade.pnl === 'number' ? { pnl: trade.pnl } : { status: 'unknown' },
           })}
         />
+
+        {context.volatility || context.trend ? (
+          <div className="flex gap-4 mt-2 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+            {context.trend ? <span>structure trend: <span className="mono">{context.trend}</span></span> : null}
+            {context.volatility ? (
+              <span>volatility: <span className="mono">{context.volatility}</span></span>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="text-[10.5px] mt-2 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-          The middle steps are unknown because a trade record stores no link to the decision
-          that produced it. Only the entry and the outcome are real here.
+          {entryContextRaw
+            ? 'Indicators and regime are what the agent actually saw when it decided this trade, recorded by the Risk Gateway at decision time.'
+            : 'The middle steps are unknown: this trade predates the entry-context snapshot, so no record exists of what the agent saw. Trades taken from now on carry it.'}
         </div>
       </Card>
 
@@ -240,7 +357,19 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
   );
 }
 
-function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function Field({
+  label,
+  value,
+  mono,
+  muted,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  /** Dims a value that is an ABSENCE ("unknown", "still open") rather than a
+   *  measurement, so the two do not read alike at a glance. */
+  muted?: boolean;
+}) {
   return (
     <div>
       <div
@@ -249,11 +378,24 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
       >
         {label}
       </div>
-      <div className={mono ? 'mono text-[11px] break-all' : ''} style={{ color: 'var(--text-secondary)' }}>
+      <div
+        className={mono ? 'mono text-[11px] break-all' : ''}
+        style={{ color: muted ? 'var(--text-muted)' : 'var(--text-secondary)' }}
+      >
         {value}
       </div>
     </div>
   );
+}
+
+/** Hold time as something a human reads at a glance, not raw milliseconds. */
+function formatHold(ms: number): string {
+  const minutes = ms / 60_000;
+  if (minutes < 1) return `${Math.round(ms / 1000)}s`;
+  if (minutes < 60) return `${Math.round(minutes)}m`;
+  const hours = minutes / 60;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(1)}d`;
 }
 
 function Labelled({ label, text, accent }: { label: string; text: string; accent?: boolean }) {

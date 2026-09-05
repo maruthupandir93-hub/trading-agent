@@ -296,7 +296,7 @@ async def lifespan(app: FastAPI):
         "WILL" if position_monitoring_enabled() else "will NOT",
     )
 
-    from backend.services import reconciliation
+    from backend.services import reconciliation, retention
 
     worker_tasks = [
         asyncio.create_task(monitor_worker.start()),
@@ -313,6 +313,11 @@ async def lifespan(app: FastAPI):
         # off, so a paper-only process does not spend a private call per minute
         # comparing two empty lists.
         asyncio.create_task(reconciliation.run_forever()),
+        # Retention. `decisions` had grown to 80,150 rows with nothing ever
+        # deleting anything, which is what made the Decisions page slow — it is a
+        # growth problem, not a page problem. Decisions that EXECUTED a trade are
+        # never pruned; only the "considered and declined" telemetry ages out.
+        asyncio.create_task(retention.run_forever()),
     ]
 
     # Phase 36 — Polymarket poller. Started ONLY when the feature is enabled.

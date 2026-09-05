@@ -451,8 +451,34 @@ class ExecutionAgent(BaseAgent):
             fill_price,
             order_id,
             tar.tab,
+            getattr(tar, "run_id", None),
+            getattr(tar, "strategy", None),
+            getattr(tar, "entry_context", None),
         )
         await self._persist_execution_quality(str(tar.tar_id), order_id, tar.symbol, exchange_name, quality)
+
+        # APPLY THE FILL TO THE PAPER BOOK.
+        #
+        # THIS WAS MISSING ENTIRELY AND IT IS THE BUG BEHIND HALF THE DASHBOARD.
+        # This agent wrote a row to `trades`, handed the position to the monitor,
+        # and never touched the book. On the paper account that meant:
+        #
+        #   * cash sat at its starting figure forever, however many trades filled
+        #   * `positions` stayed empty, so there was no unrealized P&L to move
+        #     when price moved, and "Open positions" read 0
+        #   * `current_equity()` is cash plus marked positions, so a session's
+        #     progress toward its target never moved either
+        #
+        # Three separate "broken panels" for one absent write.
+        #
+        # PAPER ONLY. A real position lives at the venue and the venue's own
+        # balance is the book — writing a second copy here would create exactly
+        # the two-disagreeing-books problem reconciliation exists to detect.
+        if tar.tab == "paper":
+            await self._apply_paper_fill(
+                symbol=tar.symbol, side=side, qty=filled_qty, price=fill_price,
+                leverage=tar.approved_leverage, reduce_only=False,
+            )
 
         await self.publish(OrderFilledEvent(
             tar_id=tar.tar_id,
@@ -535,6 +561,14 @@ class ExecutionAgent(BaseAgent):
             logger.info(
                 "Simulated close of %s %s %s at %s (%s)", exit_side, qty, symbol, fill_price, reason
             )
+            # The close has to reach the book too, or cash never receives the
+            # realized P&L and the position stays open in the book forever while
+            # the monitor has already let it go.
+            if tab == "paper":
+                await self._apply_paper_fill(
+                    symbol=symbol, side=exit_side, qty=qty, price=fill_price,
+                    leverage=1.0, reduce_only=True,
+                )
             return fill_price
 
         from backend.services.venue import get_venue
@@ -581,7 +615,62 @@ class ExecutionAgent(BaseAgent):
                 order.get("id"), symbol,
             )
             return None
-        return float(raw)
+
+        fill = float(raw)
+        # A paper-tab position closed through the real branch (which happens when
+        # LIVE_TRADING is on) still has to settle in the paper book, or cash never
+        # receives its realized P&L.
+        if tab == "paper":
+            await self._apply_paper_fill(
+                symbol=symbol, side=exit_side, qty=qty, price=fill,
+                leverage=1.0, reduce_only=True,
+            )
+        return fill
+
+    async def _apply_paper_fill(
+        self, *, symbol: str, side: str, qty: float, price: float,
+        leverage: float, reduce_only: bool,
+    ) -> Optional[float]:
+        """Move the paper book. Returns realized P&L on a close, else None.
+
+        Never raises. The fill has already happened and been recorded; a book
+        write that failed must not unwind the trade log or leave the caller
+        believing the fill did not occur. It is logged loudly instead, because a
+        book that has drifted from the trade log is a real problem — just not one
+        to solve by pretending the trade did not happen.
+        """
+        from backend.services.portfolio_store import apply_paper_fill
+
+        try:
+            result = await apply_paper_fill(
+                symbol=symbol, side=side, qty=qty, price=price,
+                leverage=leverage or 1.0, reduce_only=reduce_only,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Paper book NOT updated for %s %s %s @ %s: %s. The trade log and the book "
+                "now disagree; cash and equity will be wrong until this is reconciled.",
+                side, qty, symbol, price, exc,
+            )
+            return None
+
+        if not result.get("ok"):
+            logger.error(
+                "Paper book refused the %s of %s %s @ %s: %s",
+                "close" if reduce_only else "open", qty, symbol, price, result.get("reason"),
+            )
+            return None
+
+        if result.get("unmatchedQty"):
+            # An over-sized close. Visible rather than silently clamped: it means
+            # the monitor thinks the position is bigger than the book does.
+            logger.warning(
+                "Close of %s was larger than the book held; %.8g was left unmatched. "
+                "The monitor and the paper book disagree on this position's size.",
+                symbol, result["unmatchedQty"],
+            )
+
+        return result.get("realized")
 
     @staticmethod
     def _slippage_bps(expected_price: float, fill_price: float, side: str) -> Optional[float]:
@@ -629,10 +718,13 @@ class ExecutionAgent(BaseAgent):
             )
             return
 
-        logger.warning(
-            "TAR %s filled at %s with an approved stop-loss of %.6g, but resting stop orders are "
-            "NOT IMPLEMENTED — no protective order exists at the exchange. This position is "
-            "protected only while this process is running and watching the price.",
+        # The resting stop IS placed now — by `PositionMonitorAgent._place_resting_stop`
+        # when it registers the fill, not here. This used to warn that they were
+        # "NOT IMPLEMENTED", which is no longer true and would send a reader
+        # looking for a gap that has been closed.
+        logger.info(
+            "TAR %s filled at %s with an approved stop-loss of %.6g. The position monitor "
+            "places the resting reduce-only stop at the venue when it registers this fill.",
             tar.tar_id,
             fill_price,
             tar.stop_loss,
@@ -704,6 +796,9 @@ class ExecutionAgent(BaseAgent):
         price: float,
         exchange_order_id: str,
         tab: str,
+        run_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+        entry_context: Optional[str] = None,
     ):
         pool = get_db_pool()
         if not pool:
@@ -721,14 +816,27 @@ class ExecutionAgent(BaseAgent):
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO trades (id, ts, tab, symbol, side, qty, price, origin_tag, exchange_order_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO trades
+                        (id, ts, tab, symbol, side, qty, price, origin_tag,
+                         exchange_order_id, run_id, strategy, entry_context)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     """,
                     # `tab` comes from the TAR instead of the hardcoded 'real'
                     # this used to pass. Simulated fills were being written
                     # into the trade log as real trades, permanently mixing
                     # simulated and real history in one table.
-                    trade_id, datetime.datetime.utcnow(), tab, symbol, side, qty, price, "agent-plan", exchange_order_id
+                    trade_id, datetime.datetime.utcnow(), tab, symbol, side, qty, price,
+                    "agent-plan", exchange_order_id,
+                    # The graph run that decided this trade, so the detail page
+                    # can show the analysis, regime and specialist votes rather
+                    # than only the entry and the outcome.
+                    run_id,
+                    # Attribution. A realised win rate cannot be assigned to a
+                    # strategy that was never recorded against the fill.
+                    strategy,
+                    # What the agent saw. The trade row could otherwise only ever
+                    # record WHAT happened, never WHY.
+                    entry_context,
                 )
         except Exception as e:
             logger.error(f"Failed to persist trade {trade_id}: {e}")

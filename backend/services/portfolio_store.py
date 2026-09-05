@@ -44,7 +44,7 @@ behaviour is exactly what it was before this change — in memory, lost on resta
 — and `load_portfolio()` says so at WARNING rather than implying durability.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import copy
 import datetime
 import logging
@@ -111,12 +111,13 @@ async def _persist() -> bool:
                         await conn.execute(
                             """
                             INSERT INTO agent_positions
-                              (tab, symbol, qty, avg_cost, margin_locked, updated_at)
-                            VALUES ($1,$2,$3,$4,$5,$6)
+                              (tab, symbol, qty, avg_cost, margin_locked, side, updated_at)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7)
                             ON CONFLICT (tab, symbol) DO UPDATE SET
                               qty = EXCLUDED.qty,
                               avg_cost = EXCLUDED.avg_cost,
                               margin_locked = EXCLUDED.margin_locked,
+                              side = EXCLUDED.side,
                               updated_at = EXCLUDED.updated_at
                             """,
                             tab,
@@ -124,6 +125,7 @@ async def _persist() -> bool:
                             qty,
                             pos["avgCost"],
                             pos.get("marginLocked"),
+                            pos.get("side") or "buy",
                             now,
                         )
         return True
@@ -197,6 +199,9 @@ async def load_portfolio() -> bool:
             "symbol": r["symbol"],
             "qty": float(r["qty"]),
             "avgCost": float(r["avg_cost"]),
+            # Defaults to a long for rows written before the column existed,
+            # which is what they were.
+            "side": (r["side"] if "side" in r.keys() and r["side"] else "buy"),
             # Falls back to notional when the column is NULL, matching the
             # `.get(..., qty*avgCost)` default the mutators already use for rows
             # written before margin was tracked.
@@ -288,3 +293,252 @@ async def sell_paper(symbol: str, qty: float, price: float) -> bool:
     _portfolio["paper"]["cash"] += margin_released + realized_pnl
     await _persist()
     return True
+
+
+# ===========================================================================
+# THE SIGNED PAPER BOOK
+#
+# WHY THIS EXISTS, AND IT IS THE BUG BEHIND HALF THE DASHBOARD
+# ------------------------------------------------------------
+# `buy_paper` / `sell_paper` above are the OPERATOR's manual API and they are
+# long-only by construction: a buy opens, a sell closes, and `sell_paper` refuses
+# outright when no long exists. Nothing wrong with that for a human clicking Buy
+# and Sell.
+#
+# But the AGENT never called them at all. `execution_agent` wrote a row to
+# `trades`, handed the position to `PositionMonitorAgent`, and never touched the
+# book. So on the paper account:
+#
+#   * cash sat at its starting figure forever, however many trades filled
+#   * `positions` stayed empty, so there was no unrealized P&L to move when
+#     price moved, and the dashboard's "Open positions" read 0
+#   * `current_equity()` — cash plus marked positions — therefore never changed,
+#     so a session's progress toward its target never moved either
+#
+# Every one of those reads as a separate broken panel and is one missing write.
+#
+# AND IT COULD NOT SIMPLY CALL `buy_paper`, because this agent SHORTS. A short
+# opens on a sell, which `sell_paper` rejects, and closes on a buy, whose P&L is
+# (entry - exit) — the opposite sign to the formula there. Feeding agent fills
+# through the long-only API would have booked every short backwards.
+#
+# So this is the general implementation: direction-aware, margin-aware, and the
+# single place position arithmetic happens for the agent.
+# ===========================================================================
+
+_DUST = 1e-12
+
+
+def _find(positions: List[Dict[str, Any]], symbol: str) -> int:
+    return next((i for i, p in enumerate(positions) if p.get("symbol") == symbol), -1)
+
+
+def position_pnl(pos: Dict[str, Any], mark: float) -> Optional[float]:
+    """Unrealized P&L for one position at `mark`. None when it cannot be valued.
+
+    SIGNED BY DIRECTION. A long gains when price rises; a short gains when it
+    falls. Returning the long formula for both is the single most expensive
+    arithmetic error available here — it reports a losing short as a winner and
+    would have the risk layer add to it.
+
+    None, never 0.0, when there is no usable mark: "we could not value this" and
+    "this position is exactly flat" are different facts and only one of them
+    should enter an equity total.
+    """
+    try:
+        qty = abs(float(pos.get("qty") or 0.0))
+        cost = float(pos.get("avgCost") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if qty <= _DUST or cost <= 0 or not mark or mark <= 0:
+        return None
+    direction = 1.0 if (pos.get("side") or "buy") == "buy" else -1.0
+    return (mark - cost) * qty * direction
+
+
+def book_equity(book: Dict[str, Any], marks: Dict[str, float]) -> Dict[str, Any]:
+    """Equity for one book: FREE CASH + LOCKED MARGIN + UNREALIZED P&L.
+
+    THE OLD FORMULA WAS `cash + qty * price` AND IT IS ONLY RIGHT AT 1x.
+    `buy_paper` deducts MARGIN from cash and records `marginLocked`, so cash is
+    free cash, not total capital. Adding the full notional back on top double
+    counts the leveraged part: at 10x a $7,000 position funded by $700 of margin
+    reported $6,300 of equity that does not exist. Every percentage derived from
+    it — session progress, drawdown, risk-per-trade — was wrong by the same
+    factor, and wrong in the direction that flatters the account.
+    """
+    cash = book.get("cash")
+    cash_f = float(cash) if isinstance(cash, (int, float)) else None
+
+    locked = 0.0
+    unrealized = 0.0
+    unpriced: List[str] = []
+
+    for pos in book.get("positions") or []:
+        qty = abs(float(pos.get("qty") or 0.0))
+        if qty <= _DUST:
+            continue
+        cost = float(pos.get("avgCost") or 0.0)
+        # Falls back to the notional, matching the default the mutators use for
+        # rows written before `marginLocked` existed.
+        locked += float(pos.get("marginLocked") or (qty * cost))
+
+        symbol = pos.get("symbol")
+        pnl = position_pnl(pos, marks.get(symbol, 0.0) if symbol else 0.0)
+        if pnl is None:
+            unpriced.append(str(symbol))
+        else:
+            unrealized += pnl
+
+    return {
+        "cash": cash_f,
+        "marginLocked": locked,
+        "unrealized": unrealized,
+        # None when anything is unvaluable — a partial equity presented as the
+        # total understates or overstates the account by an unknown amount.
+        "equity": None if cash_f is None or unpriced else cash_f + locked + unrealized,
+        "unpricedSymbols": unpriced,
+        "complete": cash_f is not None and not unpriced,
+    }
+
+
+async def apply_paper_fill(
+    *,
+    symbol: str,
+    side: str,
+    qty: float,
+    price: float,
+    leverage: float = 1.0,
+    reduce_only: bool = False,
+) -> Dict[str, Any]:
+    """Apply one paper fill to the book. Direction-aware, margin-aware.
+
+    `reduce_only=True` means this fill CLOSES (or reduces) whatever is open,
+    whichever way it points — the same meaning it has at a venue. `False` opens
+    or adds.
+
+    Returns what happened, including `realized`, so the caller can log the P&L it
+    actually booked rather than recomputing it from a second copy of this
+    arithmetic.
+
+    A REDUCE WITH NOTHING TO REDUCE IS REPORTED, NOT INVENTED. It would mean the
+    book and the monitor disagree, and silently opening a reversed position — the
+    thing `reduceOnly` exists at the venue to prevent — must not happen here
+    either.
+    """
+    global _portfolio
+
+    book = _portfolio.setdefault("paper", {"cash": 0.0, "positions": []})
+    positions = book.setdefault("positions", [])
+    qty = abs(float(qty))
+    price = float(price)
+    if qty <= _DUST or price <= 0:
+        return {"ok": False, "reason": "a fill needs a positive quantity and price", "realized": None}
+
+    idx = _find(positions, symbol)
+    existing = positions[idx] if idx >= 0 else None
+
+    if not reduce_only:
+        notional = qty * price
+        margin = notional / leverage if leverage and leverage > 0 else notional
+
+        # THE MARGIN MUST ACTUALLY BE THERE.
+        #
+        # This check was MISSING and it is the operator's question in code form:
+        # "if one trade takes the whole amount, does the agent open another with
+        # no money?" It did. `buy_paper` — the operator's manual path — refuses
+        # when margin exceeds cash; this path, which every AGENT fill takes, just
+        # subtracted and let free cash go NEGATIVE.
+        #
+        # A negative cash balance is not a small accounting blemish. `book_equity`
+        # is free cash + locked margin + unrealized, so a negative first term
+        # understates equity, which understates the next position's size, which
+        # makes every subsequent risk calculation wrong in a compounding way. And
+        # it silently models leverage the venue never granted.
+        #
+        # Refused rather than clamped: a partial fill nobody asked for is its own
+        # kind of wrong, and the caller already handles `ok: False` by logging and
+        # not recording a position.
+        free_cash = float(book.get("cash") or 0.0)
+        if margin > free_cash:
+            return {
+                "ok": False,
+                "reason": (
+                    f"insufficient free cash for {symbol}: needs {margin:,.2f} margin "
+                    f"({notional:,.2f} notional at {leverage:g}x) but only {free_cash:,.2f} "
+                    f"is free. Capital already committed to open positions is not "
+                    f"available to open another."
+                ),
+                "realized": None,
+                "requiredMargin": margin,
+                "freeCash": free_cash,
+            }
+
+        if existing is not None and abs(float(existing.get("qty") or 0.0)) > _DUST:
+            if (existing.get("side") or "buy") != side:
+                # An opposite-side fill that was not flagged reduce_only. Treated
+                # as the reduction it functionally is rather than as a second
+                # position, because one symbol carries one aggregated position in
+                # this book and pretending otherwise would double-count margin.
+                return await apply_paper_fill(
+                    symbol=symbol, side=side, qty=qty, price=price,
+                    leverage=leverage, reduce_only=True,
+                )
+            prev_qty = abs(float(existing["qty"]))
+            prev_cost = float(existing["avgCost"])
+            new_qty = prev_qty + qty
+            existing["qty"] = new_qty
+            existing["avgCost"] = (prev_qty * prev_cost + notional) / new_qty
+            existing["marginLocked"] = float(existing.get("marginLocked") or (prev_qty * prev_cost)) + margin
+        else:
+            positions.append({
+                "symbol": symbol,
+                "qty": qty,
+                "avgCost": price,
+                "marginLocked": margin,
+                "side": side,
+            })
+
+        book["cash"] = float(book.get("cash") or 0.0) - margin
+        await _persist()
+        return {"ok": True, "action": "open", "realized": None, "marginLocked": margin}
+
+    # ---- a REDUCE / CLOSE ----------------------------------------------
+    if existing is None or abs(float(existing.get("qty") or 0.0)) <= _DUST:
+        return {
+            "ok": False,
+            "reason": (
+                f"nothing open on {symbol} to reduce. The book and the position monitor "
+                f"disagree; NOT opening a reversed position to absorb it."
+            ),
+            "realized": None,
+        }
+
+    open_qty = abs(float(existing["qty"]))
+    cost = float(existing["avgCost"])
+    closing = min(qty, open_qty)
+    direction = 1.0 if (existing.get("side") or "buy") == "buy" else -1.0
+    realized = (price - cost) * closing * direction
+
+    total_margin = float(existing.get("marginLocked") or (open_qty * cost))
+    released = total_margin * (closing / open_qty)
+
+    remaining = open_qty - closing
+    if remaining > _DUST:
+        existing["qty"] = remaining
+        existing["marginLocked"] = total_margin - released
+    else:
+        positions.pop(idx)
+
+    book["cash"] = float(book.get("cash") or 0.0) + released + realized
+    await _persist()
+
+    return {
+        "ok": True,
+        "action": "close" if remaining <= _DUST else "reduce",
+        "realized": realized,
+        "closedQty": closing,
+        # Surfaced so an over-sized close is visible rather than silently clamped.
+        "unmatchedQty": qty - closing,
+        "marginReleased": released,
+    }

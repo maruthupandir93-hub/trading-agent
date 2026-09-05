@@ -238,28 +238,71 @@ async def run_analysis_graph(
     )
     thread_id = f"{GRAPH_NAME}:{symbol}-{trigger.kind}-{state['run_id'][:8]}"
 
+    # STREAMED, NOT AWAITED WHOLE — AND THAT IS WORTH ~10 SECONDS PER TRADE.
+    #
+    # This was `await graph.ainvoke(...)` followed by `_publish_plan(final)`, so
+    # the execution plan reached the bus only after ALL 24 nodes had finished.
+    # Measured on a live BTC/USDT run, 19.6s wall:
+    #
+    #     trade_thesis_narrative   7.56s   LLM
+    #     external_consultation    2.38s   LLM
+    #     data_validation          2.27s   upstream fetches
+    #     memory_loader            0.76s
+    #     the other 20 nodes       0.04s   combined
+    #
+    # Both LLM nodes run AFTER `risk_gateway` and neither contributes to the
+    # trade. Their contracts say so structurally: `trade_thesis_narrative` writes
+    # `("thesis_narrative",)` and `external_consultation` writes
+    # `("consultation", "llm_calls_made", "llm_tokens_used")`. Not
+    # `execution_plan`, not `risk_assessment`, not `decision`. So the order was
+    # sitting idle for ten seconds waiting on prose ABOUT the order.
+    #
+    # The plan is now published the moment the gateway's output appears in the
+    # stream, and the remaining nodes finish afterwards. Nothing about the trade
+    # can change in between — `NodeContract` enforces the writes above, and
+    # `tests/test_analysis_latency.py` asserts it rather than trusting it.
+    #
+    # THE ORIGINAL INVARIANT IS PRESERVED: publishing still happens in the RUNNER,
+    # never in a node. A node that published would make emitting an execution
+    # request part of reasoning, and a future node could then emit one before the
+    # gateway had run. Here it still cannot: the guard is `execution_plan` being
+    # present, and only the gateway produces one.
+    final: Optional[TradingState] = None
+    published = False
     try:
         graph = build_graph(analysis_config(), ctx, checkpointer=checkpointer)
         config = {"configurable": {"thread_id": thread_id}} if checkpointer else None
-        final: TradingState = await (
-            graph.ainvoke(state, config=config) if config else graph.ainvoke(state)
+        stream = (
+            graph.astream(state, config=config, stream_mode="values")
+            if config
+            else graph.astream(state, stream_mode="values")
         )
+        async for chunk in stream:
+            final = chunk
+            # Published ONCE. `stream_mode="values"` yields the whole accumulated
+            # state after every superstep, so the plan appears in each chunk from
+            # the gateway onward; without the flag this would submit the same
+            # trade a dozen times.
+            if not published and chunk.get("execution_plan") is not None:
+                published = await _publish_plan(chunk)
     except Exception as e:
         logger.error("Analysis graph failed for %s: %s", symbol, e)
         finish_run(ctx, None, outcome="failed", no_decision_reason=f"graph error: {e}",
                    produces_decision=False)
         return {"ok": False, "symbol": symbol, "error": str(e), "runId": ctx.run_id}
 
-    # Phase 29 / spec Section 12. Publishes the INERT boundary object onto the bus
-    # for `services/execution_service.py`, which lives outside `graphs/` precisely
-    # because it may import the execution chokepoint and nothing here may.
-    #
-    # Published from the graph RUNNER rather than from a node, deliberately. A node
-    # that published would make emitting an execution request part of reasoning, and
-    # a future node could then emit one mid-graph before the gateway had run. Here
-    # it can only happen after `ainvoke` returned, with the whole assessment
-    # visible.
-    await _publish_plan(final)
+    if final is None:
+        # An empty stream. Distinct from a raised exception and reported as its
+        # own outcome rather than crashing on `summarise_analysis(None)`.
+        logger.error("Analysis graph for %s produced no state at all.", symbol)
+        finish_run(ctx, None, outcome="failed", no_decision_reason="graph produced no state",
+                   produces_decision=False)
+        return {"ok": False, "symbol": symbol, "error": "no state", "runId": ctx.run_id}
+
+    # A last attempt on the final state, for the case where the plan only became
+    # visible in the terminal chunk. Idempotent via `published`.
+    if not published:
+        await _publish_plan(final)
 
     # produces_decision=True as of Phase 27 — this graph now genuinely decides, so
     # a run that ends WITHOUT a `decision` gets "why did nothing trade?" filled in
@@ -274,8 +317,13 @@ async def run_analysis_graph(
             **summarise_analysis(final), "traceOutcome": trace.outcome}
 
 
-async def _publish_plan(state: TradingState) -> None:
+async def _publish_plan(state: TradingState) -> bool:
     """Emit `EXECUTION_PLAN_READY` when the gateway approved a plan. Never raises.
+
+    Returns True only when an event actually reached the bus, so the caller can
+    publish exactly once across a stream that offers the plan in every chunk from
+    the gateway onward. A False return means "not published" for ANY reason —
+    no plan, not approved, or the bus refused it — and the caller may try again.
 
     Guarded on BOTH `execution_plan` being present AND `risk_assessment.approved`.
     The gateway does not produce a plan on rejection, so either condition alone
@@ -290,7 +338,7 @@ async def _publish_plan(state: TradingState) -> None:
     assessment = state.get("risk_assessment")
 
     if plan is None:
-        return
+        return False
     if assessment is None or assessment.approved is not True:
         logger.error(
             "Execution plan present for %s but the risk assessment is %s — NOT "
@@ -299,7 +347,7 @@ async def _publish_plan(state: TradingState) -> None:
             state.get("symbol"),
             "absent" if assessment is None else f"approved={assessment.approved!r}",
         )
-        return
+        return False
 
     decision = state.get("decision")
     thesis = state.get("trade_thesis")
@@ -325,17 +373,22 @@ async def _publish_plan(state: TradingState) -> None:
             strategy=thesis.strategy if thesis else None,
             rationale=decision.rationale if decision else None,
             entry_price=thesis.entry_price if thesis else None,
+            entry_context=plan.entry_context,
         ))
         logger.info(
             "Published EXECUTION_PLAN_READY for %s (%s %s, intent=%s)",
             plan.symbol, plan.side, plan.size, intent,
         )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "Could not publish the execution plan for %s: %s. The reasoning run "
             "completed; only the execution attempt was lost.",
             state.get("symbol"), exc,
         )
+        # False, so the caller's post-stream retry gets one more chance rather
+        # than treating a bus failure as a successful submission.
+        return False
 
 
 def summarise_analysis(state: TradingState) -> Dict[str, Any]:
@@ -508,6 +561,9 @@ def _decision_dict(decision: Any) -> Dict[str, Any]:
 _subscribed = False
 
 
+from backend.services.tradeable_universe import is_tradeable
+
+
 def subscribe_to_triggers(checkpointer: Any = None) -> None:
     """Run the analysis graph when a trigger fires. Idempotent.
 
@@ -530,6 +586,40 @@ def subscribe_to_triggers(checkpointer: Any = None) -> None:
             return
         if event.symbol.startswith("__"):
             return
+
+        # SKIP EARLY for an instrument that can never produce a trade — but ONLY
+        # when nothing is open in it.
+        #
+        # The Risk Gateway is the gate that makes this correct; this is purely
+        # about cost. A full run is 24 nodes and two LLM calls, and spending them
+        # to reach a refusal that was knowable from the symbol alone is waste that
+        # also crowds the decisions table with rejections nobody needs.
+        #
+        # THE OPEN-POSITION CHECK IS THE IMPORTANT HALF. A held position still
+        # needs its analysis to reach the Supervisor so an EXIT can be
+        # recommended, and invariant 4 says a close is never blocked. Skipping
+        # analysis for a symbol we hold would silently stop reconsidering it.
+        if not is_tradeable(event.symbol):
+            from backend.agents.position_monitor import get_position_monitor
+
+            try:
+                held = any(
+                    p.get("symbol") == event.symbol
+                    for p in get_position_monitor().snapshot_open()
+                )
+            except Exception:  # noqa: BLE001
+                # Could not read the book. Run the analysis rather than skip it:
+                # the cost of a wasted run is tokens, the cost of a wrongly
+                # skipped one is an open position nobody reconsiders.
+                held = True
+
+            if not held:
+                logger.debug(
+                    "Analysis skipped for %s: not a tradeable instrument and nothing "
+                    "open in it. Its price and regime still inform other symbols.",
+                    event.symbol,
+                )
+                return
 
         trigger = TriggerReason(
             kind=event.kind,
