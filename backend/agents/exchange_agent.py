@@ -1,11 +1,32 @@
+"""Multi-exchange best bid/ask, for the DASHBOARD's price-comparison widget only.
+
+NOT IN THE TRADE PATH. This module is read by `GET /api/exchange` and the
+`/multiexchange` dashboard endpoint. No order, no balance, no position sizing goes
+through it — a failure here blanks a comparison table, it does not misprice a
+trade. Order placement is `services/venue.py` (agent) and
+`api/operator_exchange.py` (operator).
+
+WHY THE EXCEPTIONS ARE NOW LOGGED. Each fetcher used to `except Exception: pass`
+and return None, so a rate-limit, a schema change, a timeout and a real outage
+were indistinguishable — the widget went blank with no line anywhere saying why.
+That is the exact anti-pattern invariant 6 names ("say why it is unavailable").
+`None` is still the return on any failure — the caller treats a missing venue as
+"could not read this one" and shows the rest — but the reason is now recorded at
+WARNING so a persistently blank column is diagnosable instead of mysterious.
+
+Deliberately NOT raised: one venue being down must not blank the other three. And
+deliberately NOT retried here: this is a dashboard poll, and a retry loop over a
+throttled public endpoint spends the shared rate budget the trade path also uses.
+"""
+
 import logging
 import httpx
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-async def fetch_binance(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+async def fetch_binance(symbol: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
     try:
         resp = await client.get(f"https://api.binance.com/api/v3/ticker/bookTicker?symbol={symbol}", timeout=3.0)
         if resp.status_code == 200:
@@ -15,11 +36,12 @@ async def fetch_binance(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any
                 "bid": float(data['bidPrice']),
                 "ask": float(data['askPrice'])
             }
-    except Exception:
-        pass
+        logger.warning("Multi-exchange: Binance returned HTTP %d for %s", resp.status_code, symbol)
+    except Exception as exc:
+        logger.warning("Multi-exchange: Binance fetch failed for %s: %s: %s", symbol, type(exc).__name__, exc)
     return None
 
-async def fetch_bybit(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+async def fetch_bybit(symbol: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
     try:
         resp = await client.get(f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}", timeout=3.0)
         if resp.status_code == 200:
@@ -31,11 +53,14 @@ async def fetch_bybit(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]:
                     "bid": float(item['bid1Price']),
                     "ask": float(item['ask1Price'])
                 }
-    except Exception:
-        pass
+            logger.warning("Multi-exchange: Bybit returned an empty list for %s", symbol)
+        else:
+            logger.warning("Multi-exchange: Bybit returned HTTP %d for %s", resp.status_code, symbol)
+    except Exception as exc:
+        logger.warning("Multi-exchange: Bybit fetch failed for %s: %s: %s", symbol, type(exc).__name__, exc)
     return None
 
-async def fetch_coinbase(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+async def fetch_coinbase(symbol: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
     # Convert BTCUSDT to BTC-USD
     cb_symbol = symbol.replace("USDT", "-USD")
     try:
@@ -47,11 +72,12 @@ async def fetch_coinbase(symbol: str, client: httpx.AsyncClient) -> Dict[str, An
                 "bid": float(data['bids'][0][0]),
                 "ask": float(data['asks'][0][0])
             }
-    except Exception:
-        pass
+        logger.warning("Multi-exchange: Coinbase returned HTTP %d for %s", resp.status_code, cb_symbol)
+    except Exception as exc:
+        logger.warning("Multi-exchange: Coinbase fetch failed for %s: %s: %s", cb_symbol, type(exc).__name__, exc)
     return None
 
-async def fetch_kraken(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]:
+async def fetch_kraken(symbol: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
     # Convert BTCUSDT to BTCUSD
     kr_symbol = symbol.replace("USDT", "USD")
     try:
@@ -66,8 +92,11 @@ async def fetch_kraken(symbol: str, client: httpx.AsyncClient) -> Dict[str, Any]
                     "bid": float(item['b'][0]),
                     "ask": float(item['a'][0])
                 }
-    except Exception:
-        pass
+            logger.warning("Multi-exchange: Kraken returned an error for %s: %s", kr_symbol, data.get('error'))
+        else:
+            logger.warning("Multi-exchange: Kraken returned HTTP %d for %s", resp.status_code, kr_symbol)
+    except Exception as exc:
+        logger.warning("Multi-exchange: Kraken fetch failed for %s: %s: %s", kr_symbol, type(exc).__name__, exc)
     return None
 
 async def scan_global_exchanges(symbol: str) -> Dict[str, Any]:

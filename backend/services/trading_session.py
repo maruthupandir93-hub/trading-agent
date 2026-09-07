@@ -94,6 +94,16 @@ class TradingSession:
     start_equity: float
     target_equity: float
     floor_equity: float
+    # The fraction of the account this session may deploy — 0.25 / 0.5 / 0.75 /
+    # 1.0. The operator picks it on the home page: "trade with 75% of my balance".
+    # Defaults to 1.0 so an existing session (or one started without the field)
+    # behaves exactly as before. It scales BOTH the size of each trade and the
+    # total capital the agent may commit at once — see `active_capital_fraction`
+    # and the pool gate in `risk_gateway`. It is NOT a leverage source: the
+    # leverage ceiling and mandatory stop are unchanged and still bound every
+    # trade, so 100% means "use the whole account as margin", not "use more
+    # leverage".
+    capital_fraction: float = 1.0
     # 'running' | 'reached' | 'floored' | 'stopped' | 'expired' | 'failed'
     status: str = "running"
     started_at: float = field(default_factory=time.time)
@@ -622,6 +632,7 @@ async def start_session(
     target_equity: float,
     floor_equity: Optional[float] = None,
     start_amount: Optional[float] = None,
+    capital_fraction: float = 1.0,
 ) -> TradingSession:
     """Begin an autonomous session. Raises ValueError on an unusable request.
 
@@ -679,6 +690,16 @@ async def start_session(
     if floor < 0:
         raise ValueError("floor cannot be negative")
 
+    # Clamp to the four allowed steps rather than trusting the caller. An
+    # out-of-range fraction here would silently mis-size every trade in the
+    # session, so it is bounded to (0, 1] with 1.0 as the safe default.
+    try:
+        cf = float(capital_fraction)
+    except (TypeError, ValueError):
+        cf = 1.0
+    if not (0.0 < cf <= 1.0):
+        cf = 1.0
+
     session = TradingSession(
         id=uuid.uuid4().hex[:12],
         symbol=symbol,
@@ -686,6 +707,7 @@ async def start_session(
         start_equity=equity,
         target_equity=target_equity,
         floor_equity=floor,
+        capital_fraction=cf,
     )
     _sessions[session.id] = session
     _persist()
@@ -727,6 +749,25 @@ def active_session() -> Optional[TradingSession]:
         if session.active:
             return session
     return None
+
+
+def active_capital_fraction() -> float:
+    """The fraction of the account the RUNNING session may deploy, or 1.0.
+
+    Read by the Risk Gateway to size every trade against the operator's chosen
+    allocation and to cap the total capital committed. 1.0 when no session is
+    running (the agent trades the whole account, the pre-feature behaviour) and
+    when a session predates the field. Never raises and never returns something
+    outside (0, 1] — a bad value here would mis-size real trades.
+    """
+    session = active_session()
+    if session is None:
+        return 1.0
+    try:
+        cf = float(getattr(session, "capital_fraction", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return cf if 0.0 < cf <= 1.0 else 1.0
 
 
 def list_sessions(limit: int = 20) -> List[TradingSession]:

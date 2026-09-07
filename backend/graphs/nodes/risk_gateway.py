@@ -104,6 +104,34 @@ GRAPH_REQUESTED_LEVERAGE = 1
 from backend.algorithms.market_context import assess as assess_alignment
 from backend.algorithms.market_context import build as build_market_context
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
+from backend.services.trading_session import active_capital_fraction
+
+
+def _deployed_margin(positions: List[Dict[str, Any]]) -> float:
+    """Margin already locked across open positions — the capital in play now.
+
+    Reads `marginLocked` (the paper book records it per position). For a venue
+    position without it, approximates margin as notional / leverage, and treats an
+    unknown leverage as 1x — which OVER-counts margin and so caps the pool
+    CONSERVATIVELY (it stops opening trades sooner, never later). Never raises.
+    """
+    total = 0.0
+    for p in positions or []:
+        m = p.get("marginLocked")
+        if m is not None:
+            try:
+                total += float(m)
+                continue
+            except (TypeError, ValueError):
+                pass
+        try:
+            qty = abs(float(p["qty"]))
+            price = float(p.get("avgCost") or p.get("entryPrice") or 0.0)
+            lev = float(p.get("leverage") or 1.0) or 1.0
+            total += qty * price / lev
+        except (KeyError, TypeError, ValueError):
+            continue
+    return total
 
 # Refuse an entry that fights the 1h/4h consensus. Configurable because it is a
 # hypothesis about selectivity rather than a safety invariant — an operator
@@ -379,6 +407,59 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             ),
             "unavailable": ["risk gateway sizing (equity unknown)"],
         }
+
+    # ---- SESSION CAPITAL ALLOCATION --------------------------------------
+    #
+    # The operator picks how much of the account this session may trade with —
+    # 25 / 50 / 75 / 100% — on the home page ("trade with 75% of my balance").
+    # It does two things, both here:
+    #
+    #   1. SIZES every trade as if the account were that fraction of its real
+    #      size. Choosing 25% makes each trade a quarter of what it would be.
+    #   2. CAPS the TOTAL margin the agent may have committed at once at that
+    #      fraction of the account, so once the pool is deployed no new trade
+    #      opens until one closes.
+    #
+    # It is NOT a leverage source and cannot raise risk: the leverage ceiling and
+    # mandatory stop are untouched, so 100% is "use the whole account as margin",
+    # never "use more leverage". 1.0 (no session, or a full allocation) is the
+    # pre-feature behaviour exactly.
+    fraction = active_capital_fraction()
+    if fraction < 1.0:
+        # The real capital base, NOT the leverage-inflated `cash + notional`:
+        # free cash plus the margin already locked in open positions. That is the
+        # money actually in the account, and the fraction is of that.
+        deployed = _deployed_margin(portfolio.open_positions if portfolio else [])
+        cash = float(portfolio.cash) if (portfolio and portfolio.cash is not None) else None
+        account_capital = (cash + deployed) if cash is not None else equity
+        pool = fraction * account_capital
+
+        if deployed >= pool:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        f"the session's capital pool is fully deployed: "
+                        f"{deployed:,.2f} of a {pool:,.2f} pool "
+                        f"({fraction * 100:.0f}% of {account_capital:,.2f}) is already in "
+                        f"open positions. No new position opens until one closes."
+                    ],
+                    checks={
+                        "CapitalPool": {
+                            "status": "reject",
+                            "detail": (
+                                f"{fraction * 100:.0f}% allocation, {deployed:,.2f}/{pool:,.2f} "
+                                f"margin deployed."
+                            ),
+                        }
+                    },
+                )
+            }
+
+        # Size against the allocated capital, so per-trade size scales with the
+        # chosen fraction. This is the number every downstream sizing and margin
+        # calc uses from here on.
+        equity = equity * fraction
 
     bars_15m = (snapshot.candles.get("15m") if snapshot else None) or []
     technical = state.get("technical_analysis")

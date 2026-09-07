@@ -377,3 +377,57 @@ def test_a_testnet_client_reports_the_testnet_variable(monkeypatch):
     v = venue("bybit")
     assert v.has_credentials() is True
     assert v.key_variable == "BYBIT_TESTNET_API_KEY"
+
+
+# ---------------------------------------------------------------------------
+# 4. The resting TAKE-PROFIT — the mirror of the stop, same param discipline
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stoppable", ["bybit", "binance"], indirect=True)
+@pytest.mark.asyncio
+async def test_the_take_profit_uses_the_unified_takeProfitPrice(stoppable):
+    """`takeProfitPrice` is ccxt's unified TP trigger — TAKE_PROFIT_MARKET on
+    Binance, a side-derived trigger on Bybit. Sending a bare `triggerPrice` here
+    would be the same generic-trigger bug that stopped the Bybit STOP reaching the
+    venue at all."""
+    result = await stoppable.place_take_profit(
+        symbol="SOL/USDT", side="sell", qty=0.15, take_profit_price=110.0
+    )
+    assert result.ok is True
+    params = stoppable._sent["params"]
+    assert params["takeProfitPrice"] == "110.00"
+    assert "triggerPrice" not in params           # not a generic trigger order
+    assert "stopLossPrice" not in params          # not a stop
+
+
+@pytest.mark.parametrize("stoppable", ["bybit", "binance"], indirect=True)
+@pytest.mark.asyncio
+async def test_the_take_profit_triggers_on_the_mark_price(stoppable):
+    await stoppable.place_take_profit(
+        symbol="SOL/USDT", side="sell", qty=0.15, take_profit_price=110.0
+    )
+    params = stoppable._sent["params"]
+    if stoppable.id == "bybit":
+        assert params["triggerBy"] == "MarkPrice"
+    else:
+        assert params["workingType"] == "MARK_PRICE"
+
+
+@pytest.mark.parametrize("stoppable", ["bybit"], indirect=True)
+@pytest.mark.asyncio
+async def test_the_take_profit_is_reduce_only_and_on_the_resolved_perpetual(stoppable):
+    await stoppable.place_take_profit(
+        symbol="SOL/USDT", side="sell", qty=0.15, take_profit_price=110.0
+    )
+    assert stoppable._sent["symbol"] == "SOL/USDT:USDT"    # resolved, not spot
+    assert stoppable._sent["params"].get("reduceOnly") is True
+
+
+@pytest.mark.asyncio
+async def test_a_take_profit_without_credentials_refuses():
+    result = await venue("bybit").place_take_profit(
+        symbol="SOL/USDT", side="sell", qty=1.0, take_profit_price=110.0
+    )
+    assert result.ok is False
+    assert "credentials" in (result.error or "")

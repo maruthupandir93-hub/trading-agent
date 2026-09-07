@@ -90,6 +90,11 @@ class _Tracked:
         # venue refused it — which is a materially less safe position and is
         # logged as such rather than left to be inferred from a null.
         "stop_order_id",
+        # The venue's id for the RESTING take-profit, when one was placed. Same
+        # rules as `stop_order_id`: None for paper and when the venue refused it.
+        # Both rest reduce-only, so if one fires while the process is down the
+        # other cannot reverse the position — see `Venue.place_take_profit`.
+        "tp_order_id",
         # ATTRIBUTION, carried from the approval so the CLOSING trade row can
         # record it.
         #
@@ -272,6 +277,7 @@ class PositionMonitorAgent(BaseAgent):
                 # A pending approval has no venue order yet — the stop is placed
                 # on the FILL — so this is genuinely None rather than dropped.
                 "stop_order_id": None,
+                "tp_order_id": None,
                 "strategy": appr.get("strategy"),
                 "run_id": appr.get("run_id"),
                 "entry_context": appr.get("entry_context"),
@@ -301,6 +307,7 @@ class PositionMonitorAgent(BaseAgent):
                 # order to OPEN a reversed position the next time price touches
                 # it. `_cancel_resting_stop` had no id to work with.
                 "stop_order_id": pos.stop_order_id,
+                "tp_order_id": pos.tp_order_id,
                 "strategy": pos.strategy,
                 "run_id": pos.run_id,
                 "entry_context": pos.entry_context,
@@ -458,6 +465,7 @@ class PositionMonitorAgent(BaseAgent):
                 # process left resting at the venue. An orphaned stop is an order
                 # to open the opposite position the next time price touches it.
                 stop_order_id=row.get("stop_order_id"),
+                tp_order_id=row.get("tp_order_id"),
                 # Restored so a position that opened before a restart still
                 # attributes its eventual close to the strategy that chose it.
                 # Dropping them here would reopen the learning-loop gap one
@@ -626,6 +634,82 @@ class PositionMonitorAgent(BaseAgent):
                 "%s, where it would OPEN an opposite position if price reaches it. Cancel it "
                 "manually.",
                 pos.stop_order_id, pos.symbol, reason, venue.id,
+            )
+
+    async def _place_resting_tp(self, pos: "_Tracked") -> None:
+        """Put the take-profit ON THE EXCHANGE for a real position, beside the stop.
+
+        The mirror of `_place_resting_stop`. It captures the UPSIDE while the
+        process is down: a favourable move that reaches the target during a restart
+        is otherwise simply missed, the position rides back through it, and the
+        monitor returns to a smaller or negative unrealised. A resting TP makes the
+        target as durable as the stop.
+
+        PAPER GETS NOTHING (no venue order behind a simulated fill), and a position
+        with no `take_profit` gets nothing — some entries are stop-only.
+
+        A FAILURE HERE DOES NOT CLOSE OR REJECT THE POSITION, and is only a WARNING
+        rather than the stop's CRITICAL: an unprotected DOWNSIDE is a loss that can
+        run, but a missed target is only an upside not captured while the process is
+        down — the in-process monitor still takes it the moment the process is
+        alive. The stop is the safety-critical leg; this is the profit leg.
+        """
+        if pos.tab != "real" or pos.take_profit is None:
+            return
+
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        if not venue.has_credentials():
+            return
+
+        exit_side = "sell" if pos.side == "buy" else "buy"
+        result = await venue.place_take_profit(
+            symbol=pos.symbol,
+            side=exit_side,
+            qty=pos.qty,
+            take_profit_price=pos.take_profit,
+            client_order_id=f"tp_{pos.tar_id}"[:36],
+        )
+
+        if result.ok:
+            pos.tp_order_id = result.order_id
+            logger.info(
+                "Resting take-profit placed at %s for %s %s @ %s (order %s). The target is "
+                "now captured even if this process stops.",
+                venue.id, pos.symbol, pos.qty, pos.take_profit, result.order_id,
+            )
+        else:
+            pos.tp_order_id = None
+            logger.warning(
+                "No resting take-profit at the venue for %s (%s): %s. The stop still rests; "
+                "only the upside target waits on this process being alive.",
+                pos.symbol, pos.tar_id, result.error,
+            )
+
+    async def _cancel_resting_tp(self, pos: "_Tracked", reason: str) -> None:
+        """Remove the venue-side take-profit once its position is gone.
+
+        Same reasoning as `_cancel_resting_stop`: a reduce-only order left resting
+        on a now-flat account is clutter that a reconcile would flag, so cancelling
+        is the second half of the close. It is reduce-only so it cannot reverse the
+        position, but a stale order must not be left behind.
+        """
+        if not pos.tp_order_id:
+            return
+
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        ok = await venue.cancel_order(pos.tp_order_id, pos.symbol)
+        if ok:
+            pos.tp_order_id = None
+        else:
+            logger.warning(
+                "Could not cancel the resting take-profit %s for %s after %s. It is "
+                "reduce-only so it cannot reverse the position, but cancel it manually at "
+                "%s to keep the venue's open-order list clean.",
+                pos.tp_order_id, pos.symbol, reason, venue.id,
             )
 
     async def track_manual_position(
@@ -872,6 +956,11 @@ class PositionMonitorAgent(BaseAgent):
             # where a crash loses the id and orphans the stop at the venue.
             if tracked is not None:
                 await self._place_resting_stop(tracked)
+                # The take-profit rests beside the stop — see `_place_resting_tp`.
+                # Placed AFTER the stop deliberately: the stop is the
+                # safety-critical leg and goes on first, so a failure placing the
+                # TP cannot delay the downside protection.
+                await self._place_resting_tp(tracked)
             await self.persist_watch_list()
             return
 
@@ -1007,6 +1096,9 @@ class PositionMonitorAgent(BaseAgent):
             # Done here rather than after `_open.pop` so the id is still in hand,
             # and awaited so a failure is logged while the symbol is still known.
             await self._cancel_resting_stop(pos, f"close by {reason}")
+            # And the take-profit — the other resting leg. Cancelled here for the
+            # same reason and while its id is still in hand.
+            await self._cancel_resting_tp(pos, f"close by {reason}")
 
             self._open.pop(pos.tar_id, None)
             # Persisted BEFORE POSITION_CLOSED is published. A crash between the

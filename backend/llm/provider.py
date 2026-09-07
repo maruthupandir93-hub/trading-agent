@@ -52,6 +52,28 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _record_health(model, tier, *, ok, error=None, error_class=None):
+    """Record a call outcome for the health tracker. Never raises — a health
+    write must not be able to fail a real completion."""
+    try:
+        from backend.llm.health import get_health_tracker
+        get_health_tracker().record(
+            model=model, tier=(tier.value if tier is not None else None),
+            ok=ok, error=error, error_class=error_class,
+        )
+    except Exception:  # noqa: BLE001 - measurement must never break the call
+        pass
+
+
+def _classify(status_code, error, *, timed_out=False, empty=False):
+    try:
+        from backend.llm.health import classify
+        return classify(status_code, error, timed_out=timed_out, empty=empty)
+    except Exception:  # noqa: BLE001
+        return "other"
+
+
+
 class ModelTier(str, Enum):
     """Which class of model a call needs. See Section 39.6.
 
@@ -508,22 +530,21 @@ class OpenAICompatibleProvider(LLMProvider):
                 "LLM call to %s (%s, tier=%s) timed out after %.0fms",
                 self._provider_id, model, tier.value, elapsed,
             )
-            return LLMResult(
-                text=None, model=model, tier=tier, latency_ms=elapsed,
-                error=(
-                    f"{self._provider_id}: model {model} timed out after "
-                    f"{read_timeout:.0f}s on the {tier.value} tier. Either the model "
-                    f"is slower than this tier allows (see _TIER_TIMEOUT_S) or the "
-                    f"endpoint is not responding."
-                ),
+            _err = (
+                f"{self._provider_id}: model {model} timed out after "
+                f"{read_timeout:.0f}s on the {tier.value} tier. Either the model "
+                f"is slower than this tier allows (see _TIER_TIMEOUT_S) or the "
+                f"endpoint is not responding."
             )
+            _record_health(model, tier, ok=False, error=_err,
+                           error_class=_classify(None, _err, timed_out=True))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
         except httpx.HTTPError as e:
             elapsed = (time.monotonic() - started) * 1000
             logger.warning("LLM call to %s failed: %s", self._provider_id, e)
-            return LLMResult(
-                text=None, model=model, tier=tier, latency_ms=elapsed,
-                error=f"{self._provider_id}: {type(e).__name__}: {e}",
-            )
+            _err = f"{self._provider_id}: {type(e).__name__}: {e}"
+            _record_health(model, tier, ok=False, error=_err, error_class=_classify(None, _err))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
 
         elapsed = (time.monotonic() - started) * 1000
 
@@ -543,18 +564,17 @@ class OpenAICompatibleProvider(LLMProvider):
                     "LLM provider %s returned HTTP %d: %s",
                     self._provider_id, response.status_code, body,
                 )
-            return LLMResult(
-                text=None, model=model, tier=tier, latency_ms=elapsed,
-                error=f"{self._provider_id}: HTTP {response.status_code}: {body}",
-            )
+            _err = f"{self._provider_id}: HTTP {response.status_code}: {body}"
+            _record_health(model, tier, ok=False, error=_err,
+                           error_class=_classify(response.status_code, _err))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
 
         try:
             data = response.json()
         except ValueError:
-            return LLMResult(
-                text=None, model=model, tier=tier, latency_ms=elapsed,
-                error=f"{self._provider_id}: returned a non-JSON body",
-            )
+            _err = f"{self._provider_id}: returned a non-JSON body"
+            _record_health(model, tier, ok=False, error=_err, error_class=_classify(None, _err))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
 
         choices = data.get("choices") or []
         message = ((choices[0] or {}).get("message") or {}) if choices else {}
@@ -598,16 +618,17 @@ class OpenAICompatibleProvider(LLMProvider):
             else:
                 detail = ""
 
-            return LLMResult(
-                text=None, model=model, tier=tier, latency_ms=elapsed,
-                error=(
-                    f"{self._provider_id}: {model} returned an empty completion"
-                    + (f" (finish_reason={finish})" if finish else "")
-                    + detail
-                ),
+            _err = (
+                f"{self._provider_id}: {model} returned an empty completion"
+                + (f" (finish_reason={finish})" if finish else "")
+                + detail
             )
+            _record_health(model, tier, ok=False, error=_err,
+                           error_class=_classify(None, _err, empty=True))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
 
         usage = data.get("usage") or {}
+        _record_health(data.get("model") or model, tier, ok=True)
         return LLMResult(
             text=text.strip(),
             model=data.get("model") or model,

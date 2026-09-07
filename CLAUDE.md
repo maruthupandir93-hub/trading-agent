@@ -689,6 +689,35 @@ A refused stop does NOT reject the position: it is already open and the money ha
 moved, so refusing to track it would leave it open AND unwatched. It logs CRITICAL
 instead, because the operator is then relying on this process staying up.
 
+**THE TAKE-PROFIT RESTS TOO, as the mirror of the stop.**
+`_place_resting_tp` -> `Venue.place_take_profit` places a reduce-only take-profit
+beside the stop on every real fill (`monitored_positions.tp_order_id` persists it,
+and both legs are cancelled on close). Without it, a favourable move that reaches
+the target while the process is restarting is simply MISSED — the position rides
+back through it and the monitor, once alive, has a smaller or negative unrealised
+to act on. The TP makes the target as durable as the stop.
+
+Two asymmetries with the stop are deliberate:
+  * A REFUSED TP is a WARNING, not CRITICAL. An unprotected downside is a loss
+    that runs; a missed target is only an upside not captured while down, and the
+    in-process monitor still takes it the moment the process is alive. The stop is
+    the safety-critical leg; the TP is the profit leg.
+  * The two are NOT linked as exchange OCO. Both are reduce-only, so if one fires
+    while the process is down the other cannot open or reverse a position — it can
+    only close, and closing a flat account does nothing. That reduce-only backstop
+    is why they can rest together safely; the in-process close still cancels both
+    when alive. ccxt does not expose OCO cleanly for market orders on either venue,
+    and it is not needed given reduce-only.
+`place_take_profit` uses ccxt's unified `takeProfitPrice` (TAKE_PROFIT_MARKET on
+Binance, side-derived trigger on Bybit, mark-price trigger on both) — the exact
+mirror of `stopLossPrice`, and it avoids the bare-`triggerPrice` generic-trigger
+bug that once stopped the Bybit stop reaching the venue at all.
+`tests/test_resting_stop.py` (both legs placed on a fill, both cancelled on close,
+tp_order_id survives a watch-row round trip) and `tests/test_venue_live_path.py`
+(the unified param, mark price, reduce-only, resolved perpetual) pin it. Binance
+order placement of the TP is unverified for the same reason the stop's is — ccxt
+dropped Binance futures testnet.
+
 ### Reconciliation REPORTS, and must never repair
 
 `backend/services/reconciliation.py` asks the venue what it holds and compares.
@@ -1412,6 +1441,160 @@ One model the operator asked for was NOT usable: `writer/palmyra-fin-70b-32k` (a
 finance model) is in the catalog but returns 404 "Not found for account" — it is
 not enabled on this key. If it is ever enabled, it is a natural fit for the
 consultation slot (a genuinely different, finance-specialised prior).
+
+### Risk parameters are now aligned across TS and Python
+
+An external audit (Sept 2026) flagged that `lib/riskManager.ts` used 1.2x/1.8x ATR
+while `backend/core/risk_manager.py` used 2.5x — so the SAME setup sized a tighter
+stop on the browser/manual path than on the autonomous backend path. Python is
+authoritative (it carries the only live-trade evidence — the nine-SOL-trade
+finding that drove 1.5x -> 2.5x because five of six losses were noise-band
+stop-outs), so the TS side was aligned TO it: `ATR_FLOOR_MULTIPLIER` and
+`ATR_FALLBACK_MULTIPLIER` are both 2.5 now, reward ratio still 2 (== 5.0/2.5). The
+structural swing stop is kept but floored at 2.5x ATR for the same noise-band
+reason. If these change again, change the Python file first and mirror it; two
+numbers that must agree live in two files, kept in sync deliberately.
+
+### LLM health is a metric now, not something a human notices in prose
+
+`backend/llm/health.py` records the outcome of every `complete()` call — the
+provider wires `_record_health` into all six return paths — and
+`GET /api/monitoring` exposes `llmHealth`: the FALLBACK RATE over a rolling 500
+calls, a breakdown by failure class (rate_limited / timeout / model_eol / auth /
+empty), and any configured model that looks DEAD.
+
+This exists because the reasoning layer degraded silently once (the gpt-oss-120b
+EOL) and the only reason it was caught is a human noticing the lessons all read
+the same. The provider fails closed, so a dead model is invisible from the
+outside. Dead-model detection is DERIVED FROM REAL CALLS, not a scheduled probe:
+two 410/404 responses for a model in the window flag it (one is a fluke), and the
+note names it and says to update `.env`. No probe means no extra spend against the
+40/min key budget, and it reflects the requests that actually matter. It is
+measurement only — it never retries, degrades or gates. `tests/test_llm_health.py`
+pins the classification, the fallback-rate maths, the two-strike dead-model rule,
+and that a recovered model ages out of the window.
+
+### The strategies are backtested now, and the results are stored
+
+The audit's §2.6: `core/backtest_engine.py` existed but produced no per-strategy
+P&L ("we just track trade count"), so every profile carried
+`historical_success_rate=None` with nothing measured.
+
+`backend/core/strategy_backtest.py` is a pure, deterministic simulation: for each
+strategy it walks historical candles, feeds the trailing 120-bar window to that
+strategy's REAL `STRATEGY_FUNCTIONS[name]` signal function, and simulates every
+signal under the SAME risk model the live agent places —
+`ATR_STOP_MULTIPLIER`/`ATR_TARGET_MULTIPLIER` imported from `core/risk_manager`,
+so the backtest and the live system (and now the aligned TS path) cannot disagree
+about the stop and target. Outcomes are in R (1R = the risk); expectancy in R is
+the edge figure, comparable across symbols and ATRs. `tests/test_strategy_backtest.py`
+pins the arithmetic offline (a target is +2R, a stop -1R, an ambiguous bar assumes
+the stop, and — a fixture lesson — a resolving bar's large range inflates the
+14-bar ATR, so trades must be spaced for clean numbers; the engine was right and
+the first fixture was naive).
+
+`scripts/run_backtests.py` fetches real klines (public Binance, no key), runs all
+eleven strategies over several symbols/timeframes, prints a ranked table and
+STORES `backtests/<date>/summary.json` (reproducible — the candle window is
+stamped in). First run, 2026-09-06, 1000 candles each of SOL/ETH/XRP at 15m/1h,
+pooled expectancy in R:
+
+    Scalping   +0.160    Breakout  +0.142    Momentum  +0.125     (net positive)
+    Swing      -0.007    Trend     -0.007                          (break-even)
+    MeanReversion -0.103  Range -0.184  Grid -0.206  Arbitrage -0.212  VWAP -0.328
+
+READ THIS HONESTLY, and the script says so in its output:
+  * Gross of fees and slippage. Scalping tops the list but its own profile says a
+    gross backtest overstates it — fees eat the edge — so treat its +0.16R as
+    break-even net.
+  * IN-SAMPLE and mostly a trending window (ETH 1913->2500, XRP 1.10->1.42). The
+    range/mean-reversion/grid strategies losing here is partly that they were
+    tested in a trend, which their regime gate would have muted live. A ranging
+    window would rank them differently. This is EVIDENCE for the ensemble weights,
+    not a verdict to delete a strategy.
+  * The payoff is a fixed 2:1 (the risk model), so win rate alone decides sign —
+    break-even is 33.3%, which is exactly where the table splits.
+  * `strategy_performance.MIN_SAMPLE` (20 REAL closed trades) still governs live
+    promotion. A backtest informs; it does not deploy (invariant 5).
+
+### `exchange_agent.py` no longer swallows exceptions silently
+
+The four multi-exchange price fetchers (dashboard widget only — NOT the trade
+path) did `except Exception: pass; return None`, so a rate-limit, a schema change,
+a timeout and a real outage were indistinguishable and the widget blanked with no
+line anywhere. Each now logs the reason at WARNING before returning None, per
+invariant 6. None is still the return; the widget still shows the venues that
+answered; the reason is now diagnosable.
+
+### Telegram alerts — entry and close, paper and real on separate channels
+
+`backend/services/telegram_notifier.py`. For an operator running the agent 24/7
+unattended, the two messages that matter: an ENTRY on every fill, and a CLOSE
+carrying realised P&L, the current WIN RATE and the current TOTAL BALANCE.
+
+WHY THESE TWO EVENTS. `ORDER_FILLED` is published only on the execution agent's
+OPEN path; `close_position` publishes nothing and the CLOSE is announced by
+`POSITION_CLOSED` (which carries the realised P&L). So entry->ORDER_FILLED and
+close->POSITION_CLOSED with no open/close ambiguity. Manual operator-panel trades
+do NOT flow through ORDER_FILLED and are deliberately not notified — a human
+clicking Buy already knows; this is for the agent nobody is watching.
+
+TWO CHANNELS, ROUTED BY TAB. `TELEGRAM_CHAT_ID_PAPER` and `TELEGRAM_CHAT_ID_REAL`;
+the message goes to the channel for `event.tab`. A tab with no chat id is SKIPPED,
+never cross-posted — a real fill must never land in the paper channel because the
+real one is not set up yet, so paper-only is a valid config.
+
+IT NEVER BLOCKS OR BREAKS THE BUS. The bus delivers an event to every subscriber
+in turn, so an awaited ~200ms Telegram POST would delay POSITION_CLOSED reaching
+the reflection and monitor agents. The send is FIRE-AND-FORGET: `handle_event`
+schedules the HTTP call and returns; the call has its own 10s timeout and swallows
+every error. A missed alert is a missed alert; it may never slow a trade.
+`current_equity(tab)` supplies the balance (exchange balance for real, marked book
+for paper); the win rate is a direct `count(pnl>0)/count(pnl)` over the tab's
+closed trades. Both are OMITTED if unreadable (invariant 6), and their absence
+never suppresses the P&L line. Off unless `TELEGRAM_BOT_TOKEN` + a chat id are set;
+status (never the token) is on `GET /api/monitoring` as `telegram`.
+`tests/test_telegram_notifier.py` pins routing, content, the skip-not-crosspost
+rule, and that a send neither blocks nor raises.
+
+### Session capital allocation — trade with 25 / 50 / 75 / 100% of the balance
+
+The operator picks, per session on the home page, how much of the account the
+agent may deploy. `TradingSession.capital_fraction` (default 1.0), set through
+`POST /api/session/start` (`capitalFraction`), read by the Risk Gateway via
+`trading_session.active_capital_fraction()`.
+
+It does TWO things, both in `risk_gateway.gate()`:
+  1. SIZES each trade against that fraction of the account (`equity *= fraction`
+     before sizing), so 25% makes every trade a quarter of what it would be.
+  2. CAPS the total margin committed at once at `fraction × account_capital` —
+     once the pool is deployed, `CapitalPool` rejects new trades until one closes.
+     `account_capital` is `cash + deployed_margin` (free cash + locked margin),
+     NOT the leverage-inflated `cash + notional`; `_deployed_margin` reads
+     `marginLocked` and falls back to notional/leverage (unknown leverage → 1x,
+     which over-counts and so caps SOONER, never later).
+
+IT IS NOT A LEVERAGE SOURCE. The leverage ceiling and mandatory stop are
+untouched, so 100% means "use the whole account as margin", never "use more
+leverage". 1.0 is byte-for-byte the pre-feature behaviour (no `CapitalPool` check
+appears), so the feature is fully opt-in and applies to paper and real alike.
+`tests/test_capital_allocation.py` pins the linear sizing, the pool rejection, and
+that full allocation changes nothing.
+
+### Why the agent barely trades in sideways markets (it is not a bug)
+
+Confidence-to-trade is set PER REGIME in `dynamic_thresholding.get_required_confidence`:
+Bull Trend 0.60, Bear Trend 0.65, **Range 0.75, Low Volatility 0.70**, High Vol
+0.85. In a ranging/quiet market the debate reaches only ~0.20, so the Supervisor
+returns WAIT — measured live, 2,904 evaluations in one day, every rejection either
+"debate concluded NEUTRAL" or "Confidence 0.20 does not meet the 0.75 threshold
+for regime 'Range'". This is the trend-follower correctly staying out of chop: the
+backtest showed the range strategies (MeanReversion, Range, Grid) are
+net-negative, and the ledger's noise-band stop-outs were exactly what forcing
+range trades produces. Longs-only recently is the same cause — the debate found no
+confident SHORT, not a hardcoded bias (`score_debate` returns SHORT and the
+Supervisor sizes it). The operator was asked whether to lower the range threshold
+to trade sideways and chose to keep the current selectivity.
 
 ## Safety invariants — never break these
 

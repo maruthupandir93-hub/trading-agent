@@ -18,11 +18,32 @@ import { getCorrelation, type CorrelationMatrix } from './portfolioIntelligence'
 //      noise-distance, not a real level, so it gets widened to the ATR
 //      floor instead of trusted as-is.
 // Take profit is then set at a fixed reward:risk multiple of whatever
-// the final stop distance is — 2R by default, a conservative, common
-// default rather than anything asset-specific.
-const ATR_FLOOR_MULTIPLIER = 1.2;
-const ATR_FALLBACK_MULTIPLIER = 1.8; // wider than the floor, since a pure-ATR stop has no structural backing at all
-const DEFAULT_REWARD_RISK_RATIO = 2;
+// the final stop distance is — 2R by default.
+//
+// ALIGNED TO THE PYTHON RISK MANAGER (2026-09). `backend/core/risk_manager.py`
+// is the authoritative sizing implementation for the autonomous agent, and it
+// carries the only live-trade evidence behind these numbers: `ATR_STOP_MULTIPLIER
+// = 2.5`, `ATR_TARGET_MULTIPLIER = 5.0` (a 2:1 payoff on a 2.5x-ATR stop). It was
+// widened from 1.5 after nine live SOL trades showed five of six losses were
+// stop-outs of 0.45-0.79% while the 15m ATR% was ~0.43 — i.e. the stop was sitting
+// INSIDE the noise band. See the "three changes that came out of reading the live
+// ledger" note in CLAUDE.md.
+//
+// This file used to use 1.2x (floor) / 1.8x (fallback), so the same setup sized a
+// materially TIGHTER stop on the browser/manual path than on the autonomous
+// backend path — the exact TS/Python divergence flagged in the Sept 2026 audit.
+// Both now express a 2.5x-ATR minimum stop and a 2:1 target. The structural swing
+// stop is kept (a stop just beyond a real level is more meaningful than a fixed
+// multiple), but it is now FLOORED at 2.5x ATR for the same noise-band reason the
+// Python change was made — and when a swing sits further out the stop only ever
+// gets WIDER, which shrinks size and holds dollar risk constant, never looser.
+//
+// If these need to change again, change the Python file first (it has the
+// evidence) and mirror it here. Two numbers that must agree live in two files;
+// keep them in sync deliberately.
+const ATR_FLOOR_MULTIPLIER = 2.5; // matches backend ATR_STOP_MULTIPLIER
+const ATR_FALLBACK_MULTIPLIER = 2.5; // pure-ATR stop == the Python stop distance
+const DEFAULT_REWARD_RISK_RATIO = 2; // 2.5x stop -> 5.0x target, matching backend's 2:1
 
 export type StopLossTakeProfit = {
   stopLoss: number;

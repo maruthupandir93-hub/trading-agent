@@ -31,7 +31,9 @@ from fastapi import APIRouter
 
 from backend.core.agent_os import get_agent_os
 from backend.graphs.registry import coverage as node_coverage
+from backend.llm.health import llm_health_status
 from backend.llm.provider import consultation_panel_status, provider_status
+from backend.services.telegram_notifier import telegram_status as _telegram_status
 
 router = APIRouter()
 
@@ -80,6 +82,18 @@ async def get_system_health():
         # themselves unavailable and the deterministic nodes carry the run —
         # which is the designed degraded mode, not a failure.
         "llm": llm,
+
+        # Telegram alerts — whether entry/close messages are wired, per channel.
+        # Never returns the bot token.
+        "telegram": _telegram_status(),
+
+        # LLM HEALTH — the number that would have caught the silent degradation.
+        # `provider_status` above says whether a provider is CONFIGURED; this says
+        # whether it is actually WORKING: the fallback rate over recent calls, a
+        # breakdown by failure class, and any configured model that looks DEAD
+        # (returning 410/404) so an EOL like gpt-oss-120b surfaces as an alert
+        # instead of being noticed weeks later in prose.
+        "llmHealth": llm_health_status(),
 
         # The Phase 48 second-opinion panel, reported separately from the main
         # provider because they are configured separately and fail separately.

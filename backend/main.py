@@ -246,6 +246,16 @@ async def lifespan(app: FastAPI):
     # Closes deliberately ignore the first flag: a flag that gated exits would
     # trap the operator in positions while it was off (invariant 4).
     subscribe_execution_to_plans(_active_base_agents['execution'])
+
+    # Telegram alerts: an entry message on every agent ORDER_FILLED and a close
+    # message (with win rate and total balance) on every POSITION_CLOSED, routed
+    # to a paper or real channel by the trade's tab. Off unless configured; when
+    # off this subscribes nothing. Sends are fire-and-forget so a slow Telegram
+    # endpoint never delays an event reaching the reflection or monitor agents.
+    from backend.services.telegram_notifier import subscribe_telegram_notifier
+
+    subscribe_telegram_notifier()
+
     logger.info(
         "Execution service wired. GRAPH_EXECUTION_ENABLED=%s — graph runs %s submit "
         "TARs; closes are always routed regardless.",

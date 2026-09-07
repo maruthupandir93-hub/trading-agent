@@ -756,6 +756,9 @@ CREATE TABLE IF NOT EXISTS monitored_positions (
   -- becomes an order to OPEN the opposite position the next time price touches
   -- it. NULL for paper positions, which have no venue order.
   stop_order_id text,
+  -- The venue's id for the RESTING take-profit, the mirror of stop_order_id.
+  -- Persisted for the same reason: a restart must be able to cancel it.
+  tp_order_id   text,
   -- ATTRIBUTION, carried from the approval so the CLOSING trade row can record
   -- it. Without these three the learning loop is structurally dead:
   -- `strategy_performance` selects `WHERE pnl IS NOT NULL AND strategy IS NOT
@@ -773,6 +776,7 @@ CREATE TABLE IF NOT EXISTS monitored_positions (
 -- could not widen the origin_tag CHECK. `init_db` applies this file on every
 -- startup, so the ALTERs below are the part that actually reaches an existing
 -- database.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS tp_order_id   text;
 ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS strategy      text;
 ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS run_id        text;
 ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS entry_context text;

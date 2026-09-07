@@ -59,6 +59,11 @@ class StartSessionRequest(BaseModel):
     startAmount: Optional[float] = Field(None, gt=0)
     # Optional. Defaults to half the starting equity — see DEFAULT_FLOOR_FRACTION.
     floorEquity: Optional[float] = Field(None, ge=0)
+    # How much of the account this session may trade with: 0.25 / 0.5 / 0.75 / 1.0
+    # (the home page shows them as 25/50/75/100%). Defaults to 1.0 = the whole
+    # account, the pre-feature behaviour. Bounded (0, 1]; `start_session` clamps
+    # anything else back to 1.0. Applies to both paper and real.
+    capitalFraction: float = Field(1.0, gt=0, le=1.0)
 
 
 @router.get("")
@@ -146,6 +151,7 @@ async def start(req: StartSessionRequest) -> Dict[str, Any]:
             target_equity=req.targetEquity,
             floor_equity=req.floorEquity,
             start_amount=req.startAmount,
+            capital_fraction=req.capitalFraction,
         )
     except ValueError as exc:
         # A refusal the operator can act on, not a server fault.

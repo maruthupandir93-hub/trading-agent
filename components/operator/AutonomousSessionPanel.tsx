@@ -53,6 +53,7 @@ type Session = {
   start_equity: number;
   target_equity: number;
   floor_equity: number;
+  capital_fraction: number;
   status: string;
   started_at: number;
   finished_at: number | null;
@@ -127,6 +128,9 @@ export function AutonomousSessionPanel() {
   const [startAmount, setStartAmount] = useState('');
   const [target, setTarget] = useState('');
   const [floor, setFloor] = useState('');
+  // How much of the balance this session may trade with. 100% = the whole
+  // account (the pre-feature default). 25/50/75 keep more in reserve.
+  const [capitalPct, setCapitalPct] = useState(100);
 
   const load = useCallback(async () => {
     try {
@@ -214,6 +218,9 @@ export function AutonomousSessionPanel() {
           symbol,
           leverage,
           targetEquity: targetNum,
+          // The fraction of the account this session may deploy. 100% preserves
+          // the old behaviour exactly.
+          capitalFraction: capitalPct / 100,
           // Only sent when the operator actually chose one, and never on the real
           // book — the backend rejects it there rather than trusting this check
           // alone.
@@ -229,7 +236,7 @@ export function AutonomousSessionPanel() {
     } finally {
       setBusy(false);
     }
-  }, [symbol, leverage, targetNum, floorNum, startNum, canEditStart, load]);
+  }, [symbol, leverage, targetNum, floorNum, startNum, capitalPct, canEditStart, load]);
 
   const stop = useCallback(async () => {
     setBusy(true);
@@ -299,6 +306,7 @@ export function AutonomousSessionPanel() {
             <Stat label="Coin" value={<span className="mono">{active.symbol}</span>} />
             <Stat label="Started from" value={<Num value={active.start_equity} digits={2} prefix="$" />} />
             <Stat label="Leverage" value={<span className="mono">{active.leverage}x</span>} />
+            <Stat label="Allocation" value={<span className="mono">{Math.round((active.capital_fraction ?? 1) * 100)}%</span>} />
             <Stat label="Account now" value={<Num value={equity} digits={2} prefix="$" />} />
             <Stat label="Trades opened" value={<Num value={active.trades_opened} digits={0} />} />
           </div>
@@ -497,6 +505,42 @@ export function AutonomousSessionPanel() {
             {canEditStart
               ? 'Your wallet balance, not a coin price. The paper book is set to this amount, so the run is sized and scored at exactly that size. The session ends when the account reaches the target.'
               : 'Fetched from your exchange account and cached for 30s — it is not typeable, because a figure you entered would not be the money you actually have.'}
+          </div>
+
+          {/* CAPITAL ALLOCATION — how much of the balance this session may use.
+              Scales the size of every trade AND caps the total capital the agent
+              may commit at once. Not a leverage source: the leverage ceiling and
+              mandatory stop still bound every trade, so 100% means "use the whole
+              account as margin", never "use more leverage". */}
+          <div className="mb-2">
+            <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>
+              Capital to trade with — {capitalPct}% of the balance
+            </label>
+            <div className="grid grid-cols-4 gap-1.5">
+              {[25, 50, 75, 100].map((pct) => (
+                <button
+                  key={pct}
+                  type="button"
+                  onClick={() => setCapitalPct(pct)}
+                  className="py-1.5 rounded text-[12px] mono font-semibold"
+                  style={{
+                    background:
+                      capitalPct === pct
+                        ? 'color-mix(in srgb, var(--accent) 20%, transparent)'
+                        : 'var(--bg-surface-2)',
+                    color: capitalPct === pct ? 'var(--accent)' : 'var(--text-secondary)',
+                    border: `1px solid ${capitalPct === pct ? 'var(--accent)' : 'var(--border)'}`,
+                  }}
+                >
+                  {pct}%
+                </button>
+              ))}
+            </div>
+            <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              The session trades with this share of the account and never commits more than
+              it at once. Each trade is still sized by the risk rules within it, and the
+              leverage cap and stop-loss are unchanged.
+            </div>
           </div>
 
           <Field label="Give up if the account falls to ($, optional)">

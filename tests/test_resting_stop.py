@@ -37,13 +37,16 @@ class _FakeVenue:
 
     id = "binance"
 
-    def __init__(self, *, place_ok=True, cancel_ok=True, creds=True):
+    def __init__(self, *, place_ok=True, cancel_ok=True, creds=True, tp_ok=True):
         self.placed = []
+        self.tps_placed = []
         self.cancelled = []
         self._place_ok = place_ok
+        self._tp_ok = tp_ok
         self._cancel_ok = cancel_ok
         self._creds = creds
         self._n = 0
+        self._tpn = 0
 
     def has_credentials(self):
         return self._creds
@@ -56,6 +59,15 @@ class _FakeVenue:
             return OrderResult(ok=False, error="venue refused the stop")
         self._n += 1
         return OrderResult(ok=True, order_id=f"stop-{self._n}")
+
+    async def place_take_profit(self, *, symbol, side, qty, take_profit_price, client_order_id=None):
+        self.tps_placed.append(
+            {"symbol": symbol, "side": side, "qty": qty, "tp": take_profit_price, "coid": client_order_id}
+        )
+        if not self._tp_ok:
+            return OrderResult(ok=False, error="venue refused the take-profit")
+        self._tpn += 1
+        return OrderResult(ok=True, order_id=f"tp-{self._tpn}")
 
     async def cancel_order(self, order_id, symbol):
         self.cancelled.append((order_id, symbol))
@@ -230,3 +242,121 @@ async def test_cancelling_when_there_is_no_resting_stop_is_a_no_op(venue):
     pos = tracked(monitor)
     await monitor._cancel_resting_stop(pos, "close")
     assert venue.cancelled == []
+
+
+# ---------------------------------------------------------------------------
+# The resting TAKE-PROFIT — the mirror of the stop, added so a favourable move
+# during a restart is captured instead of missed. Same three failures, same
+# reduce-only safety that lets both rest at once.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_real_position_gets_a_resting_take_profit_on_the_exit_side(venue):
+    monitor = get_position_monitor()
+    pos = tracked(monitor, side="buy")           # long -> TP is a SELL
+
+    await monitor._place_resting_tp(pos)
+
+    assert len(venue.tps_placed) == 1
+    tp = venue.tps_placed[0]
+    assert tp["side"] == "sell"                  # exit side, mirrors the stop
+    assert tp["tp"] == 75_000.0
+    assert pos.tp_order_id == "tp-1"
+
+
+@pytest.mark.asyncio
+async def test_a_short_take_profit_is_a_buy(venue):
+    monitor = get_position_monitor()
+    pos = tracked(monitor, side="sell")          # short -> TP is a BUY
+    await monitor._place_resting_tp(pos)
+    assert venue.tps_placed[0]["side"] == "buy"
+
+
+@pytest.mark.asyncio
+async def test_a_paper_position_gets_no_resting_take_profit(venue):
+    monitor = get_position_monitor()
+    pos = tracked(monitor, tab="paper")
+    await monitor._place_resting_tp(pos)
+    assert venue.tps_placed == []
+    assert pos.tp_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_position_with_no_take_profit_gets_no_tp_order(venue):
+    """Some entries are stop-only. That is not a failure to place a TP."""
+    monitor = get_position_monitor()
+    pos = tracked(monitor)
+    pos.take_profit = None
+    await monitor._place_resting_tp(pos)
+    assert venue.tps_placed == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_take_profit_does_not_reject_the_position(venue):
+    """A missed target is only an upside not captured while down — unlike a
+    refused STOP, it is a WARNING, and the position stays tracked."""
+    venue._tp_ok = False
+    monitor = get_position_monitor()
+    pos = tracked(monitor)
+    await monitor._place_resting_tp(pos)
+    assert pos.tp_order_id is None
+    assert "tar-1" in monitor._open           # still tracked
+
+
+@pytest.mark.asyncio
+async def test_a_fill_places_BOTH_a_resting_stop_and_a_take_profit(venue):
+    """The whole point: on a real fill the position gets both resting legs."""
+    import uuid
+    from backend.models.events import OrderFilledEvent, TarApprovedEvent
+
+    monitor = get_position_monitor()
+    tar = uuid.uuid4()
+    await monitor.handle_event(TarApprovedEvent(
+        tar_id=tar, symbol="BTC/USDT", direction="LONG", approved_size=0.5,
+        approved_leverage=3, cro_rationale="ok", stop_loss=68_000.0,
+        take_profit=75_000.0, tab="real",
+    ))
+    await monitor.handle_event(OrderFilledEvent(
+        tar_id=tar, order_id="o1", symbol="BTC/USDT", side="buy", tab="real",
+        fill_price=70_000.0, fill_quantity=0.5, slippage_bps=0.0, fee=0.0,
+        exchange="binance",
+    ))
+
+    assert len(venue.placed) == 1               # the stop
+    assert len(venue.tps_placed) == 1           # the take-profit
+    pos = monitor._open[str(tar)]
+    assert pos.stop_order_id == "stop-1"
+    assert pos.tp_order_id == "tp-1"
+
+
+@pytest.mark.asyncio
+async def test_both_resting_orders_are_cancelled_on_close(venue):
+    monitor = get_position_monitor()
+    pos = tracked(monitor)
+    pos.stop_order_id = "stop-1"
+    pos.tp_order_id = "tp-1"
+
+    await monitor._cancel_resting_stop(pos, "close")
+    await monitor._cancel_resting_tp(pos, "close")
+
+    assert ("stop-1", "BTC/USDT") in venue.cancelled
+    assert ("tp-1", "BTC/USDT") in venue.cancelled
+    assert pos.stop_order_id is None
+    assert pos.tp_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_tp_order_id_survives_a_watch_row_round_trip(venue):
+    """`tp_order_id` must be emitted by _watch_rows (bound by name from _FIELDS),
+    or it persists as NULL on every row exactly as stop_order_id once did."""
+    from backend.services.position_store import _FIELDS
+
+    monitor = get_position_monitor()
+    pos = tracked(monitor)
+    pos.stop_order_id = "stop-1"
+    pos.tp_order_id = "tp-1"
+
+    open_row = [r for r in monitor._watch_rows() if r["status"] == "open"][0]
+    assert "tp_order_id" in _FIELDS
+    assert open_row["tp_order_id"] == "tp-1"

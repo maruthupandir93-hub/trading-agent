@@ -747,6 +747,90 @@ class Venue:
             adjusted_qty=check.qty,
         )
 
+    async def place_take_profit(
+        self, *, symbol: str, side: str, qty: float, take_profit_price: float,
+        client_order_id: Optional[str] = None,
+    ) -> OrderResult:
+        """A RESTING take-profit at the venue — the mirror of `place_stop_loss`.
+
+        WHY A RESTING TP AS WELL AS A RESTING STOP. The stop protects the downside
+        while the process is down; the take-profit captures the upside in the same
+        window. Without it, a favourable move that would have hit the target while
+        the process was restarting is simply missed — the position rides back
+        through it and the in-process monitor, once back, has nothing to act on but
+        a smaller (or negative) unrealised. A resting TP makes the target as
+        durable as the stop.
+
+        REDUCE-ONLY, like the stop, and that is what makes it safe to rest ALONGSIDE
+        the stop. If one fires while the process is down, the other is left resting
+        — but reduce-only means it can only ever CLOSE a position, never open or
+        reverse one, so a TP that fires and then a stop that later triggers on the
+        now-flat account does nothing. The in-process close still cancels both when
+        the process is alive; the reduce-only flag is the backstop for when it is
+        not. (This is also why the two do not need exchange OCO linkage, which
+        Binance and Bybit express differently and neither exposes cleanly through
+        ccxt for market orders.)
+
+        `side` is the EXIT side — sell to close a long. ccxt maps `takeProfitPrice`
+        to `TAKE_PROFIT_MARKET` on Binance and derives Bybit's `triggerDirection`
+        from the side (a sell TP closing a long triggers on a RISE), the exact
+        mirror of the stop.
+        """
+        if not self.has_credentials():
+            return OrderResult(
+                ok=False,
+                error=f"no {self.id} credentials configured ({self.key_variable})",
+            )
+
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return OrderResult(
+                ok=False, requested_qty=qty,
+                error=f"{symbol} has no linear perpetual market on {self.id}",
+            )
+
+        check = await self.check_size(resolved, qty, take_profit_price)
+        if not check.ok:
+            return OrderResult(ok=False, error=check.reason, requested_qty=qty)
+
+        hedge = await self.hedge_mode()
+        params = self._order_params(
+            side=side, reduce_only=True, hedge=hedge, client_order_id=client_order_id
+        )
+        try:
+            price_str = self.public.price_to_precision(resolved, take_profit_price)
+        except Exception:
+            price_str = take_profit_price
+
+        # `takeProfitPrice` is ccxt's unified take-profit trigger, and it is
+        # handled symmetrically to `stopLossPrice` on both venues — see the long
+        # note in `place_stop_loss`. Both venues omit it from the outgoing request.
+        order_type = "market"
+        params["takeProfitPrice"] = price_str
+        if self.id == "bybit":
+            params["triggerBy"] = "MarkPrice"
+        else:
+            params["workingType"] = "MARK_PRICE"
+
+        try:
+            order = await self.private.create_order(resolved, order_type, side, check.qty, None, params)
+        except Exception as exc:
+            logger.error(
+                "%s: take-profit order REJECTED for %s at %s (%s). The position still has its "
+                "resting STOP (placed separately) — only the upside target is unprotected "
+                "against a restart; the in-process monitor still enforces it while alive.",
+                self.id, symbol, take_profit_price, exc,
+            )
+            return OrderResult(ok=False, error=str(exc), requested_qty=qty, adjusted_qty=check.qty)
+
+        return OrderResult(
+            ok=True,
+            order_id=str(order.get("id")) if order.get("id") is not None else None,
+            raw=order,
+            requested_qty=qty,
+            adjusted_qty=check.qty,
+        )
+
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         """Cancel a resting order. True only when the venue confirmed it.
 
