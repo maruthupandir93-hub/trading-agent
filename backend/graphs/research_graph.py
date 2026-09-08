@@ -73,11 +73,16 @@ MIN_SCORE_TO_VALIDATE = 0.5
 # Why no score is available today. Stated once so every code path that reports it
 # gives the same reason.
 BACKTEST_UNAVAILABLE = (
-    "no backtest was executed: core/backtest_engine.HistoricalBacktestEngine calls "
-    "bus._subscribers.clear() in its constructor, so running it inside a live "
-    "process would unsubscribe the trigger worker, the CRO, the execution agent and "
-    "the position monitor. It must run out of band with an isolated bus before this "
-    "graph can produce a real score."
+    "no HYPOTHESIS-specific backtest was executed. A per-strategy backtester now "
+    "exists (core/strategy_backtest + scripts/run_backtests, and the bus-isolation "
+    "defect this note used to cite — HistoricalBacktestEngine clearing the live "
+    "bus — is fixed: it runs on a private MessageBus and restores every agent). But "
+    "those measure a STRATEGY's edge over candles, not an arbitrary hypothesis like "
+    "'trend entries within 30 minutes of a funding flip lose more often'. That "
+    "needs a walk-forward query over the ledger keyed to the hypothesis's own "
+    "claim, which is not wired. So this function records the request and reports "
+    "that no score could be produced — it deliberately does NOT invent one, because "
+    "an unvalidated hypothesis reaching production is invariant 5's exact failure."
 )
 
 

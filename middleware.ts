@@ -31,8 +31,15 @@ export function middleware(req: NextRequest) {
   });
 }
 
-// Apply the middleware to all routes except Next.js static assets and API routes 
-// (which have their own TRADES_API_KEY auth).
+// Apply the middleware to all routes except Next.js static assets and API routes.
+//
+// `/api` is excluded here because some API routes are polled before a page has
+// prompted for Basic auth, and challenging them would break rendering. The
+// SENSITIVE one — `/api/backend/[...path]`, which forwards to the backend with
+// the server key — enforces the SAME DASHBOARD_PASSWORD check itself (see that
+// route), and refuses writes entirely when no password is set. So excluding
+// `/api` here does NOT leave the backend proxy unauthenticated; the check lives
+// with the route that attaches the key.
 export const config = {
   matcher: [
     /*

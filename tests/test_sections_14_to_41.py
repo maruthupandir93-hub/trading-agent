@@ -293,7 +293,12 @@ def test_the_validation_request_path_cannot_reach_validated():
 
     result = asyncio.run(request_validation("nope"))
     assert result.status is None
-    assert any("no backtest was executed" in u for u in result.unavailable)
+    # It must still report that no score could be produced — the wording was
+    # updated (a per-strategy backtester now exists; a hypothesis-specific one does
+    # not), so this checks the CONCEPT rather than the old exact phrase.
+    assert any(
+        "backtest" in u.lower() and "hypothesis" in u.lower() for u in result.unavailable
+    ), result.unavailable
 
 
 def test_the_backtester_no_longer_clears_the_live_bus():

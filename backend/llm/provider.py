@@ -1,9 +1,11 @@
 """LLM provider — the prerequisite Phase 23 could not start without.
 
-There is no LLM client anywhere in `backend/`. `api/ai.py::/reason` returns 501
-with the reason stated, and `settings.OPENAI_API_KEY` is read by nothing. So
-"build the LangGraph runtime" could not have been the first task: every LLM node
-in Phases 24-50 would block on this.
+THIS FILE IS that LLM client. It did not exist before Phase 23: `api/ai.py::/reason`
+returned 501 and `settings.OPENAI_API_KEY` was read by nothing, so every LLM node
+in Phases 24-50 would have blocked. `OpenAICompatibleProvider` below is the adapter
+those nodes now call through `get_provider()`; the deployment points it at NVIDIA
+(see `.env`). The paragraph that used to open this docstring described the BEFORE
+state in the present tense and read as if still true — it is not.
 
 IT FAILS CLOSED — THIS IS THE WHOLE POINT
 -----------------------------------------

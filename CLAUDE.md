@@ -1596,6 +1596,48 @@ confident SHORT, not a hardcoded bias (`score_debate` returns SHORT and the
 Supervisor sizes it). The operator was asked whether to lower the range threshold
 to trade sideways and chose to keep the current selectivity.
 
+### An external source review found two NameError crashes and an auth gap
+
+A source-level review (Sept 2026) surfaced real bugs the test suite had not — a
+reminder that a green suite proves the paths it exercises, not the ones it skips.
+
+**1. THE BACKEND PROXY HANDED THE SERVER KEY TO ANYONE.**
+`app/api/backend/[...path]/route.ts` attaches `TRADES_API_KEY` to every forwarded
+request, and `middleware.ts` excludes `/api` from its `DASHBOARD_PASSWORD` gate —
+its comment even claimed these routes "have their own TRADES_API_KEY auth", which
+was backwards: the proxy SUPPLIES that key, it does not check one. So any caller
+reaching the public Vercel URL could invoke backend write routes (enable live
+trading, switch venue, start/stop a session, reset-paper, emergency-stop) with the
+server's credential. The proxy now authenticates the INCOMING caller before
+attaching the key: with `DASHBOARD_PASSWORD` set it requires the matching Basic
+auth (the browser sends it automatically after the middleware challenge); with it
+UNSET it allows reads but REFUSES writes, because an open write proxy on a
+real-money system is the exposure and leaving it open "so nothing breaks" is not a
+fix. **`DASHBOARD_PASSWORD` must be set on the Vercel deployment.**
+
+**2. `risk_gateway.gate()` CRASHED ON A COUNTER-TREND REJECTION.** The HTF gate
+built the context as a local `context` but referenced `market_context` in the
+rejection branch — a NameError on the exact path the gate exists for, which no
+test drove into. Fixed by building `market_context` once (which also restored the
+market context to `build_entry_context`, dropped by a partial revert).
+`tests/test_market_context.py` now drives `gate()` into the block branch.
+
+**3. THE EVENT-DRIVEN SUPERVISOR CRASHED THE INSTANT IT APPROVED A TRADE.**
+`supervisor_agent.py`'s approval rationale referenced `sizing['rule']` /
+`sizing['detail']` — a dict that method never defines (`size` is a bare number
+from `calculate_position_size`). A NameError fired right before TAR submission. Now
+uses the risk fraction it actually computed. Guarded by a comment-stripped source
+scan.
+
+Also corrected: stale comments the review flagged. `position_monitor`'s docstring
+said "this system does not place a resting stop" (it does now, stop AND take-profit
+for real fills); `provider.py` opened with "There is no LLM client anywhere in
+backend/" (this file IS it); `research_graph.BACKTEST_UNAVAILABLE` cited the
+bus-clearing backtester defect that is already fixed. The review's remaining
+finding — "task execution passes 0 as time and hardcodes sell on closes" — does
+NOT apply to the live code: every close path computes `exit_side` by direction
+(`sell if buy else buy`), and no such task scheduler exists in the tree.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

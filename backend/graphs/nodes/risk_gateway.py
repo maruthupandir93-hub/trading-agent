@@ -307,13 +307,23 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     # trades. Whether it raises EXPECTANCY rather than merely win rate depends on
     # how many removed trades would have won, and 12 trades cannot answer that.
     # `strategy_performance` is what will, now that a close records its strategy.
-    if REQUIRE_HTF_ALIGNMENT and snapshot is not None and thesis is not None:
-        context = build_market_context(
+    # BUILT ONCE, here, so the SAME object feeds both this gate and the entry
+    # snapshot below. A previous edit built it under a local name `context` and
+    # then referenced `market_context` in the rejection branch — a NameError that
+    # crashed the counter-trend rejection path instead of returning it, and which
+    # no test drove into. Building it unconditionally also restores the market
+    # context (HTF trend, BTC benchmark) to `build_entry_context`, which a partial
+    # revert had dropped.
+    market_context = None
+    if snapshot is not None:
+        market_context = build_market_context(
             candles=snapshot.candles,
             benchmark_symbol=snapshot.benchmark_symbol,
             benchmark_candles=snapshot.benchmark_candles,
         )
-        alignment = assess_alignment(decision.direction, context)
+
+    if REQUIRE_HTF_ALIGNMENT and market_context is not None and thesis is not None:
+        alignment = assess_alignment(decision.direction, market_context)
         if alignment.blocks:
             return {
                 "risk_assessment": RiskAssessment(
@@ -609,6 +619,9 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             regime_state=state.get("market_regime"),
             volatility=state.get("volatility"),
             strategy=thesis.strategy,
+            # Restored: the HTF-trend and BTC-benchmark context, so the trade row
+            # records WHY as well as WHAT. Safe when None.
+            market_context=market_context,
         ),
         symbol=symbol,
         side=side,

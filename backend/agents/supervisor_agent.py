@@ -459,7 +459,13 @@ class SupervisorAgent(BaseAgent):
             f"({', '.join(debate['participants']) or 'no participants recorded'}); "
             f"stress tests passed; stop at {sltp['stopLoss']:.6g} "
             f"({abs(price - sltp['stopLoss']) / price * 100:.2f}% away). "
-            f"Sizing [{sizing['rule']}]: {sizing['detail']} of ${equity:.2f} equity."
+            # `sizing['rule']` / `sizing['detail']` referenced a dict that does not
+            # exist in this method — a NameError that crashed a trade the instant
+            # it was approved and about to submit. Sizing here is the risk fraction
+            # this method actually computed (regime-adjusted risk-per-trade), which
+            # is the number worth recording.
+            f"Sizing: {final_risk_fraction * 100:.2f}% risk of ${equity:.2f} equity "
+            f"(regime multiplier {regime_multiplier:.2f}) -> {size:.8g} units."
         )
 
         tar = TarSubmittedEvent(

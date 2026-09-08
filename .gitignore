@@ -25,3 +25,6 @@ yarn-error.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local Oracle VM monitor config (personal OCIDs + ssh key)
+scripts/oracle_vm_config.json

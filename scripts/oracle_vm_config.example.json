@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy this to scripts/oracle_vm_config.json and fill in the three REQUIRED fields. The rest are auto-discovered or have sensible defaults. OCIDs are not secrets; your API private key (in ~/.oci/config) is the secret and is NOT in this file.",
+
+  "compartment_id": "ocid1.compartment.oc1..REQUIRED_your_compartment_ocid",
+  "subnet_id": "ocid1.subnet.oc1..OPTIONAL_leave_empty_to_auto_pick_the_first_subnet",
+  "ssh_authorized_key": "ssh-rsa AAAA... your public key so you can log in (paste the whole line, or leave empty)",
+
+  "auth": "config",
+  "oci_profile": "DEFAULT",
+
+  "display_name": "ampere-vm",
+  "ocpus": 2,
+  "memory_gb": 12,
+  "boot_volume_gb": 50,
+  "assign_public_ip": true,
+
+  "operating_system": "Canonical Ubuntu",
+  "operating_system_version": "22.04",
+  "image_id": "",
+  "availability_domains": [],
+
+  "interval_seconds": 600
+}

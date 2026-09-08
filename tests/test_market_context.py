@@ -309,3 +309,78 @@ def test_the_snapshot_is_unchanged_when_no_context_was_measured():
     )
     assert "context:" not in snapshot
     assert snapshot == "SOL/USDT @ 15m: regime=Range, strategy=Trend"
+
+
+# ---------------------------------------------------------------------------
+# Regression: the counter-trend rejection must RETURN, not crash
+# ---------------------------------------------------------------------------
+#
+# The gateway built the context under a local name `context` and then referenced
+# `market_context` in the rejection branch — a NameError that crashed the exact
+# path this gate exists for (a clear counter-trend entry), and which no test drove
+# into. Found by an external source review, not by the suite. This drives it.
+
+
+def _bear(n):
+    import math
+    out, p = [], 200.0
+    for i in range(n):
+        p -= 0.6 + 0.3 * math.sin(i / 2.2)
+        out.append({"time": i, "open": p + 0.3, "high": p + 0.5, "low": p - 0.5,
+                    "close": p, "volume": 1000.0 + i})
+    return out
+
+
+def test_the_counter_trend_rejection_returns_instead_of_crashing(monkeypatch):
+    from backend.graphs.nodes.risk_gateway import gate
+    from backend.graphs.state import (
+        MarketSnapshot, PortfolioStateSnapshot, TechnicalAnalysis,
+        TradeDecision, TradeThesis, new_state,
+    )
+    from backend.graphs.triggers import TriggerReason
+
+    monkeypatch.setenv("UNTRADEABLE_SYMBOLS", "")
+    monkeypatch.setattr(
+        "backend.services.ai_memory.get_memory_stats", lambda: {"trade_ledger": []}
+    )
+
+    st = new_state(run_id="x", symbol="SOL/USDT",
+                   trigger=TriggerReason(kind="manual", symbol="SOL/USDT", detail="t"),
+                   started_at=0.0)
+    st.update(
+        decision=TradeDecision(action="TRADE", direction="LONG", probability=None),
+        trade_thesis=TradeThesis(direction="LONG", strategy="Trend", entry_price=100.0,
+                                 stop_loss=98.0, take_profit=104.0),
+        technical_analysis=TechnicalAnalysis(atr=1.3),
+        market_data=MarketSnapshot(symbol="SOL/USDT", price=100.0,
+                                   candles={"15m": _bear(60), "1h": _bear(60), "4h": _bear(60)}),
+        portfolio_state=PortfolioStateSnapshot(tab="paper", equity=10_000.0,
+                                               cash=10_000.0, open_positions=[]),
+    )
+
+    out = gate(st)  # must not raise NameError
+    ra = out["risk_assessment"]
+    assert ra.approved is False
+    assert "HigherTimeframeAlignment" in ra.checks
+    # And the describe() that once crashed is in the detail.
+    assert "Context:" in ra.checks["HigherTimeframeAlignment"]["detail"]
+
+
+def test_the_supervisor_rationale_uses_no_undefined_sizing_dict():
+    """The event-driven Supervisor's approval rationale referenced `sizing['rule']`
+    / `sizing['detail']`, a dict that method never defines — a NameError the
+    instant a trade was approved. There is no such dict; the fix uses the risk
+    fraction it actually computed. Guard against the reference returning."""
+    import inspect
+
+    from backend.agents import supervisor_agent
+
+    # Strip comment lines before scanning — the fix's own comment names the bad
+    # reference to explain it, and that must not count as the bug returning.
+    src = "\n".join(
+        line for line in inspect.getsource(supervisor_agent).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "sizing['rule']" not in src
+    assert "sizing['detail']" not in src
+    assert 'sizing["rule"]' not in src

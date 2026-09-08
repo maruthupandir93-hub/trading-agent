@@ -29,13 +29,21 @@ They are joined on `tar_id`. A fill whose TAR was never seen is tracked as an
 UNPROTECTED position and logged as critical rather than quietly ignored — an
 untracked open position is the thing this agent exists to prevent.
 
-IN-PROCESS ONLY — STATED PLAINLY
---------------------------------
-This is a soft stop: it fires only while this process is running and receiving
-ticks. It is NOT a resting order at the exchange. If the backend dies, nothing
-closes the position. That remains the single highest-value reliability gap in
-the system, and this agent narrows it (from "nothing watches at all" to
-"something watches while we're up") without closing it.
+THE SOFT STOP, AND THE RESTING ORDER THAT NOW BACKS IT
+------------------------------------------------------
+This agent's own stop is a SOFT stop: `_check_price` fires only while this process
+is running and receiving ticks. On its own that does nothing while the process is
+down.
+
+That gap is now backed for REAL positions: `_place_resting_stop` and
+`_place_resting_tp` put a reduce-only stop-market AND a reduce-only take-profit AT
+THE VENUE on every real fill, so a crash, deploy or restart leaves the position
+protected on both sides by orders that keep working when this process does not.
+See the two methods and the "stop-loss now RESTS AT THE VENUE" note in CLAUDE.md.
+PAPER positions get no venue order (there is nothing behind a simulated fill), so
+for paper the in-process stop is still the whole mechanism — which is correct,
+because paper cannot be liquidated. Binance order placement of these resting orders
+is unverified (ccxt dropped Binance futures testnet); Bybit is verified.
 
 THE WATCH LIST IS NOW DURABLE — AND WHAT THAT DOES AND DOES NOT FIX
 -------------------------------------------------------------------
@@ -52,13 +60,17 @@ Read the boundary precisely, because overstating it is worse than the gap:
   * FIXED — a restart between TAR_APPROVED and ORDER_FILLED. The pending
     approval is persisted too, so the fill still joins to its approved stop
     instead of being logged as an UNPROTECTED position.
-  * NOT FIXED — the process being DOWN. Nothing watches while it is not
-    running, restore or no restore. Only a resting stop order at the exchange
-    fixes that, and this system does not place one.
+  * The process being DOWN is now covered FOR REAL POSITIONS by the resting stop
+    and take-profit at the venue (see above). The in-process watch is still soft;
+    the resting orders are what hold while it is down. For PAPER positions nothing
+    watches while the process is down, which is acceptable because paper cannot be
+    liquidated and no real money is exposed.
 
-So this narrows the outage window from "forever, silently" to "the length of the
-restart, and we know what we were holding". It is not a substitute for a resting
-order and the docstrings here must not start implying it is.
+So restore narrows the in-process outage window from "forever, silently" to "the
+length of the restart, and we know what we were holding", and the venue-resting
+orders cover a REAL position across that window regardless. The soft stop is not a
+substitute for the resting order — it is the fast path while alive, and the resting
+order is the durable one.
 """
 
 import asyncio
