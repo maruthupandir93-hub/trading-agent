@@ -1564,22 +1564,163 @@ agent may deploy. `TradingSession.capital_fraction` (default 1.0), set through
 `POST /api/session/start` (`capitalFraction`), read by the Risk Gateway via
 `trading_session.active_capital_fraction()`.
 
-It does TWO things, both in `risk_gateway.gate()`:
-  1. SIZES each trade against that fraction of the account (`equity *= fraction`
-     before sizing), so 25% makes every trade a quarter of what it would be.
-  2. CAPS the total margin committed at once at `fraction × account_capital` —
-     once the pool is deployed, `CapitalPool` rejects new trades until one closes.
-     `account_capital` is `cash + deployed_margin` (free cash + locked margin),
-     NOT the leverage-inflated `cash + notional`; `_deployed_margin` reads
-     `marginLocked` and falls back to notional/leverage (unknown leverage → 1x,
-     which over-counts and so caps SOONER, never later).
+**THIS IS NOW BROKER-STYLE SIZING, AND THE OLD "NOT A LEVERAGE SOURCE" NOTE IS
+GONE ON PURPOSE.** The operator asked for exactly what Binance/Bybit do: the
+allocation is the MARGIN POOL and the chosen leverage turns it into notional. "10k
+at 5x" deploys ~50k of position, so a +2% move is +10% of the account. The old
+design sized by RISK (a stop-out lost a fixed small %), which made leverage change
+only the locked margin and never the position or the profit — which is precisely
+why leverage "did nothing" and the operator kept hitting a $2,000 ceiling on a
+$10,000 account (the 20% margin cap at a hardcoded 1x).
 
-IT IS NOT A LEVERAGE SOURCE. The leverage ceiling and mandatory stop are
-untouched, so 100% means "use the whole account as margin", never "use more
-leverage". 1.0 is byte-for-byte the pre-feature behaviour (no `CapitalPool` check
-appears), so the feature is fully opt-in and applies to paper and real alike.
-`tests/test_capital_allocation.py` pins the linear sizing, the pool rejection, and
-that full allocation changes nothing.
+Two modes now, chosen in `risk_gateway.gate()` by whether an operator SESSION is
+driving the trade (`active_session_leverage()` returns non-None):
+
+  * **BROKER-STYLE (a session).** `per_trade_margin = fraction × account_capital`,
+    held back by the 1.2x margin buffer (so a stop stays reachable before a margin
+    call — 100% therefore deploys ~83%, not literally every dollar). `notional =
+    per_trade_margin × leverage`; `size = notional / entry`. The leverage is the
+    session's own choice (`active_session_leverage()`), bounded AGAIN by
+    `max_leverage_ceiling` — invariant 2 still hard-caps it at 3x real / 10x paper,
+    and `GRAPH_REQUESTED_LEVERAGE = 1` is now only the NO-session default.
+  * **RISK-BASED (no session).** The autonomous 1x path, unchanged: Kelly capped
+    downward, then the margin cap. An unattended agent with no validated track
+    record does not amplify.
+
+`account_capital` is `cash + deployed_margin` (real capital, NOT the
+leverage-inflated `cash + notional`); `_deployed_margin` reads `marginLocked` and
+falls back to notional/leverage (unknown leverage → 1x, over-counts, caps SOONER).
+Once the pool is deployed, `CapitalPool` rejects new entries until one closes.
+
+**THE SOFT DOLLAR CAPS IN `validate_trade` NOW SCALE WITH LEVERAGE, and only in
+broker mode.** A position MEANT to be `leverage ×` the account cannot be judged by
+a limit written for 1x. `validate_trade` reads `sizingMode` ("broker"/"risk"): in
+broker mode the single-position cap is `100% × leverage`, total exposure
+`100% × leverage`, and the per-trade-risk backstop `10% × leverage` (loose,
+because the per-trade loss is inherently `~= leverage × stop%` and the MANDATORY
+STOP is the real bound). At 1x / no session these are byte-for-byte the original
+50% / 100% / 3%. The two things that DO NOT scale are the actual invariants: the
+leverage ceiling (invariant 2) and the mandatory stop (invariant 3).
+
+THE RISK THIS ACCEPTS, STATED PLAINLY: a stop-out loses roughly `leverage × stop%`
+— ~3% per trade at 3x real, ~10% at 10x paper — the symmetric cost of the
+amplified upside. The operator chose it; the stop keeps each loss well inside the
+liquidation distance. `tests/test_capital_allocation.py` pins the leverage
+multiplication, the pool rejection, the margin-buffer haircut at 100%, and that a
+no-session trade still uses risk-based sizing.
+
+### Partial profit-taking — bank half at +1R, run the rest from break-even
+
+The operator's exact complaint: a position goes +1-2%, the trailing rule moves the
+stop to break-even, price drifts back to entry, and it closes at **0.0** — the gain
+evaporates. `position_monitor` now SCALES OUT. At `+PARTIAL_TP_R` (default 1R ≈
++1% with the 2.5-ATR stop) `_take_partial` closes `PARTIAL_TP_FRACTION` (default
+half) down the same ungated reduce-only close path a stop uses, records the banked
+P&L as an `agent-close` row (so the win rate and P&L dashboard count it), trims the
+tracked quantity, and moves the RUNNER's stop to break-even. Worst case becomes
+"banked ~1% and the runner scratched"; best case still rides the runner to target.
+
+Two properties, pinned by `tests/test_partial_tp.py`:
+  * **Fires exactly ONCE.** A `partial_done` flag on `_Tracked` (in-memory only)
+    guards it, AND the break-even move makes the entry-to-stop distance 0 so
+    `_r_multiple` returns None — which is why the flag need not be a DB column: a
+    restart restores a stop at break-even and a second scale-out cannot fire.
+  * **It does NOT publish POSITION_CLOSED** — the position is trimmed, not closed —
+    so reflection and the Telegram close alert still fire once, on the full exit.
+Env-tunable; `PARTIAL_TP_FRACTION=0` disables it (back to all-or-nothing).
+
+### The session trades CONTINUOUSLY and can bank a daily target
+
+Two changes to `trading_session._run_session`, both for "take 1-2% a day over many
+trades, one trade ending and the next starting":
+
+  * **Continuous re-entry.** The loop polls on the short `SESSION_POLL_S` (12s) but
+    only runs the expensive 24-node decision every `DECISION_INTERVAL_S` (30s) while
+    flat — EXCEPT immediately after a position closes, when it re-decides at once
+    (`was_holding` → `just_closed`). So a closed trade is followed by the next
+    within a poll, without spending the rate limit re-deriving an unchanged market.
+    Both are env-configurable.
+  * **Daily profit target.** `TradingSession.daily_target_pct` (optional, e.g. 0.02
+    = +2%), set via `POST /api/session/start` (`dailyTargetPct`), UI on the home
+    panel. `_daily_target_reached` anchors the day's starting equity (`day_anchor_*`,
+    reset each UTC day) and, once the day is up that fraction, stops OPENING new
+    positions until the next UTC day — the session keeps working toward its overall
+    `target_equity` across days. It gates OPENING only; the monitor still closes open
+    positions (invariant 4). A module-level `_daily_lock_noted` throttles the log so
+    the 12s poll does not append the same line repeatedly.
+    `tests/test_daily_target.py` pins the anchor, the lock and the UTC-rollover reset.
+
+### Volume: relative volume and SUDDEN-surge detection
+
+The operator watches per-candle volume on Binance: a slight increase in a candle's
+volume tends to precede a move, and a sudden spike should be ACTED on, not averaged
+away. The debate already had a Volume leg, but it used a 5-vs-20 SMA that DILUTES a
+single heavy candle — exactly the sudden move worth catching.
+
+`backend/algorithms/volume_analysis.py` (pure, deterministic, no I/O) adds
+`analyze_volume` → `VolumeSignal`: RVOL (the LATEST candle's volume vs the prior
+20-bar average — fast, catches the spike a 5-bar average would erase), the smoothed
+baseline ratio, a `surge` flag (RVOL ≥ 1.5), and a signed `strength`. Volume has NO
+direction of its own — the direction is the LATEST candle's price move, never
+invented from volume, so heavy SELLING cannot read as bullish; a surge with no move
+contributes nothing (indecision, not confirmation).
+
+`score_debate`'s Volume argument now takes the STRONGER of the smoothed baseline
+rise and the sudden-surge magnitude, so a fresh spike lifts conviction even when the
+5-bar average is quiet, while a sustained rise still counts without a spike. A surge
+only boosts when its own candle agrees with the recent 5-candle direction — a surge
+AGAINST the move is left to the trend/momentum legs, not read as confirmation. Weight
+is unchanged (1.5). `generate_features` records `rvol`/`volume_surge`/
+`volume_direction` on `TechnicalAnalysis.features` so the signal that moved a trade is
+visible in the trace, not only inside the debate. `tests/test_volume_analysis.py`
+pins the surge detection, the no-direction-without-a-move rule, and that the debate's
+Volume leg reacts to a sudden surge. It stays DETERMINISTIC (Section 39.4): same
+candles, same signal.
+
+### Reading the live traces found two big wastes — a doomed session and a dead-slow consult
+
+500 stored `graph_traces` on 2026-09-10 showed the agent spending most of its
+cycles on work that could never produce a trade:
+
+**1. A SESSION WAS RUNNING ON BTC/USDT, WHICH IS UNTRADEABLE.** 55 full 23-second
+`trade_analysis` runs on BTC — every one rejected at the Risk Gateway's
+tradeable-instrument gate, because BTC is a signal/benchmark, not a tradeable
+instrument (`tradeable_universe`). Expensive repeated analysis, LLM budget and the
+40/min rate limit spent, nothing openable. `analysis.subscribe_to_triggers` already
+skips untradeable symbols, but the SESSION loop called `run_analysis_graph`
+directly and bypassed that. `start_session` now REFUSES an untradeable symbol up
+front with a message naming tradeable ones — the gate still protects the entry;
+this stops a doomed session being started at all. `tests/test_trading_session.py`
+pins the refusal (and clears the blocklist for the tests that use BTC as a generic
+symbol).
+
+**2. THE CONSULTATION MODEL WAS `moonshotai/kimi-k3` — 68-85s PER CALL.** Every
+`external_consultation` node in the traces took ~8s and recorded `llm_calls=0`: the
+call never completed. kimi-k3 is the slowest model in the catalog and heavily
+rate-limited, so the "second opinion" never actually arrived, while still stalling
+the run ~8s and taking a slot of the 40/min budget the narrative and reflection
+then could not get (their nodes showed 10s / `llm_calls=0` too — starved, not
+broken). `.env` `LLM_CONSULT_MODEL_NVIDIA` is now `openai/gpt-oss-20b` (~2.6s, and
+still a genuinely different family from the nemotron reasoning tier, so it is a real
+second prior). The consultation now actually returns AND the run stops stalling on
+it. **This is a `.env` change — apply it to the Oracle backend's `.env` too.**
+
+The TRADE itself was never the slow part: the graph is streamed, so
+`EXECUTION_PLAN_READY` is published at the Risk Gateway (~4.8s), and the two LLM
+explanation nodes run AFTER that. These two fixes cut the wasted post-decision time
+and stop the agent burning its whole rate budget narrating trades it then could not
+afford to reason about.
+
+### The persistent live price bar
+
+`components/LivePriceBar.tsx`, mounted in `app/layout.tsx` ABOVE `{children}` so Next
+keeps it mounted across every page navigation — the SOL/BTC/ETH prices stay on screen
+and keep ticking wherever the operator goes, instead of re-mounting and blanking on
+each route change. It fetches its OWN ticks from `/api/ticks` (the backend's Binance
+socket cache) rather than through MarketData context, so no page's provider set can
+blank it, and asking for the three majors keeps them subscribed for every other view.
+Same last-hop-polling rule as the rest of the app (https page, no backend TLS, so no
+browser ws://).
 
 ### Why the agent barely trades in sideways markets (it is not a bug)
 
@@ -1651,12 +1792,19 @@ refactor.
    human clicks are deliberately out of scope — supervising agents means
    supervising agents, not overriding the operator.
 
-2. **The leverage ceiling is not overridable.**
-   `ABSOLUTE_MAX_LEVERAGE` (3x real / 10x paper) in `lib/riskManager.ts`
-   is deliberately **not** part of `RiskConfig`, so no setting, agent, or
-   confidence level can raise it. It is checked before any stop-distance
-   math so a tight stop cannot compute past it. Do not move it into
-   `RiskConfig`.
+2. **The leverage ceiling is not RUNTIME-overridable.**
+   `ABSOLUTE_MAX_LEVERAGE` (now **10x real / 10x paper**) in
+   `lib/riskManager.ts` and `backend/core/risk_manager.py` is deliberately
+   **not** part of `RiskConfig`, so no setting, agent, or confidence level
+   can raise it AT RUNTIME. It is checked before any stop-distance math so a
+   tight stop cannot compute past it. Do not move it into `RiskConfig`.
+   **The real ceiling was raised from 3x to 10x on 2026-09-10 at the owner's
+   explicit, repeated, informed request** (they own the account, accept the
+   risk, and want Binance/Bybit-style leverage on both books). That was a
+   deliberate code edit to the constant — exactly the barrier this invariant
+   imposes — not a runtime override, and the two copies (TS + Python) still
+   must agree. Invariant 3 (the mandatory stop) is the per-trade guard and is
+   untouched; the ceiling is only the outer bound.
 
 3. **Every position requires a computed stop-loss.** If no stop can be
    computed (no ATR), `validateTrade()` hard-rejects. Do not soften this

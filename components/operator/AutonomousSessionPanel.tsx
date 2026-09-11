@@ -131,6 +131,9 @@ export function AutonomousSessionPanel() {
   // How much of the balance this session may trade with. 100% = the whole
   // account (the pre-feature default). 25/50/75 keep more in reserve.
   const [capitalPct, setCapitalPct] = useState(100);
+  // Optional daily profit target as a percent. 0 = off. When set, the session
+  // stops opening new trades once the day is up this much, resuming next UTC day.
+  const [dailyPct, setDailyPct] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -226,6 +229,8 @@ export function AutonomousSessionPanel() {
           // alone.
           ...(canEditStart && startNum !== null ? { startAmount: startNum } : {}),
           ...(floorNum !== null ? { floorEquity: floorNum } : {}),
+          // Daily target as a fraction, only when the operator picked one.
+          ...(dailyPct > 0 ? { dailyTargetPct: dailyPct / 100 } : {}),
         }),
       });
       const text = await res.text();
@@ -236,7 +241,7 @@ export function AutonomousSessionPanel() {
     } finally {
       setBusy(false);
     }
-  }, [symbol, leverage, targetNum, floorNum, startNum, capitalPct, canEditStart, load]);
+  }, [symbol, leverage, targetNum, floorNum, startNum, capitalPct, dailyPct, canEditStart, load]);
 
   const stop = useCallback(async () => {
     setBusy(true);
@@ -447,11 +452,11 @@ export function AutonomousSessionPanel() {
               </select>
             </Field>
 
-            <Field label={`Max leverage — ${leverage}x`}>
+            <Field label={`Leverage — ${leverage}x`}>
               <input
                 type="range"
                 min={1}
-                max={isReal ? 3 : 10}
+                max={10}
                 step={1}
                 value={leverage}
                 onChange={(e) => setLeverage(Number.parseInt(e.target.value, 10))}
@@ -507,11 +512,11 @@ export function AutonomousSessionPanel() {
               : 'Fetched from your exchange account and cached for 30s — it is not typeable, because a figure you entered would not be the money you actually have.'}
           </div>
 
-          {/* CAPITAL ALLOCATION — how much of the balance this session may use.
-              Scales the size of every trade AND caps the total capital the agent
-              may commit at once. Not a leverage source: the leverage ceiling and
-              mandatory stop still bound every trade, so 100% means "use the whole
-              account as margin", never "use more leverage". */}
+          {/* CAPITAL ALLOCATION — how much of the balance this session deploys as
+              MARGIN. Broker-style (Binance/Bybit): this margin times the leverage
+              above is the position's notional, so a +2% move on the position is
+              +2% x leverage of the allocated capital. The leverage ceiling (3x real
+              / 10x paper) and the mandatory stop still bound every trade. */}
           <div className="mb-2">
             <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>
               Capital to trade with — {capitalPct}% of the balance
@@ -537,9 +542,44 @@ export function AutonomousSessionPanel() {
               ))}
             </div>
             <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              The session trades with this share of the account and never commits more than
-              it at once. Each trade is still sized by the risk rules within it, and the
-              leverage cap and stop-loss are unchanged.
+              This share of the account is deployed as margin; at {leverage}x that is about{' '}
+              {Math.round(Math.min(100, capitalPct) * leverage)}% of the account in position
+              size (a ~1.2x margin buffer is kept so a stop stays reachable). A mandatory
+              stop-loss bounds every trade — so a stop-out loses roughly {leverage}x the price
+              move, the cost of trading with leverage.
+            </div>
+          </div>
+
+          {/* DAILY PROFIT TARGET — bank the day and stop opening new trades once
+              the account is up this much, resuming the next UTC day. Optional. */}
+          <div className="mb-2">
+            <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>
+              Daily profit target — {dailyPct === 0 ? 'off' : `${dailyPct}% a day`}
+            </label>
+            <div className="grid grid-cols-4 gap-1.5">
+              {[0, 1, 2, 3].map((pct) => (
+                <button
+                  key={pct}
+                  type="button"
+                  onClick={() => setDailyPct(pct)}
+                  className="py-1.5 rounded text-[12px] mono font-semibold"
+                  style={{
+                    background:
+                      dailyPct === pct
+                        ? 'color-mix(in srgb, var(--accent) 20%, transparent)'
+                        : 'var(--bg-surface-2)',
+                    color: dailyPct === pct ? 'var(--accent)' : 'var(--text-secondary)',
+                    border: `1px solid ${dailyPct === pct ? 'var(--accent)' : 'var(--border)'}`,
+                  }}
+                >
+                  {pct === 0 ? 'Off' : `${pct}%`}
+                </button>
+              ))}
+            </div>
+            <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Once the account is up this much for the day, no new trades open until the next
+              day (UTC) — the session keeps working toward the overall target across days. Open
+              positions are still monitored and can still close.
             </div>
           </div>
 

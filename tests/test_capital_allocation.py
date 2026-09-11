@@ -62,10 +62,18 @@ def _empty_ledger(monkeypatch):
     )
 
 
-def _fraction(monkeypatch, value: float) -> None:
-    """Pin the running session's allocation as the gateway sees it."""
+def _session(monkeypatch, fraction: float, leverage: int = 1) -> None:
+    """Pin the running session's allocation AND leverage as the gateway sees them.
+
+    Both are needed now: broker-style sizing (allocation = margin pool, leverage
+    turns it into notional) only runs when a session is driving the trade, which
+    `active_session_leverage()` returning non-None is what signals.
+    """
     monkeypatch.setattr(
-        "backend.graphs.nodes.risk_gateway.active_capital_fraction", lambda: value
+        "backend.graphs.nodes.risk_gateway.active_capital_fraction", lambda: fraction
+    )
+    monkeypatch.setattr(
+        "backend.graphs.nodes.risk_gateway.active_session_leverage", lambda: leverage
     )
 
 
@@ -128,34 +136,67 @@ def test_a_bad_fraction_clamps_to_full(monkeypatch):
 
 
 def test_a_smaller_allocation_makes_a_smaller_trade(monkeypatch):
-    """25% must size a quarter of what 100% sizes, on the same setup."""
-    _fraction(monkeypatch, 1.0)
-    full = gate(_state())
-    assert full["risk_assessment"].approved is True
-    full_size = full["execution_plan"].size
+    """A smaller allocation deploys proportionally less margin.
 
-    _fraction(monkeypatch, 0.25)
+    Compared below the margin buffer (25% vs 50%, both pool-bound) so the ratio is
+    exact. At 100% the 1.2x margin buffer caps deployment at ~83%, so the ratio to a
+    sub-buffer allocation is not the raw fraction — that is asserted separately.
+    """
+    _session(monkeypatch, 0.5, leverage=1)
+    half = gate(_state())
+    assert half["risk_assessment"].approved is True
+    half_size = half["execution_plan"].size
+
+    _session(monkeypatch, 0.25, leverage=1)
     quarter = gate(_state())
     assert quarter["risk_assessment"].approved is True
     quarter_size = quarter["execution_plan"].size
 
-    assert quarter_size < full_size
-    # Sizing is linear in equity here (the margin cap binds proportionally), so a
-    # quarter allocation is about a quarter of the size.
-    assert quarter_size == pytest.approx(full_size * 0.25, rel=0.05)
+    assert quarter_size < half_size
+    assert quarter_size == pytest.approx(half_size * 0.5, rel=0.02)
 
 
-def test_full_allocation_is_byte_for_byte_the_old_behaviour(monkeypatch):
-    """1.0 must not change sizing at all — the feature is opt-in."""
-    _fraction(monkeypatch, 1.0)
+def test_leverage_multiplies_the_notional(monkeypatch):
+    """The operator's leverage is honoured: 5x deploys 5x the notional of 1x.
+
+    This is the fix for 'my leverage did nothing'. On the same 50% allocation and
+    the same account, a 5x session's position is five times a 1x session's — the
+    Binance/Bybit concept, where allocated margin times leverage is the notional.
+    """
+    _session(monkeypatch, 0.5, leverage=1)
+    one_x = gate(_state())
+    assert one_x["risk_assessment"].approved is True
+
+    _session(monkeypatch, 0.5, leverage=5)
+    five_x = gate(_state())
+    assert five_x["risk_assessment"].approved is True
+    assert five_x["execution_plan"].leverage == 5
+    assert five_x["execution_plan"].size == pytest.approx(one_x["execution_plan"].size * 5, rel=0.02)
+
+
+def test_full_allocation_at_1x_still_approves_and_keeps_the_margin_buffer(monkeypatch):
+    """100% deploys the account as margin, minus the 1.2x margin-call buffer."""
+    _session(monkeypatch, 1.0, leverage=1)
     out = gate(_state())
-    # No CapitalPool check appears at full allocation.
+    assert out["risk_assessment"].approved is True
+    # ~83% of the account as notional at 1x (10000 / 1.2), not the full 10000 —
+    # the buffer keeps a stop reachable before a margin call.
+    assert out["execution_plan"].size == pytest.approx((10_000.0 / 1.2) / 100.0, rel=0.02)
+
+
+def test_no_session_uses_risk_based_sizing_not_the_pool(monkeypatch):
+    """With no session running, the autonomous 1x risk-based path runs unchanged."""
+    # active_session_leverage is the REAL function here (no session) -> None.
+    import backend.services.trading_session as ts
+    monkeypatch.setattr(ts, "active_session", lambda: None)
+    out = gate(_state())
+    assert out["risk_assessment"].approved is True
     assert "CapitalPool" not in out["risk_assessment"].checks
 
 
 def test_a_fully_deployed_pool_rejects_new_trades(monkeypatch):
     """At 50%, once half the account is committed no new trade opens."""
-    _fraction(monkeypatch, 0.5)
+    _session(monkeypatch, 0.5, leverage=1)
     # Account capital = cash 4000 + deployed 6000 = 10000; pool = 50% = 5000.
     # Deployed 6000 >= 5000 -> reject.
     st = _state(portfolio_state=PortfolioStateSnapshot(
@@ -170,7 +211,7 @@ def test_a_fully_deployed_pool_rejects_new_trades(monkeypatch):
 
 def test_room_left_in_the_pool_still_trades(monkeypatch):
     """The complement: with the pool not yet full, a trade is approved."""
-    _fraction(monkeypatch, 0.75)
+    _session(monkeypatch, 0.75, leverage=1)
     st = _state(portfolio_state=PortfolioStateSnapshot(
         tab="paper", equity=10_000.0, cash=9_000.0,
         open_positions=[{"symbol": "SOL/USDT", "qty": 10, "avgCost": 100, "marginLocked": 1_000.0}],

@@ -149,16 +149,24 @@ describe('checkLeverage', () => {
   // operator-tunable via RiskConfig. The buffer can still tighten
   // leverage below the ceiling; it can no longer unlock anything above
   // it.
+  // The ceiling was raised to 10x on both books (owner's request), but the buffer
+  // still cannot unlock leverage ABOVE the hard ceiling — that mechanism is intact.
   it('a smaller safety buffer override can NOT unlock leverage above the hard ceiling', () => {
-    // 5% stop, buffer lowered to 1x — would have passed pre-ceiling.
-    const result = checkLeverage(100, 95, 5, 1.0, 'real');
+    // 11x is above the 10x ceiling; even a 0.1% stop and buffer 1.0 cannot pass it.
+    const result = checkLeverage(100, 99.9, ABSOLUTE_MAX_LEVERAGE + 1, 1.0, 'real');
     expect(result.status).toBe('reject');
     expect(result.detail).toContain('hard');
   });
 
   it('permits leverage at the hard ceiling when the stop distance genuinely supports it', () => {
-    // 5% stop at ABSOLUTE_MAX_LEVERAGE: 100/(5*1.5) = ~13x safe, so 3x is comfortably inside.
+    // 5% stop at ABSOLUTE_MAX_LEVERAGE (10x): 100/(5*1.5) = ~13x safe, so 10x fits.
     expect(checkLeverage(100, 95, ABSOLUTE_MAX_LEVERAGE, undefined, 'real').status).toBe('pass');
+  });
+
+  it('honours the owner-chosen leverage up to the ceiling on real', () => {
+    // The whole point of the raise: 5x and 10x are accepted on real, not clamped.
+    expect(checkLeverage(100, 95, 5, undefined, 'real').status).toBe('pass');
+    expect(checkLeverage(100, 95, 10, undefined, 'real').status).toBe('pass');
   });
 
   it('rejects anything above the hard ceiling regardless of how tight the stop is', () => {
@@ -172,12 +180,9 @@ describe('checkLeverage', () => {
     expect(checkLeverage(100, 99.9, ABSOLUTE_MAX_LEVERAGE + 1).status).toBe('reject');
   });
 
-  it('allows a higher (but still hard) ceiling on the paper tab for testing', () => {
-    // Paper is where higher-leverage behavior should be testable — the
-    // spec's real-capital rationale does not apply there.
-    expect(checkLeverage(100, 99.9, ABSOLUTE_MAX_LEVERAGE + 1, undefined, 'paper').status).toBe('pass');
+  it('caps paper at the same 10x ceiling, still hard, not unlimited', () => {
+    // Real and paper are equal now (both 10x). Paper is still capped.
     expect(checkLeverage(100, 99.9, ABSOLUTE_MAX_LEVERAGE_PAPER, undefined, 'paper').status).toBe('pass');
-    // ...but paper is still capped, not unlimited.
     expect(checkLeverage(100, 99.9, ABSOLUTE_MAX_LEVERAGE_PAPER + 1, undefined, 'paper').status).toBe('reject');
     expect(checkLeverage(100, 99.9, 100, undefined, 'paper').status).toBe('reject');
   });

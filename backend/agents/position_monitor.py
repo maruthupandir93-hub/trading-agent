@@ -90,6 +90,34 @@ from backend.models.events import (
 
 logger = logging.getLogger(__name__)
 
+import os
+
+# ---------------------------------------------------------------------------
+# PARTIAL PROFIT-TAKING — bank part of the move so a pullback does not give the
+# WHOLE gain back to the break-even stop.
+#
+# This is the fix for the operator's exact complaint: a position goes +1-2%, the
+# trailing rule moves the stop to break-even, price drifts back to entry, and it
+# closes at 0.0 — the gain evaporates. With scale-out, at +PARTIAL_TP_R the monitor
+# CLOSES PARTIAL_TP_FRACTION of the position (banking a real, realised profit) and
+# moves the stop on the RUNNER to break-even. So the worst case becomes "banked
+# ~1% and the runner scratched", not "gave it all back to zero", and the best case
+# still rides the runner to the full target.
+#
+# +1R (one unit of initial risk) is the scale-out point: with the 2.5-ATR stop that
+# is roughly +1% on SOL, which is exactly the "1 to 2%" the operator wants to bank.
+# Both are env-tunable; a fraction of 0 disables scale-out entirely (back to the old
+# all-or-nothing behaviour) so it is fully opt-out.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+PARTIAL_TP_R = _env_float("PARTIAL_TP_R", 1.0)          # profit, in R, to scale out at
+PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank (0 disables)
+
 
 class _Tracked:
     """One open position being watched."""
@@ -107,6 +135,12 @@ class _Tracked:
         # Both rest reduce-only, so if one fires while the process is down the
         # other cannot reverse the position — see `Venue.place_take_profit`.
         "tp_order_id",
+        # Set once the position has scaled out at +PARTIAL_TP_R, so it banks only
+        # ONCE. In-memory only (not a DB column): after a scale-out the stop is
+        # moved to break-even, so on a restart the restored stop sits AT entry and
+        # the R multiple that gates a scale-out is 0 — which naturally prevents a
+        # second scale-out without needing to persist this flag.
+        "partial_done",
         # ATTRIBUTION, carried from the approval so the CLOSING trade row can
         # record it.
         #
@@ -510,9 +544,14 @@ class PositionMonitorAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def _persist_closed_trade(
-        self, pos: "_Tracked", exit_price: float, realized: float, reason: str
+        self, pos: "_Tracked", exit_price: float, realized: float, reason: str,
+        qty: Optional[float] = None,
     ) -> None:
         """Record the completed round trip, WITH its realized P&L. Never raises.
+
+        `qty` overrides the position's quantity for a PARTIAL close (scale-out): the
+        row must record the quantity actually closed, not the whole position, or the
+        P&L reconstruction would pair the wrong size. Defaults to the full position.
 
         The row's `side` is the EXIT side, not the entry side, because that is
         what actually happened at this moment — a long closing is a sell. The
@@ -540,6 +579,7 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         exit_side = "sell" if pos.side == "buy" else "buy"
+        row_qty = qty if qty is not None else pos.qty
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
@@ -550,7 +590,7 @@ class PositionMonitorAgent(BaseAgent):
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     """,
                     str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
-                    pos.symbol, exit_side, pos.qty, exit_price, realized,
+                    pos.symbol, exit_side, row_qty, exit_price, realized,
                     "agent-close", f"closed by {reason} from entry {pos.entry_price:.8g}",
                     # THE ROW THE LEARNING LOOP READS. `strategy_performance`
                     # selects closed trades carrying a strategy; before this the
@@ -1052,6 +1092,14 @@ class PositionMonitorAgent(BaseAgent):
                 hit_target = pos.take_profit is not None and price <= pos.take_profit
 
             if not hit_stop and not hit_target:
+                # PARTIAL PROFIT-TAKING, before the plain HOLD. If the position has
+                # reached +PARTIAL_TP_R and has not yet scaled out, bank part of it
+                # and move the runner's stop to break-even. This is what stops a
+                # +1-2% gain from dying at 0.0 on a pullback.
+                if PARTIAL_TP_FRACTION > 0 and not pos.partial_done:
+                    r = self._r_multiple(pos, price)
+                    if r is not None and r >= PARTIAL_TP_R:
+                        await self._take_partial(pos, price)
                 continue
 
             # Stop takes precedence when a single tick spans both levels. A
@@ -1060,6 +1108,95 @@ class PositionMonitorAgent(BaseAgent):
             # one would systematically overstate performance.
             reason = "stop-loss" if hit_stop else "take-profit"
             await self._close(pos, price, reason)
+
+    def _r_multiple(self, pos: "_Tracked", price: float) -> Optional[float]:
+        """Profit in units of INITIAL risk, or None when it cannot be computed.
+
+        Once the stop has been moved to break-even (which a scale-out does), the
+        entry-to-stop distance is 0, so this returns None and a second scale-out
+        cannot fire — the natural guard that makes persisting `partial_done`
+        unnecessary across a restart.
+        """
+        if pos.entry_price is None or pos.stop_loss is None or not pos.qty:
+            return None
+        risk = abs(pos.entry_price - pos.stop_loss)
+        if risk <= 0:
+            return None
+        move = (price - pos.entry_price) if pos.side == "buy" else (pos.entry_price - price)
+        return move / risk
+
+    async def _take_partial(self, pos: "_Tracked", price: float) -> None:
+        """Bank PARTIAL_TP_FRACTION of the position at +PARTIAL_TP_R, ONCE.
+
+        Closes part of the position down the same ungated close path a stop uses
+        (reduce-only for real), records the realised P&L as a trade row so the win
+        rate and P&L dashboard count it, trims the tracked quantity, and moves the
+        RUNNER's stop to break-even.
+
+        It does NOT publish POSITION_CLOSED — the position is trimmed, not closed —
+        so reflection and the Telegram close alert still fire once, on the eventual
+        full exit. A failure is logged and left for the next tick: banking profit is
+        not safety-critical the way a stop is, so it must never raise into the loop.
+        """
+        if self._execution is None or not pos.qty or pos.tar_id in self._closing:
+            return
+
+        full_qty = abs(pos.qty)
+        partial_qty = full_qty * PARTIAL_TP_FRACTION
+        if partial_qty <= 0:
+            return
+
+        self._closing.add(pos.tar_id)
+        try:
+            fill_price = await self._execution.close_position(
+                symbol=pos.symbol, entry_side=pos.side, qty=partial_qty,
+                tab=pos.tab, reason="partial-tp",
+            )
+            if fill_price is None:
+                logger.warning(
+                    "Partial take-profit on %s did not fill; will retry next tick.",
+                    pos.symbol,
+                )
+                return
+
+            sign = 1 if pos.side == "buy" else -1
+            realized = (fill_price - pos.entry_price) * partial_qty * sign
+
+            # Trim to the runner, and mark done so this fires only once (belt to the
+            # break-even braces below).
+            pos.qty = full_qty - partial_qty
+            pos.partial_done = True
+
+            await self._persist_closed_trade(
+                pos, fill_price, realized, "partial-tp", qty=partial_qty
+            )
+            await self.persist_watch_list()
+
+            logger.info(
+                "Partial TP on %s: banked %.10g (%.0f%%) at %s, realized %+.2f — "
+                "runner %.10g left, moving its stop to break-even.",
+                pos.symbol, partial_qty, PARTIAL_TP_FRACTION * 100, fill_price,
+                realized, pos.qty,
+            )
+            self.record_decision(
+                "partial-take-profit",
+                f"{pos.symbol} banked {PARTIAL_TP_FRACTION * 100:.0f}% at {fill_price} "
+                f"(+{PARTIAL_TP_R:g}R), realized {realized:+.2f}; runner to break-even.",
+                {"partialQty": partial_qty, "exitPrice": fill_price, "realizedPnl": realized},
+                acted=True,
+            )
+        finally:
+            self._closing.discard(pos.tar_id)
+
+        # Move the runner's stop to break-even, OUTSIDE the _closing guard so the
+        # tighten's own resting-order replacement is not skipped. tighten_stop
+        # refuses anything not tighter, so from the original stop this always
+        # applies; it also makes the entry-to-stop distance 0, which is the guard
+        # that stops a second scale-out (see `_r_multiple`).
+        if pos.entry_price is not None:
+            applied, why = self.tighten_stop(pos.tar_id, pos.entry_price)
+            if not applied:
+                logger.info("Break-even move on %s not applied: %s", pos.symbol, why)
 
     async def _close(self, pos: _Tracked, trigger_price: float, reason: str) -> None:
         if self._execution is None:

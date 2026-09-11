@@ -385,7 +385,25 @@ def compute_stop_loss_take_profit(price: float, atr: float, side: str) -> Option
 # the same account (the CRO agent previously used a bare `> 5` check) means
 # the effective limit depends on which code path a trade happens to take.
 # ---------------------------------------------------------------------------
-ABSOLUTE_MAX_LEVERAGE = 3        # real money
+# CEILING RAISED TO 10x ON BOTH BOOKS AT THE OWNER'S EXPLICIT, REPEATED REQUEST.
+#
+# This was 3x on real. The operator — who owns the account and the money, and was
+# shown the liquidation math plainly (at 10x a ~10% adverse move liquidates an
+# unstopped position) — asked repeatedly for their chosen leverage to be honoured
+# up to 10x on real as well as paper, exactly as Binance/Bybit let a retail user
+# do. "All risk is mine" was stated explicitly.
+#
+# WHAT DID NOT CHANGE, and is what still protects each trade:
+#   * These stay HARD-CODED MODULE CONSTANTS, not `RiskConfig` fields — so no
+#     agent, setting or confidence level can raise them at runtime (invariant 2's
+#     actual mechanism). Only a deliberate code edit like this one can, which is
+#     precisely the barrier the invariant exists to impose.
+#   * `check_leverage` still runs BEFORE any stop-distance math, so a tight stop
+#     cannot compute past the ceiling.
+#   * The MANDATORY STOP-LOSS (invariant 3) is untouched — every position still
+#     gets a computed ATR stop that bounds the loss well inside the liquidation
+#     distance. That is the real per-trade guard; the ceiling is the outer bound.
+ABSOLUTE_MAX_LEVERAGE = 10        # real money — raised from 3x at the owner's request
 ABSOLUTE_MAX_LEVERAGE_PAPER = 10  # paper trading
 
 
@@ -625,6 +643,7 @@ def check_portfolio_exposure(
     equity: float,
     new_notional: float,
     open_positions: Optional[List[Dict[str, Any]]],
+    leverage: float = 1.0,
 ) -> RiskCheck:
     """Spec Section 11's "Exposure Check" — TOTAL, not this trade's.
 
@@ -637,7 +656,14 @@ def check_portfolio_exposure(
     function is not given per-symbol prices and fetching them would be a second
     market-data path that could disagree with the snapshot the decision was made
     on. The detail string says which it is, so a reader is not left to guess.
+
+    LEVERAGE-AWARE. The 100% cap is 100% of equity in NOTIONAL at 1x. A broker-style
+    leveraged session deploys `leverage x` the account as notional on purpose, so the
+    cap scales to `100% x leverage` — otherwise the aggregate limit would forbid the
+    very exposure the operator's chosen leverage exists to take. At 1x it is exactly
+    the original 100%.
     """
+    cap_pct = MAX_PORTFOLIO_EXPOSURE_PCT * max(1.0, leverage)
     if open_positions is None:
         return RiskCheck(
             status="unavailable",
@@ -662,13 +688,13 @@ def check_portfolio_exposure(
     total = existing + max(0.0, new_notional)
     pct = total / equity * 100.0
 
-    if pct > MAX_PORTFOLIO_EXPOSURE_PCT:
+    if pct > cap_pct:
         return RiskCheck(
             status="reject",
             detail=(
                 f"Total exposure would be ${total:,.2f} ({pct:.1f}% of ${equity:,.2f} "
                 f"equity) across {len(open_positions)} existing position(s) plus this "
-                f"one, exceeding the {MAX_PORTFOLIO_EXPOSURE_PCT:.0f}% limit. "
+                f"one, exceeding the {cap_pct:.0f}% limit. "
                 f"Existing positions valued at entry cost, not marked to market."
             ),
         )
@@ -676,7 +702,7 @@ def check_portfolio_exposure(
         status="pass",
         detail=(
             f"Total exposure ${total:,.2f} ({pct:.1f}% of equity) is within the "
-            f"{MAX_PORTFOLIO_EXPOSURE_PCT:.0f}% limit "
+            f"{cap_pct:.0f}% limit "
             f"({len(open_positions)} existing position(s) at entry cost)"
         ),
     )
@@ -881,6 +907,37 @@ def validate_trade(request: Dict[str, Any], strict: bool = False) -> RiskValidat
             detail=f"Stop at {sltp['stopLoss']:.6g}, target at {sltp['takeProfit']:.6g}",
         )
 
+    # LEVERAGE-AWARE CAPS.
+    #
+    # At 1x these are the ORIGINAL 50% / 100% / 3% exactly, so the autonomous
+    # risk-based path is byte-for-byte unchanged. Above 1x — a broker-style session
+    # where the operator deliberately deploys `leverage x margin` as notional (see
+    # the risk gateway's broker-style sizing) — the notional, exposure and per-trade
+    # dollar caps scale with leverage, because a position that is MEANT to be
+    # `leverage x` the account cannot be judged against a limit written for a 1x
+    # position. The two things that do NOT scale are the ones that are actual
+    # invariants: the mandatory stop still bounds every trade's loss (invariant 3),
+    # and the leverage CEILING still caps leverage itself (invariant 2, enforced in
+    # `check_leverage`). These scale only the soft dollar caps.
+    lev_scale = max(1.0, float(requested_leverage))
+    # 'broker' — an operator session that deliberately deploys `leverage x margin` as
+    # notional (Binance/Bybit-style). Its real controls are the margin pool, the 1.2x
+    # margin buffer and the mandatory stop, all applied in the risk gateway BEFORE
+    # this; here the soft caps only need to catch a size beyond the full leveraged
+    # account, so a single position may be up to `100% x leverage` of equity. 'risk'
+    # (the default, the autonomous path) keeps the original 50% / 100% / 3% exactly.
+    broker = str(request.get("sizingMode") or "risk").lower() == "broker"
+    position_cap_frac = (1.0 * lev_scale) if broker else 0.5
+    # In broker mode the per-trade dollar risk is INHERENTLY `~= leverage x stop%`,
+    # because the operator deliberately deploys the pool at the chosen leverage — a
+    # 3% cap would size that down and defeat "use my whole balance". The mandatory
+    # stop (invariant 3) is what actually bounds each loss; this remaining % check
+    # is a loose backstop against an ABSURDLY wide stop at full deployment (10% per
+    # unit of leverage), not the primary control. The autonomous path keeps the
+    # tight 3%.
+    per_trade_risk_cap_pct = (10.0 * lev_scale) if broker else 3.0
+    exposure_leverage = lev_scale if broker else 1.0
+
     # 2. Position Size Check
     if equity <= 0:
         checks["PositionSize"] = RiskCheck(
@@ -888,9 +945,15 @@ def validate_trade(request: Dict[str, Any], strict: bool = False) -> RiskValidat
             detail="Equity is unknown (<= 0), so position size cannot be checked against it.",
         )
         reasons.append("Equity unknown — position size cannot be validated")
-    elif trade_value > equity * 0.5:
-        checks["PositionSize"] = RiskCheck(status="reject", detail="Position size exceeds 50% of equity (Max Exposure breached)")
-        reasons.append("Position size exceeds 50% of equity")
+    elif trade_value > equity * position_cap_frac:
+        checks["PositionSize"] = RiskCheck(
+            status="reject",
+            detail=(
+                f"Position notional ${trade_value:,.2f} exceeds {position_cap_frac * 100:.0f}% "
+                f"of ${equity:,.2f} equity at {lev_scale:g}x"
+            ),
+        )
+        reasons.append(f"Position size exceeds {position_cap_frac * 100:.0f}% of equity")
     else:
         checks["PositionSize"] = RiskCheck(status="pass", detail="Position size acceptable")
 
@@ -907,11 +970,11 @@ def validate_trade(request: Dict[str, Any], strict: bool = False) -> RiskValidat
         potential_loss = sl_distance * qty
         loss_percent = (potential_loss / equity) * 100
 
-        if loss_percent > 3.0:  # Hard limit: never risk more than 3% on one trade
-            checks["PerTradeRisk"] = RiskCheck(status="reject", detail=f"Potential loss ({loss_percent:.2f}%) exceeds 3% hard limit")
+        if loss_percent > per_trade_risk_cap_pct:  # 3% at 1x; scales with leverage
+            checks["PerTradeRisk"] = RiskCheck(status="reject", detail=f"Potential loss ({loss_percent:.2f}%) exceeds the {per_trade_risk_cap_pct:.0f}% limit at {lev_scale:g}x")
             reasons.append(f"Trade SL exposure is too high ({loss_percent:.2f}%)")
         else:
-            checks["PerTradeRisk"] = RiskCheck(status="pass", detail=f"Risk exposure acceptable ({loss_percent:.2f}%)")
+            checks["PerTradeRisk"] = RiskCheck(status="pass", detail=f"Risk exposure acceptable ({loss_percent:.2f}% of the {per_trade_risk_cap_pct:.0f}% limit)")
     else:
         checks["PerTradeRisk"] = RiskCheck(
             status="reject",
@@ -984,7 +1047,7 @@ def validate_trade(request: Dict[str, Any], strict: bool = False) -> RiskValidat
 
     # 9. Total portfolio exposure — distinct from PositionSize, which is this
     #    trade alone.
-    checks["PortfolioExposure"] = check_portfolio_exposure(equity, notional, open_positions)
+    checks["PortfolioExposure"] = check_portfolio_exposure(equity, notional, open_positions, leverage=exposure_leverage)
 
     # 10. Correlation.
     checks["Correlation"] = check_correlation(symbol, open_positions)

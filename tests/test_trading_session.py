@@ -34,6 +34,14 @@ def clean_sessions():
     ts._reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _allow_btc_sessions(monkeypatch):
+    """These tests use BTC/USDT as a generic tradeable symbol. BTC is on the default
+    UNTRADEABLE list, and `start_session` now refuses an untradeable symbol, so the
+    blocklist is cleared here — the untradeable-session refusal has its own test."""
+    monkeypatch.setenv("UNTRADEABLE_SYMBOLS", "")
+
+
 @pytest.fixture
 def paper_equity(monkeypatch):
     """A measurable paper book at 1000, and a stubbed graph that records its input."""
@@ -121,6 +129,20 @@ def test_a_target_at_or_below_current_equity_is_refused(monkeypatch, paper_equit
         asyncio.run(ts.start_session(symbol="BTC/USDT", leverage=1, target_equity=1000.0))
     with pytest.raises(ValueError, match="not above the current equity"):
         asyncio.run(ts.start_session(symbol="BTC/USDT", leverage=1, target_equity=10.0))
+
+
+def test_a_session_on_an_untradeable_symbol_is_refused(monkeypatch, paper_equity):
+    """BTC/USDT is a signal/benchmark, not a tradeable instrument. A session on it
+    would run the full analysis every cycle and the Risk Gateway would reject every
+    entry — expensive repeated analysis that can never open a trade. Refused up
+    front. (The autouse fixture cleared the blocklist, so this re-blocks BTC.)"""
+    monkeypatch.setenv("UNTRADEABLE_SYMBOLS", "BTC/USDT")
+    with pytest.raises(ValueError, match="untradeable|never open a trade"):
+        asyncio.run(ts.start_session(symbol="BTC/USDT", leverage=1, target_equity=2000.0))
+    # A tradeable symbol is still fine.
+    s = asyncio.run(ts.start_session(symbol="SOL/USDT", leverage=1, target_equity=2000.0))
+    assert s.symbol == "SOL/USDT"
+    asyncio.run(ts.stop_all())
 
 
 def test_leverage_above_the_hard_ceiling_is_refused(monkeypatch, paper_equity):

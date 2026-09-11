@@ -21,6 +21,7 @@ import { TradingControlsProvider } from '@/components/TradingControls';
 import { ExchangeAccountsProvider } from '@/components/ExchangeAccounts';
 import { AgentRuntimeProvider } from '@/components/AgentRuntime';
 import { MissionPlannerProvider } from '@/components/MissionPlanner';
+import { LivePriceBar } from '@/components/LivePriceBar';
 
 export const metadata: Metadata = {
   title: 'QUANT// Terminal — AI Trading Workstation',
@@ -38,6 +39,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className="font-sans">
+        {/* Mounted ABOVE the provider tree and {children} so Next keeps it mounted
+            across every page navigation — the SOL/BTC/ETH prices stay on screen and
+            keep ticking wherever the operator goes. It fetches its own ticks, so it
+            needs none of the providers below. */}
+        <LivePriceBar />
         <AgentRuntimeProvider>
         <MarketDataProvider>
           <PortfolioProvider>

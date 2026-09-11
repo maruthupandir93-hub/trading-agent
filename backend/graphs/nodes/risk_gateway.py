@@ -66,6 +66,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.core.risk_manager import (
     ATR_STOP_MULTIPLIER,
+    MARGIN_BUFFER_MULTIPLIER,
     calculate_position_size,
     kelly_risk_fraction,
     max_leverage_ceiling,
@@ -104,7 +105,10 @@ GRAPH_REQUESTED_LEVERAGE = 1
 from backend.algorithms.market_context import assess as assess_alignment
 from backend.algorithms.market_context import build as build_market_context
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
-from backend.services.trading_session import active_capital_fraction
+from backend.services.trading_session import (
+    active_capital_fraction,
+    active_session_leverage,
+)
 
 
 def _deployed_margin(positions: List[Dict[str, Any]]) -> float:
@@ -418,59 +422,6 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             "unavailable": ["risk gateway sizing (equity unknown)"],
         }
 
-    # ---- SESSION CAPITAL ALLOCATION --------------------------------------
-    #
-    # The operator picks how much of the account this session may trade with —
-    # 25 / 50 / 75 / 100% — on the home page ("trade with 75% of my balance").
-    # It does two things, both here:
-    #
-    #   1. SIZES every trade as if the account were that fraction of its real
-    #      size. Choosing 25% makes each trade a quarter of what it would be.
-    #   2. CAPS the TOTAL margin the agent may have committed at once at that
-    #      fraction of the account, so once the pool is deployed no new trade
-    #      opens until one closes.
-    #
-    # It is NOT a leverage source and cannot raise risk: the leverage ceiling and
-    # mandatory stop are untouched, so 100% is "use the whole account as margin",
-    # never "use more leverage". 1.0 (no session, or a full allocation) is the
-    # pre-feature behaviour exactly.
-    fraction = active_capital_fraction()
-    if fraction < 1.0:
-        # The real capital base, NOT the leverage-inflated `cash + notional`:
-        # free cash plus the margin already locked in open positions. That is the
-        # money actually in the account, and the fraction is of that.
-        deployed = _deployed_margin(portfolio.open_positions if portfolio else [])
-        cash = float(portfolio.cash) if (portfolio and portfolio.cash is not None) else None
-        account_capital = (cash + deployed) if cash is not None else equity
-        pool = fraction * account_capital
-
-        if deployed >= pool:
-            return {
-                "risk_assessment": RiskAssessment(
-                    approved=False,
-                    rejection_reasons=[
-                        f"the session's capital pool is fully deployed: "
-                        f"{deployed:,.2f} of a {pool:,.2f} pool "
-                        f"({fraction * 100:.0f}% of {account_capital:,.2f}) is already in "
-                        f"open positions. No new position opens until one closes."
-                    ],
-                    checks={
-                        "CapitalPool": {
-                            "status": "reject",
-                            "detail": (
-                                f"{fraction * 100:.0f}% allocation, {deployed:,.2f}/{pool:,.2f} "
-                                f"margin deployed."
-                            ),
-                        }
-                    },
-                )
-            }
-
-        # Size against the allocated capital, so per-trade size scales with the
-        # chosen fraction. This is the number every downstream sizing and margin
-        # calc uses from here on.
-        equity = equity * fraction
-
     bars_15m = (snapshot.candles.get("15m") if snapshot else None) or []
     technical = state.get("technical_analysis")
     atr = technical.atr if technical and technical.atr is not None else None
@@ -479,13 +430,13 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         return {
             "risk_assessment": RiskAssessment(
                 approved=False,
-                rejection_reasons=["ATR is unavailable, so risk-based sizing is impossible"],
+                rejection_reasons=["ATR is unavailable, so a stop distance and size cannot be computed"],
                 checks={
                     "PositionSize": {
                         "status": "unavailable",
                         "detail": (
-                            "Sizing is a function of ATR; without it the quantity "
-                            "would be a guess and the stop distance already is one."
+                            "Sizing needs a stop distance, which is a function of ATR; "
+                            "without it the quantity and the stop would both be guesses."
                         ),
                     }
                 },
@@ -493,34 +444,119 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             "unavailable": ["risk gateway sizing (no ATR)"],
         }
 
-    # Kelly, capped downward only. `decision.probability` is the ONLY honest win
-    # probability this system has, and it is None until 20 trades have resolved —
-    # in which case `kelly_risk_fraction` falls back to fixed-fractional and says
-    # so. Feeding it the panel confidence instead would be sizing on a number that
-    # is not a win rate, which is the fabrication Phase 27 exists to prevent.
-    sizing = kelly_risk_fraction(
-        win_prob=decision.probability,
-        payoff_ratio=2.0,
-        fallback=DEFAULT_RISK_FRACTION,
-    )
+    # ---- LEVERAGE: the operator's choice, bounded by the hard ceiling -------
+    #
+    # Invariant 2: the ceiling (3x real / 10x paper) is not raisable by anything.
+    # A running session already validated the operator's pick against it at start;
+    # it is bounded AGAIN here because a leverage value that reaches sizing from
+    # anywhere must never exceed the hard limit. With NO session running this is
+    # the autonomous 1x default (`GRAPH_REQUESTED_LEVERAGE`), unchanged — an
+    # unattended agent with no validated track record does not amplify.
+    ceiling = max_leverage_ceiling(tab)
+    session_leverage = active_session_leverage()
+    leverage = max(1, min(session_leverage or GRAPH_REQUESTED_LEVERAGE, ceiling))
 
-    if sizing["fraction"] <= 0.0:
-        return {
-            "risk_assessment": RiskAssessment(
-                approved=False,
-                rejection_reasons=[f"sizing returned zero: {sizing['detail']}"],
-                checks={
-                    "PositionSize": {"status": "reject", "detail": sizing["detail"]},
-                },
-            )
+    # ---- SIZING ------------------------------------------------------------
+    #
+    # Two modes, and which one runs is decided by whether an operator SESSION is
+    # driving this trade:
+    #
+    #   BROKER-STYLE (a session) — the operator's allocation is the MARGIN POOL and
+    #     the chosen leverage turns it into notional exposure, exactly as Binance
+    #     and Bybit do. "$10,000 at 5x" deploys up to ~$50,000 of position, so a
+    #     +2% move is +10% of the account. This is what the operator means by
+    #     "trade with my leverage" — and it is the mode risk-based sizing was NOT:
+    #     risk-based sizing held the dollar loss of a stop-out constant, so leverage
+    #     changed only the locked margin and never the position or the profit, which
+    #     is exactly why leverage felt like it did nothing.
+    #
+    #   RISK-BASED (no session) — the autonomous 1x default, unchanged. Kelly capped
+    #     downward, then the margin cap. An unattended agent sizes by risk, not by
+    #     leverage.
+    #
+    # BOTH keep the mandatory ATR stop (invariant 3). Under broker-style the stop is
+    # what bounds the amplified downside: a stop-out loses ~= leverage x stop%, well
+    # inside the liquidation distance, and that symmetry (a 2% move is +/-10% at 5x)
+    # is the risk the operator accepts by choosing leverage.
+    if session_leverage is not None:
+        fraction = active_capital_fraction()
+        deployed = _deployed_margin(portfolio.open_positions if portfolio else [])
+        cash = float(portfolio.cash) if (portfolio and portfolio.cash is not None) else None
+        account_capital = (cash + deployed) if cash is not None else equity
+        pool_margin = fraction * account_capital
+        available_margin = max(0.0, pool_margin - deployed)
+
+        # The margin-call buffer is kept even at 100% allocation: deploying literally
+        # every dollar as margin means an adverse tick triggers liquidation BEFORE
+        # the stop is reached, which makes the computed stop meaningless. So the
+        # deployable margin is the pool, held back by the 1.2x buffer.
+        usable_cash = cash if cash is not None else account_capital
+        per_trade_margin = min(available_margin, usable_cash / MARGIN_BUFFER_MULTIPLIER)
+
+        if per_trade_margin <= 0.0:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        f"the session's {fraction * 100:.0f}% capital pool is fully "
+                        f"deployed: {deployed:,.2f} of a {pool_margin:,.2f} margin pool is "
+                        f"already in open positions. No new position opens until one closes."
+                    ],
+                    checks={
+                        "CapitalPool": {
+                            "status": "reject",
+                            "detail": (
+                                f"{fraction * 100:.0f}% allocation, "
+                                f"{deployed:,.2f}/{pool_margin:,.2f} margin deployed."
+                            ),
+                        }
+                    },
+                )
+            }
+
+        # A single-symbol session deploys the whole available pool on its one
+        # position — that is what "use 100% of my balance" means. Notional is that
+        # margin times leverage; quantity follows from the entry price.
+        notional = per_trade_margin * leverage
+        size = notional / thesis.entry_price
+        sizing = {
+            "rule": "broker-style",
+            "fraction": None,
+            "detail": (
+                f"{fraction * 100:.0f}% of {account_capital:,.2f} = {per_trade_margin:,.2f} "
+                f"margin at {leverage}x = {notional:,.2f} notional (broker-style; a +2% move "
+                f"is +{2 * leverage:.0f}% of this pool)"
+            ),
         }
+    else:
+        # Kelly, capped downward only. `decision.probability` is the ONLY honest win
+        # probability this system has, and it is None until 20 trades have resolved —
+        # in which case `kelly_risk_fraction` falls back to fixed-fractional and says
+        # so. Feeding it the panel confidence instead would be sizing on a number that
+        # is not a win rate, which is the fabrication Phase 27 exists to prevent.
+        sizing = kelly_risk_fraction(
+            win_prob=decision.probability,
+            payoff_ratio=2.0,
+            fallback=DEFAULT_RISK_FRACTION,
+        )
 
-    size = calculate_position_size(
-        equity=equity,
-        price=thesis.entry_price,
-        atr=atr,
-        risk_per_trade_percent=sizing["fraction"],
-    )
+        if sizing["fraction"] <= 0.0:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[f"sizing returned zero: {sizing['detail']}"],
+                    checks={
+                        "PositionSize": {"status": "reject", "detail": sizing["detail"]},
+                    },
+                )
+            }
+
+        size = calculate_position_size(
+            equity=equity,
+            price=thesis.entry_price,
+            atr=atr,
+            risk_per_trade_percent=sizing["fraction"],
+        )
 
     # VOLATILITY SCALES THE SIZE DOWN, NEVER UP.
     #
@@ -539,13 +575,17 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             size = size * volatility_multiplier
 
     if size <= 0:
+        budget = (
+            f"the {sizing['fraction'] * 100:.2f}% risk budget of ${equity:,.2f}"
+            if sizing.get("fraction") is not None
+            else f"the {sizing['rule']} pool ({sizing['detail']})"
+        )
         return {
             "risk_assessment": RiskAssessment(
                 approved=False,
                 rejection_reasons=[
-                    f"computed size is {size} — the risk budget "
-                    f"({sizing['fraction'] * 100:.2f}% of ${equity:,.2f}) does not "
-                    f"support even the smallest position at this stop distance"
+                    f"computed size is {size} — {budget} does not support even the "
+                    f"smallest position at this stop distance"
                 ],
                 checks={
                     "PositionSize": {
@@ -556,7 +596,6 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             )
         }
 
-    leverage = min(GRAPH_REQUESTED_LEVERAGE, max_leverage_ceiling(tab))
     side = "buy" if decision.direction == "LONG" else "sell"
 
     # ---- validate the size that was just computed -------------------------
@@ -570,6 +609,11 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             "side": side,
             "tab": tab,
             "requestedLeverage": leverage,
+            # 'broker' when an operator session is driving this trade, so the soft
+            # notional/exposure/per-trade caps scale with leverage (the pool, the
+            # margin buffer and the mandatory stop are the real controls). 'risk' for
+            # the autonomous 1x path, which keeps the original 50% / 100% / 3% caps.
+            "sizingMode": "broker" if session_leverage is not None else "risk",
             "intent": "open",
             # Supplied so the Phase 28 checks actually run. `openPositions` being a
             # list (even empty) rather than None is what distinguishes "measured, no

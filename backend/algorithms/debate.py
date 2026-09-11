@@ -45,6 +45,8 @@ the same confidence as one resting on all five.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from backend.algorithms.volume_analysis import analyze_volume
+
 # Weights are relative, not probabilities. Trend and structure carry more than
 # momentum because a momentum reading against a strong trend is more often
 # noise than signal; volatility is a context modifier rather than a direction
@@ -233,25 +235,41 @@ def score_debate(klines: List[Dict[str, Any]]) -> DebateResult:
         args.append(Argument("Momentum", max(-1.0, min(1.0, raw)) * WEIGHT_MOMENTUM, WEIGHT_MOMENTUM, detail))
 
     # --- 4. Volume confirmation -----------------------------------------
-    recent_vol = _sma(volumes, 5)
-    baseline_vol = _sma(volumes, 20)
-    if not recent_vol or not baseline_vol or baseline_vol == 0:
+    #
+    # Two reads combined so a SUDDEN move is not diluted (the operator's ask):
+    #   * baseline — the smoothed 5-vs-20 participation rise, robust and slow;
+    #   * RVOL     — the LATEST candle vs the prior 20-bar average, which catches a
+    #                single heavy candle a 5-bar average would average away.
+    # The magnitude is the STRONGER of the two, so a fresh surge lifts conviction
+    # even when the smoothed average is still quiet, while a sustained rise still
+    # counts without a spike. Direction is the recent 5-candle move (robust); a
+    # surge only boosts when its own candle agrees with that direction — a surge
+    # AGAINST the move is left to the trend/momentum legs rather than read as
+    # confirmation. Volume still has no direction of its own.
+    vol = analyze_volume(klines)
+    if not vol.available:
         unavailable.append("volume (no volume data)")
     else:
-        ratio = recent_vol / baseline_vol
-        # Volume has no direction of its own: it confirms whichever way the
-        # last 5 candles moved. Multiplying an unsigned ratio by a direction
-        # would otherwise let heavy selling read as bullish.
         recent_move = (closes[-1] - closes[-5]) / closes[-5] if closes[-5] else 0.0
         direction_sign = 1.0 if recent_move > 0 else (-1.0 if recent_move < 0 else 0.0)
-        strength = max(-1.0, min(1.0, (ratio - 1.0)))
+
+        baseline_mag = (
+            max(0.0, min(1.0, vol.baseline_ratio - 1.0)) if vol.baseline_ratio else 0.0
+        )
+        surge_agrees = vol.surge and (
+            (vol.direction == "bullish" and direction_sign > 0)
+            or (vol.direction == "bearish" and direction_sign < 0)
+        )
+        surge_mag = max(0.0, min(1.0, vol.rvol - 1.0)) if surge_agrees else 0.0
+
+        magnitude = max(baseline_mag, surge_mag)
         args.append(
             Argument(
                 "Volume",
-                strength * direction_sign * WEIGHT_VOLUME,
+                magnitude * direction_sign * WEIGHT_VOLUME,
                 WEIGHT_VOLUME,
-                f"5-candle volume {ratio:.2f}x the 20-candle baseline, "
-                f"confirming a {recent_move * 100:+.2f}% move",
+                f"{vol.detail}, confirming a {recent_move * 100:+.2f}% 5-candle move"
+                + (" — SUDDEN SURGE" if surge_mag > baseline_mag else ""),
             )
         )
 

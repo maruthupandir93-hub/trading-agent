@@ -64,6 +64,11 @@ class StartSessionRequest(BaseModel):
     # account, the pre-feature behaviour. Bounded (0, 1]; `start_session` clamps
     # anything else back to 1.0. Applies to both paper and real.
     capitalFraction: float = Field(1.0, gt=0, le=1.0)
+    # Optional daily profit target as a FRACTION (0.02 = +2%). Once the day is up
+    # this much vs. its start, the session stops opening new positions until the
+    # next UTC day, then resumes — "take 2% a day over many trades". None = off.
+    # Bounded (0, 0.5]; `start_session` clamps anything else to None.
+    dailyTargetPct: Optional[float] = Field(None, gt=0, le=0.5)
 
 
 @router.get("")
@@ -152,6 +157,7 @@ async def start(req: StartSessionRequest) -> Dict[str, Any]:
             floor_equity=req.floorEquity,
             start_amount=req.startAmount,
             capital_fraction=req.capitalFraction,
+            daily_target_pct=req.dailyTargetPct,
         )
     except ValueError as exc:
         # A refusal the operator can act on, not a server fault.

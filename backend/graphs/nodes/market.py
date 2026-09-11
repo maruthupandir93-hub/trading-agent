@@ -347,6 +347,14 @@ def generate_features(state: TradingState) -> Optional[Dict[str, Any]]:
 
     rsi = _rsi(closes)
 
+    # Volume: relative volume and sudden-surge detection. Recorded here so the
+    # signal that moved (or did not move) a trade is visible in the trace and the
+    # feature set, not only inside the debate's Volume argument. Pure read of the
+    # candles already fetched — no I/O.
+    from backend.algorithms.volume_analysis import analyze_volume
+
+    vol = analyze_volume(bars)
+
     # `analyze_market_structure` returns support/resistance as LISTS of levels.
     # The nearest below/above the current price is what a stop or target would
     # use; taking min/max of the whole list would give the extremes of the
@@ -371,6 +379,13 @@ def generate_features(state: TradingState) -> Optional[Dict[str, Any]]:
             # assuming the single nearest one is all there was.
             "support_levels_found": len(structure.get("support") or []),
             "resistance_levels_found": len(structure.get("resistance") or []),
+            # Volume metrics — the sudden-move read. `rvol` is the latest candle vs
+            # the prior 20-bar average; `volume_surge` fires when that is >= 1.5x;
+            # `volume_direction` is the price direction the surge confirms.
+            "rvol": round(vol.rvol, 3) if vol.rvol is not None else None,
+            "volume_surge": vol.surge,
+            "volume_direction": vol.direction,
+            "volume_detail": vol.detail,
         },
     )
 

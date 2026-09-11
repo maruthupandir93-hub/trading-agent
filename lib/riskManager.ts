@@ -139,7 +139,13 @@ const CORRELATION_EXPOSURE_LIMIT_PCT_DEFAULT = 0.4;
 // (so a runaway 100x paper task is still impossible, and paper results
 // stay at least loosely informative about real-tab behavior).
 // ---------------------------------------------------------------------
-export const ABSOLUTE_MAX_LEVERAGE = 3; // real money — the spec's mechanical 2-3x cap
+// RAISED TO 10x ON REAL at the owner's explicit, repeated request (was 3x). It
+// stays a hard-coded module constant, NOT a RiskConfig field, so it is still not
+// runtime-overridable by any agent, setting or confidence level — only a
+// deliberate code edit changes it. Mirrors backend/core/risk_manager.py; the two
+// must agree, so change both. The mandatory stop-loss (invariant 3) is unchanged
+// and remains the per-trade guard.
+export const ABSOLUTE_MAX_LEVERAGE = 10; // real money — owner-raised from 3x
 export const ABSOLUTE_MAX_LEVERAGE_PAPER = 10;
 
 export function maxLeverageCeiling(tab: TradeTab): number {

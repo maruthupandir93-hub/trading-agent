@@ -62,12 +62,19 @@ _STORE_PATH = os.path.join(_STORE_DIR, "trading_sessions.json")
 
 # How long between decision cycles while a session is running.
 #
-# 60s. A graph run costs candles, an order book, a trade tape, four RSS feeds and
-# a model call; running it every few seconds would spend the venue's rate limit
-# and the LLM budget re-deriving a view of a market that has barely moved. The
-# POSITION MONITOR still checks every open position against every tick, so the
-# stop-loss is not on this cadence — only the decision to open something new is.
-DECISION_INTERVAL_S = 60.0
+# A graph run costs candles, an order book, a trade tape, four RSS feeds and a
+# model call; running it every few seconds would spend the venue's rate limit and
+# the LLM budget re-deriving a view of a market that has barely moved. The POSITION
+# MONITOR still checks every open position against every tick, so the stop-loss is
+# not on this cadence — only the decision to open something new is.
+#
+# CONTINUOUS TRADING: the loop POLLS on the short `SESSION_POLL_S` so a position
+# that just closed is noticed quickly, but it only runs the expensive decision
+# every `DECISION_INTERVAL_S` while flat — EXCEPT immediately after a close, when it
+# re-decides at once. That is what makes it feel continuous ("one trade ends, the
+# next starts") without spending the rate limit polling a market that has not moved.
+DECISION_INTERVAL_S = float(os.getenv("SESSION_DECISION_INTERVAL_S", "30") or 30)
+SESSION_POLL_S = float(os.getenv("SESSION_POLL_S", "12") or 12)
 
 # A session will not open a new position while one is already open for its symbol.
 # Checked every tick; this is why the interval above can be slow without the
@@ -104,6 +111,15 @@ class TradingSession:
     # trade, so 100% means "use the whole account as margin", not "use more
     # leverage".
     capital_fraction: float = 1.0
+    # DAILY PROFIT TARGET (optional). When set (e.g. 0.02 = +2%), the session banks
+    # the day: once equity is up this fraction versus the day's starting equity, it
+    # stops OPENING new positions until the next UTC day, then resumes. It does NOT
+    # end the session — the session keeps working toward its overall `target_equity`
+    # across days, taking its 1-2% a day through many trades. None = no daily cap.
+    # `day_anchor_*` track the current UTC day's start so the percentage is per-day.
+    daily_target_pct: Optional[float] = None
+    day_anchor_date: Optional[str] = None
+    day_anchor_equity: Optional[float] = None
     # 'running' | 'reached' | 'floored' | 'stopped' | 'expired' | 'failed'
     status: str = "running"
     started_at: float = field(default_factory=time.time)
@@ -423,9 +439,15 @@ async def _run_session(session_id: str) -> None:
         session.start_equity, session.target_equity, session.floor_equity, tab,
     )
 
+    # Continuous-trading bookkeeping. The loop polls fast but only DECIDES on the
+    # decision interval while flat — or immediately after a close, so the next trade
+    # starts without waiting out the interval.
+    last_decided_at = 0.0
+    was_holding = False
+
     try:
         while session.active:
-            await asyncio.sleep(DECISION_INTERVAL_S)
+            await asyncio.sleep(SESSION_POLL_S)
             if not session.active:
                 break
 
@@ -460,11 +482,25 @@ async def _run_session(session_id: str) -> None:
                 _note(session, "system is paused — no new entries this cycle. Open positions stay monitored.")
                 continue
 
+            # -- daily profit target: bank the day, resume tomorrow ----------
+            if _daily_target_reached(session, equity):
+                continue
+
             # -- do not stack positions --------------------------------------
             if await _has_open_position(session.symbol, tab):
+                was_holding = True
                 _note(session, f"already holding {session.symbol}; the monitor owns the exit. Waiting.")
                 continue
 
+            # -- decide: on the interval while flat, or AT ONCE after a close -
+            just_closed = was_holding
+            was_holding = False
+            if not just_closed and (time.time() - last_decided_at) < DECISION_INTERVAL_S:
+                # Flat with nothing to react to and the interval has not elapsed —
+                # do not spend a graph run re-deriving an unchanged market.
+                continue
+
+            last_decided_at = time.time()
             # -- one full decision cycle -------------------------------------
             await _decide_once(session)
 
@@ -484,6 +520,50 @@ def _tab_for_session() -> str:
     from backend.core.config import settings
 
     return "real" if settings.LIVE_TRADING else "paper"
+
+
+# session_id -> UTC date we already logged the daily-lock note for, so the fast
+# poll does not append the same "target reached" line every 12s.
+_daily_lock_noted: Dict[str, str] = {}
+
+
+def _daily_target_reached(session: TradingSession, equity: float) -> bool:
+    """True when the day's +daily_target_pct is banked, so no NEW entry opens today.
+
+    Resets the day's anchor equity on each new UTC day, so the percentage is per-day
+    and the lock lifts automatically at the UTC rollover. Returns False when no daily
+    target is configured. Open positions keep being monitored regardless — this gates
+    OPENING only, never an exit (invariant 4 lives in the monitor, not here).
+    """
+    if not session.daily_target_pct or session.daily_target_pct <= 0:
+        return False
+
+    import datetime as _dt
+
+    today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    if session.day_anchor_date != today or session.day_anchor_equity is None:
+        session.day_anchor_date = today
+        session.day_anchor_equity = equity
+        _daily_lock_noted.pop(session.id, None)
+        return False
+
+    anchor = session.day_anchor_equity
+    if anchor <= 0:
+        return False
+
+    gain = (equity - anchor) / anchor
+    if gain < session.daily_target_pct:
+        return False
+
+    if _daily_lock_noted.get(session.id) != today:
+        _daily_lock_noted[session.id] = today
+        _note(
+            session,
+            f"daily +{session.daily_target_pct * 100:.1f}% target reached "
+            f"(+{gain * 100:.2f}% today) — no new entries until the next UTC day. "
+            f"Open positions stay monitored.",
+        )
+    return True
 
 
 async def _has_open_position(symbol: str, tab: str) -> bool:
@@ -633,6 +713,7 @@ async def start_session(
     floor_equity: Optional[float] = None,
     start_amount: Optional[float] = None,
     capital_fraction: float = 1.0,
+    daily_target_pct: Optional[float] = None,
 ) -> TradingSession:
     """Begin an autonomous session. Raises ValueError on an unusable request.
 
@@ -641,8 +722,25 @@ async def start_session(
     book the starting amount is the exchange's balance and cannot be supplied.
     """
     from backend.core.risk_manager import max_leverage_ceiling
+    from backend.services.tradeable_universe import refusal_reason as _untradeable_reason
 
     tab = _tab_for_session()
+
+    # REFUSE AN UNTRADEABLE SYMBOL UP FRONT. A session on e.g. BTC/USDT (a
+    # signal/benchmark, not a tradeable instrument — see `tradeable_universe`) would
+    # run the full 23-node analysis every cycle and the Risk Gateway would reject it
+    # every time at the tradeable-instrument gate. That was observed live: 55 full
+    # `trade_analysis` runs on BTC that could never open a position — expensive
+    # repeated analysis, LLM budget and rate limit spent, and nothing to show. The
+    # gate still protects the ENTRY; this just stops a doomed session from being
+    # started at all, with a message the operator can act on.
+    _refusal = _untradeable_reason(symbol)
+    if _refusal is not None:
+        raise ValueError(
+            f"{_refusal} A session cannot be run on it — it would analyse every "
+            f"cycle and never open a trade. Pick a tradeable instrument (e.g. "
+            f"SOL/USDT, ETH/USDT, XRP/USDT)."
+        )
 
     if start_amount is not None:
         if tab == "real":
@@ -700,6 +798,16 @@ async def start_session(
     if not (0.0 < cf <= 1.0):
         cf = 1.0
 
+    # Daily target: a positive fraction, or None. Clamped to a sane 0-50% band so a
+    # typo (200) cannot make the lock unreachable or negative.
+    dt_pct: Optional[float]
+    try:
+        dt_pct = float(daily_target_pct) if daily_target_pct is not None else None
+    except (TypeError, ValueError):
+        dt_pct = None
+    if dt_pct is not None and not (0.0 < dt_pct <= 0.5):
+        dt_pct = None
+
     session = TradingSession(
         id=uuid.uuid4().hex[:12],
         symbol=symbol,
@@ -708,6 +816,7 @@ async def start_session(
         target_equity=target_equity,
         floor_equity=floor,
         capital_fraction=cf,
+        daily_target_pct=dt_pct,
     )
     _sessions[session.id] = session
     _persist()
@@ -768,6 +877,31 @@ def active_capital_fraction() -> float:
     except (TypeError, ValueError):
         return 1.0
     return cf if 0.0 < cf <= 1.0 else 1.0
+
+
+def active_session_leverage() -> Optional[int]:
+    """The leverage the RUNNING session chose, or None when no session is running.
+
+    Read by the Risk Gateway so an autonomous trade uses the leverage the operator
+    picked on the home page — 5x, 10x — exactly as a broker (Binance/Bybit) applies
+    it: the allocated margin times this leverage is the position's notional. Before
+    this the gateway hardcoded 1x and the operator's choice did nothing.
+
+    Returns None (not 1) when no session is running, so the gateway can tell "no
+    session, use the autonomous 1x default" apart from "a session that chose 1x".
+    The value was already bounded to the venue's hard ceiling at `start_session`
+    (3x real / 10x paper — invariant 2, not raisable here), and the gateway bounds
+    it AGAIN against the ceiling as a belt-and-braces guard: a leverage that came
+    from anywhere must never exceed the hard limit.
+    """
+    session = active_session()
+    if session is None:
+        return None
+    try:
+        lev = int(getattr(session, "leverage", 1))
+    except (TypeError, ValueError):
+        return None
+    return lev if lev >= 1 else None
 
 
 def list_sessions(limit: int = 20) -> List[TradingSession]:

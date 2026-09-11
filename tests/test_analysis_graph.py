@@ -429,7 +429,9 @@ def test_risk_specialist_states_both_leverage_ceilings_not_one():
     in the same superstep, so reading it would reliably find None and default to
     'paper' — a confident claim about an account this node never looked at."""
     evidence = " ".join(specialist_risk(_state())["specialist_findings"][0].evidence)
-    assert "3x" in evidence and "10x" in evidence
+    # Both ceilings are 10x now (owner raised real from 3x), but the specialist must
+    # still state BOTH books rather than assuming one it never looked at.
+    assert "10x" in evidence and "on real money" in evidence and "on paper" in evidence
     assert "not overridable" in evidence
 
 

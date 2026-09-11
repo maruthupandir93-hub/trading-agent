@@ -56,23 +56,33 @@ def _candles(n=60, base=100.0, spread=2.0, volume=1000.0):
 # ---------------------------------------------------------------------------
 
 def test_leverage_ceiling_values_match_the_typescript_side():
-    """3x real / 10x paper. The CRO previously used a bare `> 5` literal, so
-    the effective limit depended on which code path a trade took."""
-    assert ABSOLUTE_MAX_LEVERAGE == 3
+    """10x real / 10x paper. Raised from 3x real on 2026-09-10 at the owner's
+    explicit request (see the constant's comment). The two copies (TS + Python)
+    must still agree, which is what this pins."""
+    assert ABSOLUTE_MAX_LEVERAGE == 10
     assert ABSOLUTE_MAX_LEVERAGE_PAPER == 10
-    assert max_leverage_ceiling("real") == 3
+    assert max_leverage_ceiling("real") == 10
     assert max_leverage_ceiling("paper") == 10
 
 
 def test_unknown_tab_gets_the_stricter_ceiling():
-    """A typo'd or missing tab must not be handed the permissive paper limit."""
+    """A typo'd or missing tab must not be handed a MORE permissive limit than
+    real. (Real and paper are equal now, but the fallback must still resolve to
+    the real ceiling, not to something looser.)"""
     for tab in ("", "REAL", "live", "production", "nonsense", None):
         assert max_leverage_ceiling(tab) == ABSOLUTE_MAX_LEVERAGE
 
 
-@pytest.mark.parametrize("leverage", [3.01, 4, 5, 10, 50, 125])
+@pytest.mark.parametrize("leverage", [10.01, 11, 25, 50, 125])
 def test_leverage_above_the_real_ceiling_is_rejected(leverage):
+    """Above the 10x ceiling still rejects — the ceiling was raised, not removed."""
     assert check_leverage(leverage, "real").status == "reject"
+
+
+@pytest.mark.parametrize("leverage", [1, 2, 3, 5, 10])
+def test_leverage_at_or_below_the_ceiling_is_accepted(leverage):
+    """The owner's chosen leverage up to 10x is honoured on real, not clamped."""
+    assert check_leverage(leverage, "real").status == "pass"
 
 
 def test_no_argument_can_raise_the_ceiling():
