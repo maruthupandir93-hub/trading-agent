@@ -831,6 +831,58 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS run_id text;
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy text;
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades (strategy) WHERE strategy IS NOT NULL;
 
+-- THE COST OF THE FILL. Nothing in this system subtracted a fee from any P&L
+-- figure: `realized_pnl = (price - avgCost) * qty`, stored gross, aggregated
+-- gross, and reported gross. Against this system's own backtest that is 58-74%
+-- of the edge on every strategy it ranks as profitable, and it flips Swing and
+-- Trend from break-even to losing. See `backend/services/fees.py`.
+--
+-- Recorded PER LEG rather than only on the close, because the entry leg's fee is
+-- paid at entry and a round trip must subtract both. `position_monitor` carries
+-- the entry fee on the watch row so the close can net it out.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS fee numeric;
+
+-- Whether `fee` is what the VENUE reported or what this system MODELLED.
+--
+-- Invariant 6 applied to a cost. A paper fill has no venue and therefore no fee
+-- to report, so modelling is the only honest option — but a modelled cost
+-- presented indistinguishably from a measured one makes paper P&L look exactly
+-- as authoritative as real P&L when it is strictly an estimate. NULL means the
+-- row predates fee accounting, which is different again from either.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS fee_measured boolean;
+
+-- The fee paid to OPEN this position, carried so the close can report P&L net of
+-- the whole round trip. Without it the close knows only its own side's cost and
+-- would report a trade as profitable that paid more in fees than it made.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS entry_fee numeric;
+
+-- The entry-to-stop distance as it was AT ENTRY, in price units.
+--
+-- Needed because the trailing stop measures progress in R, and `stop_loss` stops
+-- being a usable denominator the moment anything moves it: the partial take-profit
+-- moves the stop to break-even, which makes `abs(entry - stop)` zero. Persisted so
+-- a restart does not lose the scale the trail is measured on and silently stop
+-- trailing a position it is still watching.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS initial_risk numeric;
+
+-- The funding rate as it stood when this position was opened, per settlement.
+--
+-- Perpetuals charge funding at 00:00/08:00/16:00 UTC to whoever is open at that
+-- instant, and nothing in this system ever accounted for it. Captured at ENTRY
+-- rather than read at close, because the close path is safety-critical and must
+-- not wait on an HTTP round trip to learn what a position cost.
+--
+-- That makes the resulting figure an ESTIMATE: the rate floats between
+-- settlements. See `backend/services/funding.py` for why funding is counted in
+-- DISCRETE settlements crossed rather than pro-rated by hours held.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS funding_rate numeric;
+
+-- Funding paid (positive) or received (negative) over the life of the trade.
+-- Signed, because a SHORT is CREDITED when the rate is positive and that income
+-- is real — a model that only ever subtracts would understate exactly the trades
+-- this system takes most.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS funding numeric;
+
 
 -- ---------------------------------------------------------------------
 -- CONSTRAINT REPLACEMENT

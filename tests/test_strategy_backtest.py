@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from backend.core.risk_manager import ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER
+import pytest
+
 from backend.core.strategy_backtest import backtest_strategy
 
 
@@ -44,8 +46,13 @@ def test_a_reached_target_is_plus_two_R():
     result = backtest_strategy(bars, _signal_from_bar, name="t")
     assert result.trades == 1
     assert result.wins == 1
-    assert result.expectancy_r == 2.0        # 5.0/2.5 reward per R
+    # GROSS. `expectancy_r` is net of fees now, and the risk model's "a target is
+    # +2R" is a statement about the model, not about what the trade paid out.
+    assert result.gross_expectancy_r == 2.0  # 5.0/2.5 reward per R
+    assert result.trade_log[0]["r_multiple"] == 2.0
     assert result.trade_log[0]["outcome"] == "target"
+    # ...and the net figure is that, minus the round trip.
+    assert result.expectancy_r == pytest.approx(2.0 - result.fee_r_per_trade)
 
 
 def test_a_reached_stop_is_minus_one_R():
@@ -56,8 +63,11 @@ def test_a_reached_stop_is_minus_one_R():
     result = backtest_strategy(bars, _signal_from_bar, name="t")
     assert result.trades == 1
     assert result.losses == 1
-    assert result.expectancy_r == -1.0
+    assert result.gross_expectancy_r == -1.0
+    assert result.trade_log[0]["r_multiple"] == -1.0
     assert result.trade_log[0]["outcome"] == "stop"
+    # A loss costs MORE than 1R once the cost of taking it is included.
+    assert result.expectancy_r < -1.0
 
 
 def test_an_ambiguous_bar_assumes_the_stop_filled_first():
@@ -70,7 +80,10 @@ def test_an_ambiguous_bar_assumes_the_stop_filled_first():
     bars[17]["high"] = 106.0
     result = backtest_strategy(bars, _signal_from_bar, name="t")
     assert result.trade_log[0]["outcome"] == "stop"
-    assert result.expectancy_r == -1.0
+    # GROSS: the model says a stop is -1R. Net is worse, because the round trip
+    # was still paid for.
+    assert result.gross_expectancy_r == -1.0
+    assert result.expectancy_r < -1.0
 
 
 def test_a_short_targets_downward():
@@ -122,9 +135,12 @@ def test_expectancy_over_a_mixed_sequence():
     assert result.wins == 2
     assert result.losses == 2
     assert result.win_rate == 0.5
-    assert result.expectancy_r == 0.5
+    assert result.gross_expectancy_r == 0.5
     assert result.payoff == 2.0               # avg win 2.0 / avg loss 1.0
-    assert result.total_r == 2.0
+    # NET is what decides whether a strategy is worth running, and it is lower.
+    assert result.expectancy_r == pytest.approx(0.5 - result.fee_r_per_trade)
+    assert result.expectancy_r < result.gross_expectancy_r
+    assert result.total_r == pytest.approx(2.0 - 4 * result.fee_r_per_trade)
 
 
 def test_only_one_position_at_a_time():

@@ -308,6 +308,27 @@ async def lifespan(app: FastAPI):
 
     from backend.services import reconciliation, retention
 
+    # The venue's own order feed, pushed rather than polled.
+    #
+    # Reconciliation below asks the exchange what it holds ONCE A MINUTE. That is
+    # the right cadence for a comparison, and far too slow for the one event it
+    # cannot afford to miss: a resting stop or take-profit FIRING at the venue.
+    # When that happens the position is closed there and this process does not
+    # know for up to 60 seconds, during which the monitor is still ticking against
+    # a stop that has already executed.
+    #
+    # It REPORTS ONLY, exactly like reconciliation and for the same reason — every
+    # automatic "fix" is itself a trading decision, and this one would be made on a
+    # single message from a single socket with no gate behind it. It holds no
+    # reference to any book, so that property is structural rather than a rule.
+    #
+    # Self-gating: does nothing unless LIVE_TRADING is on and credentials exist,
+    # because a paper fill has no venue order to watch.
+    from backend.services.order_stream import get_order_stream
+
+    order_stream = get_order_stream()
+    order_stream.start()
+
     worker_tasks = [
         asyncio.create_task(monitor_worker.start()),
         asyncio.create_task(curiosity_worker.start()),
@@ -393,6 +414,14 @@ async def lifespan(app: FastAPI):
     # inner tasks, and an un-awaited cancel leaves them logging
     # "Task exception was never retrieved" during an otherwise clean shutdown.
     await ticker_stream.stop()
+
+    # Same rule for the order stream: it holds an authenticated websocket and a
+    # ccxt.pro client, and closing the client is what releases the venue's
+    # connection slot. A cancel without the await leaves the socket to be reaped
+    # whenever the event loop happens to tear down, and the venue counts it as
+    # still connected until then — which matters on the next start, because both
+    # exchanges cap concurrent private connections per key.
+    await order_stream.stop()
 
     # Release the shared outbound HTTP pool used by every third-party call.
     await close_upstream_client()

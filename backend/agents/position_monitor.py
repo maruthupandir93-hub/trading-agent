@@ -92,6 +92,12 @@ logger = logging.getLogger(__name__)
 
 import os
 
+# Fee arithmetic lives in ONE module so the paper book, the closing row and the
+# backtest cannot each carry their own idea of what a trade costs — which they
+# did: `execution_agent` modelled 4 bps inline while nothing else modelled any.
+from backend.services.fees import FeeResult, modelled_fee, round_trip_fee
+from backend.services.funding import estimate_funding
+
 # ---------------------------------------------------------------------------
 # PARTIAL PROFIT-TAKING — bank part of the move so a pullback does not give the
 # WHOLE gain back to the break-even stop.
@@ -117,6 +123,36 @@ def _env_float(name: str, default: float) -> float:
 
 PARTIAL_TP_R = _env_float("PARTIAL_TP_R", 1.0)          # profit, in R, to scale out at
 PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank (0 disables)
+
+# TRAILING STOP — what turns a trending window into a large win instead of a +2R cap.
+#
+# The evidence for adding it is this system's own ledger: 12 closed trades, 3 wins,
+# and ALL THREE landed inside one 30-minute trending window. A fixed 5-ATR target
+# caps exactly the runs that pay for the stop-outs, and the existing protection
+# stops ratcheting the moment the partial take-profit sets the stop to break-even —
+# from +1R to the target the runner has no protection above entry at all.
+#
+# MEASURED IN R, NOT IN PERCENT, and that matters. A percentage trail is the same
+# distance on a quiet coin and a violent one, so it is either inside the noise band
+# (stopping out on every wiggle — the failure this system already diagnosed at
+# 1.5 ATR) or far too wide. R is the ATR-derived risk this position was actually
+# sized against, so the trail automatically widens on a volatile instrument and
+# tightens on a calm one, with no second volatility model to keep in sync.
+#
+# ARMS AT +1R BY DEFAULT, which is where the partial take-profit also fires. That
+# is deliberate sequencing, not a collision: the scale-out banks half and sets the
+# stop to break-even, and from that same point the trail takes over protecting the
+# runner. Below +1R the original ATR stop is still the right protection — trailing
+# a position that has not yet proved anything just converts the ordinary noise this
+# system widened its stop to survive back into stop-outs.
+#
+# DISTANCE 1.0R BY DEFAULT: the stop follows one full unit of initial risk behind
+# the best price seen. At +2R the stop sits at +1R, so the target is no longer a
+# ceiling — the position can run while giving back at most 1R from its peak.
+#
+# TRAILING_STOP_R = 0 disables the trail entirely (back to fixed stop + target).
+TRAILING_STOP_R = _env_float("TRAILING_STOP_R", 1.0)        # distance behind peak, in R
+TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, before it arms
 
 
 class _Tracked:
@@ -155,6 +191,38 @@ class _Tracked:
         # Confirmed against the live database before fixing: 12 closed trades,
         # strategy NULL on all 12.
         "strategy", "run_id", "entry_context",
+        # THE FEE PAID TO OPEN. Carried so `_close` can report P&L net of the
+        # whole round trip. Without it the close knows only its own side's cost,
+        # and a trade that paid more in fees than it made would still be recorded
+        # as a winner — which is what every closed trade in this system did.
+        "entry_fee",
+        # THE ENTRY-TO-STOP DISTANCE AT ENTRY, in price units.
+        #
+        # A SEPARATE FIELD FROM `stop_loss` ON PURPOSE, and the reason is the
+        # interaction with the partial take-profit. `_r_multiple` derives R from
+        # `abs(entry_price - stop_loss)`, which is correct for gating the
+        # scale-out precisely BECAUSE it collapses to zero once the stop moves to
+        # break-even — that is the documented guard stopping a second scale-out
+        # after a restart. The trail needs the opposite property: a denominator
+        # that does NOT move when the stop does, or the trail distance would
+        # shrink every time it tightened and ratchet itself into the price.
+        #
+        # So the two measurements are kept apart rather than one being reused for
+        # both. See `_r_from_initial_risk`.
+        "initial_risk",
+        # THE FUNDING RATE AS IT STOOD AT ENTRY, per settlement.
+        #
+        # Captured at fill time — where an HTTP call is already being made to
+        # place the resting stop — so the CLOSE path never waits on one. That
+        # makes the funding figure an estimate: the rate floats between
+        # settlements and a long hold may be billed a different one at each.
+        # `services/funding` reports it as modelled for exactly that reason.
+        "funding_rate",
+        # The furthest the trail has actually moved the stop, or None while the
+        # trail has not yet armed. In-memory only: it is derivable from
+        # `stop_loss` and exists to keep the log line honest about whether a
+        # given tighten came from the trail or from the break-even move.
+        "trail_armed",
     )
 
     def __init__(self, **kw):
@@ -327,6 +395,13 @@ class PositionMonitorAgent(BaseAgent):
                 "strategy": appr.get("strategy"),
                 "run_id": appr.get("run_id"),
                 "entry_context": appr.get("entry_context"),
+                # No fill has happened, so no fee has been paid and there is no
+                # entry price to measure a risk distance from. Both are genuinely
+                # None here rather than zero — a 0.0 entry fee would be read as
+                # "this fill was free" by the close that nets it.
+                "entry_fee": None,
+                "initial_risk": None,
+                "funding_rate": None,
             })
 
         for pos in self._open.values():
@@ -357,6 +432,9 @@ class PositionMonitorAgent(BaseAgent):
                 "strategy": pos.strategy,
                 "run_id": pos.run_id,
                 "entry_context": pos.entry_context,
+                "entry_fee": pos.entry_fee,
+                "initial_risk": pos.initial_risk,
+                "funding_rate": pos.funding_rate,
             })
 
         return rows
@@ -519,6 +597,19 @@ class PositionMonitorAgent(BaseAgent):
                 strategy=row.get("strategy"),
                 run_id=row.get("run_id"),
                 entry_context=row.get("entry_context"),
+                # Restored so the eventual close still nets the ENTRY fee, not
+                # just the exit's. Losing it across a restart would report the
+                # round trip as cheaper than it was, in the flattering direction.
+                entry_fee=row.get("entry_fee"),
+                # Restored so the trailing stop keeps its scale. A position
+                # opened before this column existed restores with None, and
+                # `_apply_trailing_stop` then leaves it on the fixed stop and
+                # target it already had — degraded, but never less protected.
+                initial_risk=row.get("initial_risk"),
+                # Restored so a position held across a restart is still charged
+                # for the settlements it lived through. Losing it would report a
+                # multi-day hold as free, in the flattering direction.
+                funding_rate=row.get("funding_rate"),
             )
             resumed += 1
 
@@ -545,7 +636,8 @@ class PositionMonitorAgent(BaseAgent):
 
     async def _persist_closed_trade(
         self, pos: "_Tracked", exit_price: float, realized: float, reason: str,
-        qty: Optional[float] = None,
+        qty: Optional[float] = None, fee: Optional["FeeResult"] = None,
+        funding: Optional[float] = None,
     ) -> None:
         """Record the completed round trip, WITH its realized P&L. Never raises.
 
@@ -586,8 +678,8 @@ class PositionMonitorAgent(BaseAgent):
                     """
                     INSERT INTO trades
                         (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note,
-                         strategy, run_id, entry_context)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                         strategy, run_id, entry_context, fee, fee_measured, funding)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     """,
                     str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, row_qty, exit_price, realized,
@@ -601,12 +693,62 @@ class PositionMonitorAgent(BaseAgent):
                     # no strategy, and inventing one would attribute a human's
                     # outcome to an algorithm that never chose it.
                     pos.strategy, pos.run_id, pos.entry_context,
+                    # THIS LEG's fee only. `pnl` above is already net of BOTH
+                    # legs, so summing the `fee` column across a round trip gives
+                    # the total cost without double-counting it into the P&L —
+                    # the two columns answer different questions and must not be
+                    # combined by a later reader expecting one to include the
+                    # other.
+                    fee.cost if fee is not None else None,
+                    fee.measured if fee is not None else None,
+                    # SIGNED, and already included in `pnl` above. Stored
+                    # separately so the cost of HOLDING can be told apart from
+                    # the cost of TRADING — a strategy that is profitable per
+                    # trade but bleeds funding on long holds looks identical to
+                    # one that is simply losing, unless the two are split.
+                    funding,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failed to persist the closing trade for %s (realized %+.2f): %s",
                 pos.symbol, realized, exc,
             )
+
+    async def _capture_funding_rate(self, pos: "_Tracked") -> None:
+        """Record the funding rate in force at entry. Best-effort, never raises.
+
+        REAL POSITIONS ONLY, and the reason is the same one that keeps the resting
+        stop off the paper path: a paper fill has no venue order behind it, so
+        reaching the exchange for it makes a SIMULATED book depend on live network
+        I/O. That is a dependency the simulation should not have — it fails
+        differently, it is slower, and it makes the paper path untestable without
+        a network.
+
+        A paper position is still CHARGED funding. It just uses the venue baseline
+        rate rather than the live one, and `services/funding` says so in its own
+        detail string, so the estimate is never dressed up as a measurement
+        (invariant 6). The difference between the baseline and the live rate is a
+        modelling error in a simulation; omitting funding entirely — which is what
+        happened before — was a systematic overstatement of every long hold.
+
+        Leaves `funding_rate` as None on any failure rather than substituting a
+        number, for the same reason.
+        """
+        if pos.tab != "real":
+            return
+        try:
+            from backend.services.venue import get_venue
+
+            rate = await get_venue().funding_rate(pos.symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not capture the funding rate for %s (%s). Funding on this "
+                "position will be estimated from the venue baseline.",
+                pos.symbol, exc,
+            )
+            return
+        if rate is not None:
+            pos.funding_rate = rate
 
     async def _place_resting_stop(self, pos: "_Tracked") -> None:
         """Put the stop-loss ON THE EXCHANGE for a real position.
@@ -1013,6 +1155,19 @@ class PositionMonitorAgent(BaseAgent):
                 # safety-critical leg and goes on first, so a failure placing the
                 # TP cannot delay the downside protection.
                 await self._place_resting_tp(tracked)
+                # THE FUNDING RATE, CAPTURED HERE AND NOT AT CLOSE.
+                #
+                # This is the one moment an HTTP call is affordable: the position
+                # is open, both protective legs are already placed, and nothing is
+                # waiting on this. Reading it at CLOSE time instead would put a
+                # network round trip between a stop firing and the position
+                # leaving the watch list — and an unclosed position is a risk
+                # problem while an unmeasured cost is only an accounting one.
+                #
+                # LAST, after both protective orders, so a funding-rate failure
+                # can never delay the stop. It never raises and a None simply
+                # means `services/funding` falls back to the venue baseline.
+                await self._capture_funding_rate(tracked)
             await self.persist_watch_list()
             return
 
@@ -1057,6 +1212,22 @@ class PositionMonitorAgent(BaseAgent):
             strategy=approved.get("strategy"),
             run_id=approved.get("run_id"),
             entry_context=approved.get("entry_context"),
+            # THE ENTRY FEE, carried off the fill event so the eventual close can
+            # report P&L net of the whole round trip. `OrderFilledEvent.fee` has
+            # always existed and nothing ever read it — the cost was published,
+            # then discarded, and every realized figure was gross.
+            entry_fee=getattr(event, "fee", None),
+            # THE SCALE THE TRAIL MEASURES ON, captured once, here, while the stop
+            # is still the one the Risk Gateway approved. Computed now rather than
+            # on demand because `stop_loss` moves: the partial take-profit sets it
+            # to break-even, after which `abs(entry - stop)` is zero and the trail
+            # would have no denominator. None when either side is missing, which
+            # `_apply_trailing_stop` treats as "no trail", never as zero risk.
+            initial_risk=(
+                abs(event.fill_price - approved["stop_loss"])
+                if approved.get("stop_loss") is not None and event.fill_price is not None
+                else None
+            ),
         )
         self._open[tar_id] = tracked
         logger.info(
@@ -1100,6 +1271,16 @@ class PositionMonitorAgent(BaseAgent):
                     r = self._r_multiple(pos, price)
                     if r is not None and r >= PARTIAL_TP_R:
                         await self._take_partial(pos, price)
+
+                # THEN TRAIL. After the scale-out, not before it — `_take_partial`
+                # moves the stop to break-even and the trail must ratchet from
+                # there, never propose something looser and be refused.
+                #
+                # Ordered this way rather than `elif` because on the tick that
+                # scales out, the position is already far enough along to deserve a
+                # trailed stop too; making it wait a tick leaves the runner at
+                # break-even while price is at its peak.
+                self._apply_trailing_stop(pos, price)
                 continue
 
             # Stop takes precedence when a single tick spans both levels. A
@@ -1124,6 +1305,85 @@ class PositionMonitorAgent(BaseAgent):
             return None
         move = (price - pos.entry_price) if pos.side == "buy" else (pos.entry_price - price)
         return move / risk
+
+    def _r_from_initial_risk(self, pos: "_Tracked", price: float) -> Optional[float]:
+        """Profit in units of the risk this position was ORIGINALLY sized against.
+
+        Deliberately NOT `_r_multiple`. That one divides by the CURRENT
+        entry-to-stop distance, which is the right denominator for gating the
+        scale-out — it collapses to zero once the stop reaches break-even, and
+        that collapse is the documented guard preventing a second scale-out after
+        a restart.
+
+        The trail needs the opposite property. If its denominator shrank every
+        time the stop tightened, the trail distance would shrink with it and the
+        stop would ratchet itself into the price, closing a healthy position on
+        ordinary noise — a runaway that gets worse the better the trade is doing.
+        So it measures against `initial_risk`, which is captured once at entry and
+        never moves.
+        """
+        if pos.entry_price is None or not pos.initial_risk or pos.initial_risk <= 0:
+            return None
+        move = (price - pos.entry_price) if pos.side == "buy" else (pos.entry_price - price)
+        return move / pos.initial_risk
+
+    def _apply_trailing_stop(self, pos: "_Tracked", price: float) -> None:
+        """Ratchet the stop to TRAILING_STOP_R behind the best price seen. Never raises.
+
+        WHY THIS IS SYNCHRONOUS AND GOES THROUGH `tighten_stop`
+        ------------------------------------------------------
+        `tighten_stop` is the one-way ratchet, and routing the trail through it
+        means the trail CANNOT widen a stop even if this method computes something
+        wrong — the refusal path is already written, already tested, and already
+        handles the "would fire on the next tick" case. A trail that wrote
+        `pos.stop_loss` directly would be a second, unguarded authority over the
+        single number invariant 3 exists to protect.
+
+        It also inherits the resting-order replacement for free: `tighten_stop`
+        schedules `_replace_resting_stop_soon`, so the venue's stop moves with the
+        local one. A trail that only moved the in-process stop would leave the
+        exchange protecting this position at the ORIGINAL level while every screen
+        showed the trailed one — and the exchange's copy is the one that survives
+        a crash.
+
+        A refusal is ORDINARY here, not an error: on most ticks the trailed level
+        is worse than the current stop and `tighten_stop` declines. That is the
+        ratchet working, so it is logged at debug and nothing else happens.
+        """
+        if TRAILING_STOP_R <= 0:
+            return  # trail disabled by configuration
+        if pos.entry_price is None or not pos.initial_risk or pos.initial_risk <= 0:
+            # No scale to measure against. Positions opened before `initial_risk`
+            # existed restore without one; they keep their fixed stop and target,
+            # which is exactly the protection they had before this feature.
+            return
+
+        progress = self._r_from_initial_risk(pos, price)
+        if progress is None or progress < TRAILING_ACTIVATE_R:
+            # Not yet proved enough to protect. Below the activation point the
+            # original ATR stop is the correct protection — trailing here would
+            # turn the noise this system widened its stop to survive back into
+            # stop-outs, which is the failure the 1.5 -> 2.5 ATR change fixed.
+            return
+
+        distance = TRAILING_STOP_R * pos.initial_risk
+        # `peak_price` is the best price SEEN, maintained by the caller on every
+        # tick. Trailing from the peak rather than from the current price is what
+        # makes this a ratchet at all: from the current price the stop would
+        # follow a pullback back down and give up the ground it had gained.
+        anchor = pos.peak_price if pos.peak_price is not None else price
+        candidate = (anchor - distance) if pos.side == "buy" else (anchor + distance)
+
+        applied, why = self.tighten_stop(pos.tar_id, candidate)
+        if applied:
+            pos.trail_armed = True
+            logger.info(
+                "Trailing stop on %s %s: +%.2fR reached, stop now %.8g "
+                "(%.2fR behind peak %.8g).",
+                pos.side, pos.symbol, progress, candidate, TRAILING_STOP_R, anchor,
+            )
+        else:
+            logger.debug("Trail on %s not applied: %s", pos.symbol, why)
 
     async def _take_partial(self, pos: "_Tracked", price: float) -> None:
         """Bank PARTIAL_TP_FRACTION of the position at +PARTIAL_TP_R, ONCE.
@@ -1160,15 +1420,44 @@ class PositionMonitorAgent(BaseAgent):
                 return
 
             sign = 1 if pos.side == "buy" else -1
-            realized = (fill_price - pos.entry_price) * partial_qty * sign
+            gross = (fill_price - pos.entry_price) * partial_qty * sign
+
+            # NET, and the entry fee is apportioned BY SIZE.
+            #
+            # A scale-out closes part of the position, so it must bear only the
+            # matching part of the entry cost — charging the whole entry fee here
+            # would make the banked half look worse than it was and leave the
+            # runner's eventual close carrying none of it, so the round trip would
+            # still net correctly in total but be attributed wrongly between the
+            # two rows. `strategy_performance` reads rows, not round trips, so
+            # that misattribution would land directly in the win rate.
+            share = partial_qty / full_qty if full_qty else 0.0
+            entry_share = abs(pos.entry_fee or 0.0) * share
+            exit_fee = modelled_fee(partial_qty * fill_price)
+            # Funding on the SCALED-OUT portion only, for the settlements it was
+            # open across. The runner keeps accruing its own and is charged for
+            # the full window on its eventual close — the two windows overlap,
+            # which is correct: both halves really were open for the first one.
+            partial_funding = estimate_funding(
+                side=pos.side,
+                notional=partial_qty * pos.entry_price,
+                opened_at=pos.opened_at,
+                closed_at=datetime.datetime.utcnow(),
+                rate=pos.funding_rate,
+            )
+            realized = gross - round_trip_fee(entry_share, exit_fee.cost) - partial_funding.cost
 
             # Trim to the runner, and mark done so this fires only once (belt to the
             # break-even braces below).
             pos.qty = full_qty - partial_qty
             pos.partial_done = True
+            # The runner keeps only the UNBANKED remainder of the entry fee, so
+            # its own close does not charge the part this row already paid.
+            pos.entry_fee = abs(pos.entry_fee or 0.0) - entry_share
 
             await self._persist_closed_trade(
-                pos, fill_price, realized, "partial-tp", qty=partial_qty
+                pos, fill_price, realized, "partial-tp", qty=partial_qty,
+                fee=exit_fee, funding=partial_funding.cost,
             )
             await self.persist_watch_list()
 
@@ -1232,7 +1521,44 @@ class PositionMonitorAgent(BaseAgent):
             # differ by slippage, and using the trigger would report the P&L we
             # hoped for rather than the one we got.
             sign = 1 if pos.side == "buy" else -1
-            realized = (fill_price - pos.entry_price) * pos.qty * sign
+            gross = (fill_price - pos.entry_price) * pos.qty * sign
+
+            # NET OF THE WHOLE ROUND TRIP, and this is the line that was missing.
+            #
+            # `realized` used to be the gross figure above, stored in `trades.pnl`
+            # and aggregated by `strategy_performance` — so every P&L number this
+            # system has ever reported excluded the cost of producing it. At this
+            # system's stop distance that is ~0.093R per round trip against
+            # backtested edges of 0.125-0.160R: 58-74% of the entire edge, and
+            # enough to flip Swing and Trend from break-even to losing.
+            #
+            # BOTH legs are subtracted here because both are paid by this round
+            # trip. The entry fee was paid at entry and carried on `_Tracked`; the
+            # exit fee is modelled on this fill. Netting only the exit — the
+            # tempting simplification, since it is the one this method computes —
+            # would still report a trade as profitable that paid more in fees
+            # than it made.
+            exit_fee = modelled_fee(abs(pos.qty) * fill_price)
+            fees = round_trip_fee(pos.entry_fee, exit_fee.cost)
+
+            # FUNDING, for the settlements this position was actually open across.
+            #
+            # DISCRETE, not pro-rated: funding is charged at 00:00/08:00/16:00 UTC
+            # to whoever is open at that instant, so a six-hour hold that crosses
+            # none of them owes NOTHING. Pro-rating by hours would bill most of
+            # this system's trades — which are typically well under 8 hours — for
+            # funding they never paid. See `services/funding`.
+            #
+            # Signed: a short is CREDITED when the rate is positive, and that
+            # income is real, so it is added back rather than discarded.
+            funding = estimate_funding(
+                side=pos.side,
+                notional=abs(pos.qty) * pos.entry_price,
+                opened_at=pos.opened_at,
+                closed_at=datetime.datetime.utcnow(),
+                rate=pos.funding_rate,
+            )
+            realized = gross - fees - funding.cost
             held = (datetime.datetime.utcnow() - pos.opened_at).total_seconds()
 
             # CANCEL THE RESTING STOP BEFORE FORGETTING THE POSITION.
@@ -1276,12 +1602,16 @@ class PositionMonitorAgent(BaseAgent):
             # It is written HERE rather than in the executor because this is the
             # only place that holds entry, exit, quantity and side together, which
             # is exactly what a closed round trip is. The executor sees one leg.
-            await self._persist_closed_trade(pos, fill_price, realized, reason)
+            await self._persist_closed_trade(
+                pos, fill_price, realized, reason, fee=exit_fee, funding=funding.cost,
+            )
 
             logger.info(
-                "Closed %s at %s (%s, triggered at %s): realized %+.2f after %.0fs. "
+                "Closed %s at %s (%s, triggered at %s): gross %+.2f, fees %.4f, "
+                "funding %+.4f (%d settlement(s)), realized %+.2f after %.0fs. "
                 "%d position(s) still watched.",
-                pos.symbol, fill_price, reason, trigger_price, realized, held, len(self._open),
+                pos.symbol, fill_price, reason, trigger_price, gross, fees,
+                funding.cost, funding.settlements, realized, held, len(self._open),
             )
             self.record_decision(
                 f"closed-{reason}",

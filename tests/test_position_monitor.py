@@ -306,7 +306,22 @@ async def test_realized_pnl_uses_the_actual_fill_not_the_trigger_price():
 
     assert len(closes) == 1
     assert closes[0].exit_price == slipped_fill
-    assert closes[0].realized_pnl == pytest.approx((slipped_fill - ENTRY) * 1.0)
+
+    # NET OF FEES, and measured against the FILL. Both properties at once:
+    #   * the magnitude is the fill-based P&L less the round trip's cost;
+    #   * it is emphatically NOT the trigger-based figure, which is the bug this
+    #     test exists to catch and which would be the LARGER (flattering) number.
+    from backend.services.fees import modelled_fee, round_trip_fee
+
+    gross = (slipped_fill - ENTRY) * 1.0
+    # The ENTRY fee is whatever the fill event reported — this fixture publishes
+    # `fee=0.0`, so only the exit leg is charged here. That is the point of
+    # carrying `entry_fee` off the event rather than re-modelling it at close
+    # time: a real fill's measured commission must survive to the close.
+    fees = round_trip_fee(0.0, modelled_fee(1.0 * slipped_fill).cost)
+    assert closes[0].realized_pnl == pytest.approx(gross - fees, rel=1e-3)
+    assert closes[0].realized_pnl < gross, "fees must reduce the reported P&L"
+    assert closes[0].realized_pnl != pytest.approx((STOP - 1 - ENTRY) * 1.0)
 
 
 @pytest.mark.asyncio

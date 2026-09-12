@@ -50,6 +50,7 @@ import datetime
 import logging
 
 from backend.core.db import get_db_pool
+from backend.services.fees import modelled_fee
 
 logger = logging.getLogger(__name__)
 
@@ -460,17 +461,36 @@ async def apply_paper_fill(
         # kind of wrong, and the caller already handles `ok: False` by logging and
         # not recording a position.
         free_cash = float(book.get("cash") or 0.0)
-        if margin > free_cash:
+        # THE FEE IS PART OF WHAT THIS ENTRY COSTS, so it belongs in the
+        # affordability check and not only in the deduction below.
+        #
+        # Checking `margin > free_cash` and THEN subtracting `margin + fee` lets an
+        # entry sized to exactly the available cash pass the check and push the
+        # balance negative — which is precisely what this check exists to prevent,
+        # and the comment above says why that is not a cosmetic problem: `book_equity`
+        # is free cash + locked margin + unrealized, so a negative first term
+        # understates equity, which understates the next position's size, and every
+        # subsequent risk calculation is wrong in a compounding way.
+        #
+        # Broker-style sizing makes this reachable rather than theoretical: at 100%
+        # capital allocation the Risk Gateway deliberately sizes to the whole pool
+        # (less the 1.2x margin buffer), so "exactly affordable before fees" is the
+        # normal case at the top of the range, not an edge one.
+        entry_fee = modelled_fee(notional).cost
+        required = margin + entry_fee
+        if required > free_cash:
             return {
                 "ok": False,
                 "reason": (
-                    f"insufficient free cash for {symbol}: needs {margin:,.2f} margin "
-                    f"({notional:,.2f} notional at {leverage:g}x) but only {free_cash:,.2f} "
-                    f"is free. Capital already committed to open positions is not "
-                    f"available to open another."
+                    f"insufficient free cash for {symbol}: needs {required:,.2f} "
+                    f"({margin:,.2f} margin on {notional:,.2f} notional at {leverage:g}x "
+                    f"plus {entry_fee:,.2f} fee) but only {free_cash:,.2f} is free. "
+                    f"Capital already committed to open positions is not available to "
+                    f"open another."
                 ),
                 "realized": None,
                 "requiredMargin": margin,
+                "fee": entry_fee,
                 "freeCash": free_cash,
             }
 
@@ -499,9 +519,16 @@ async def apply_paper_fill(
                 "side": side,
             })
 
-        book["cash"] = float(book.get("cash") or 0.0) - margin
+        # THE FEE COMES OUT OF CASH, on the open as well as the close.
+        #
+        # Margin is LOCKED and comes back on the close; the fee is SPENT and does
+        # not. Deducting only margin — which is what this did — left the paper
+        # book reporting the full stake as still available and made a book that
+        # had traded a hundred times look identical to one that had never traded.
+        book["cash"] = float(book.get("cash") or 0.0) - margin - entry_fee
         await _persist()
-        return {"ok": True, "action": "open", "realized": None, "marginLocked": margin}
+        return {"ok": True, "action": "open", "realized": None, "marginLocked": margin,
+                "fee": entry_fee}
 
     # ---- a REDUCE / CLOSE ----------------------------------------------
     if existing is None or abs(float(existing.get("qty") or 0.0)) <= _DUST:
@@ -518,7 +545,16 @@ async def apply_paper_fill(
     cost = float(existing["avgCost"])
     closing = min(qty, open_qty)
     direction = 1.0 if (existing.get("side") or "buy") == "buy" else -1.0
-    realized = (price - cost) * closing * direction
+    gross = (price - cost) * closing * direction
+
+    # NET of this leg's fee. The ENTRY fee was already charged to cash when the
+    # position opened, so subtracting it again here would double-count it — the
+    # two legs are accounted where each is actually paid rather than both at the
+    # close. `position_monitor` nets both into the figure it REPORTS because a
+    # trade row has to state the whole round trip; this book instead moves cash
+    # at each event, and the two must not be conflated.
+    exit_fee = modelled_fee(closing * price).cost
+    realized = gross - exit_fee
 
     total_margin = float(existing.get("marginLocked") or (open_qty * cost))
     released = total_margin * (closing / open_qty)
@@ -537,6 +573,8 @@ async def apply_paper_fill(
         "ok": True,
         "action": "close" if remaining <= _DUST else "reduce",
         "realized": realized,
+        "grossRealized": gross,
+        "fee": exit_fee,
         "closedQty": closing,
         # Surfaced so an over-sized close is visible rather than silently clamped.
         "unmatchedQty": qty - closing,

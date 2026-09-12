@@ -320,15 +320,43 @@ def _score_one(
         parts.append("signal=HOLD (no setup)")
 
     # --- trend alignment ----------------------------------------------
-    if mtf_trend is None:
+    #
+    # THE `HOLD` CHECK MUST COME FIRST, AND IT DID NOT.
+    #
+    # `mtf_trend is None` was tested before `signal == "HOLD"`, so whenever the
+    # higher-timeframe trend was unmeasurable a strategy that had DECLINED TO
+    # TRADE collected the 0.5 "neutral" contribution meant for a real signal
+    # whose alignment simply could not be checked. Measured against the live
+    # scorers with flat candles and `mtf_trend=None`:
+    #
+    #     Scalping / Breakout / Range / Grid /
+    #     Arbitrage / VWAP / VolatilityBreakout    signal=HOLD   score 0.375
+    #
+    # against `MIN_SCORE_TO_SELECT = 0.35` — so SEVEN of the eleven strategies
+    # were selectable while signalling nothing. 0 x 0.4 + 0.5 x 0.25 +
+    # 1.0 x 0.15 + 0.5 x 0.2 = 0.375, entirely from three "we could not measure
+    # this" midpoints and not one point of actual evidence.
+    #
+    # `detect_opportunity` then re-reads the same signal function, gets HOLD
+    # again, and ends the run with "scored 0.375 on conditions but signals HOLD
+    # — no entry". Five of the last fifteen traced runs died exactly there. The
+    # cost is not only the wasted node: the trace reads as a setup that was
+    # evaluated and rejected on its merits, when nothing was ever on offer.
+    #
+    # The two branches encode genuinely different facts and the order is what
+    # keeps them apart: "we could not measure the trend for a real signal"
+    # deserves a midpoint, "there is no signal to align" deserves zero. A
+    # strategy with no opinion must not compete for selection at all, which is
+    # what the `signal_score = 0.0` above already says.
+    if signal == "HOLD":
+        align_score = 0.0
+        parts.append("trend alignment n/a (no signal)")
+    elif mtf_trend is None:
         # Unmeasurable, so it contributes its midpoint rather than zero. Scoring
         # a missing measurement as a failure would systematically penalise every
         # strategy whenever the higher-timeframe data was thin.
         align_score = 0.5
         parts.append("trend=unknown (neutral contribution)")
-    elif signal == "HOLD":
-        align_score = 0.0
-        parts.append("trend alignment n/a (no signal)")
     elif (signal == "BUY" and mtf_trend == "Bullish") or (signal == "SELL" and mtf_trend == "Bearish"):
         align_score = 1.0
         parts.append(f"aligned with {mtf_trend} higher timeframe")

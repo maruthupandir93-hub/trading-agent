@@ -54,6 +54,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from backend.services.fees import taker_rate
 from backend.core.risk_manager import ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER
 
 # The signal function contract: candles in, "BUY" | "SELL" | "HOLD" out. Exactly
@@ -72,7 +73,16 @@ class Trade:
     entry_price: float
     exit_price: float
     outcome: str            # "target" | "stop" | "open_at_end"
-    r_multiple: float       # +2.0 for a target hit, -1.0 for a stop, marked otherwise
+    # GROSS, and deliberately so: +2.0 for a target hit, -1.0 for a stop. This is
+    # the risk model's own definition and keeping it exact is what makes a trade
+    # log readable — a target that reported +1.96 because of a fee would make
+    # every outcome a slightly different number with no obvious meaning.
+    r_multiple: float
+    # The round trip's cost for THIS trade, in R. Scales inversely with stop
+    # width: one R is `stop_mult * atr` of price while the fee is a fraction of
+    # the entry price on each of two legs, so a wider stop costs proportionally
+    # less. That relationship is why this is per-trade and not a constant.
+    fee_r: float = 0.0
 
 
 @dataclass
@@ -85,10 +95,26 @@ class StrategyResult:
     win_rate: float
     avg_win_r: float
     avg_loss_r: float
-    expectancy_r: float     # THE number: average R per trade. >0 means an edge.
+    # THE number: average R per trade, NET OF FEES. >0 means an edge that
+    # survives the cost of taking it, which is the only kind worth having.
+    expectancy_r: float
+    # The same figure before costs. Reported beside the net one rather than
+    # instead of it, because the GAP is the interesting quantity: on this
+    # system's stop distance fees are ~0.09R against edges of 0.13-0.16R, so a
+    # strategy can look strong gross and be break-even net.
     payoff: Optional[float]  # avg win / avg loss magnitude
     total_r: float
     open_at_end: int
+    # The same figure before costs. Reported beside the net one rather than
+    # instead of it, because the GAP is the interesting quantity: on this
+    # system's stop distance fees are ~0.09R against edges of 0.13-0.16R, so a
+    # strategy can look strong gross and be break-even net.
+    #
+    # Defaulted (and so placed after every required field) purely for dataclass
+    # ordering — an existing caller constructing a StrategyResult positionally
+    # keeps working.
+    gross_expectancy_r: float = 0.0
+    fee_r_per_trade: float = 0.0
     trade_log: List[Dict[str, Any]] = field(default_factory=list)
 
     def summary(self) -> Dict[str, Any]:
@@ -190,11 +216,27 @@ def backtest_strategy(
             # strategy that entered right before the data ended).
             r = ((exit_price - entry) if long else (entry - exit_price)) / (stop_mult * atr)
 
+        # FEES, IN R. This backtest was GROSS, and its own output said so — but
+        # the ranking it produced was then used as evidence about which
+        # strategies work, and at this system's stop distance the round trip is
+        # ~0.09R against edges of 0.13-0.16R. Gross, Scalping/Breakout/Momentum
+        # lead and Swing/Trend look break-even; net, the leaders keep about a
+        # third of their edge and the break-even pair are losers.
+        #
+        # Expressed in R rather than in currency so it stays comparable across
+        # symbols and ATRs like every other number here. One R is `stop_mult *
+        # atr` of price, and the fee is a fraction of the ENTRY PRICE on each of
+        # two legs, so the cost in R is (2 * rate * entry) / (stop_mult * atr).
+        # A wider stop therefore costs proportionally less, which is the real
+        # relationship and the reason this cannot be a flat constant.
+        risk_per_unit = stop_mult * atr
+        fee_r = (2.0 * taker_rate() * entry / risk_per_unit) if risk_per_unit > 0 else 0.0
+
         trades.append(Trade(
             direction="long" if long else "short",
             entry_index=i, exit_index=exit_index,
             entry_price=entry, exit_price=exit_price,
-            outcome=outcome, r_multiple=round(r, 4),
+            outcome=outcome, r_multiple=round(r, 4), fee_r=round(fee_r, 6),
         ))
 
         # Resume scanning AFTER the exit — one position at a time.
@@ -216,9 +258,16 @@ def _summarise(name: str, trades: List[Trade]) -> StrategyResult:
     # Expectancy over CLOSED trades — the open-at-end mark is informational and
     # not counted in the edge estimate, the same way the live learning loop only
     # scores realised closes.
-    expectancy = (sum(t.r_multiple for t in closed) / n_closed) if n_closed else 0.0
+    gross_expectancy = (sum(t.r_multiple for t in closed) / n_closed) if n_closed else 0.0
+    # NET OF FEES, and this is the headline figure. The backtest used to report
+    # the gross number as the edge; at this system's stop distance a round trip
+    # is ~0.09R against measured edges of 0.13-0.16R, so gross ranked three
+    # strategies as profitable that keep about a third of that net and two as
+    # break-even that are actually losing.
+    avg_fee_r = (sum(t.fee_r for t in closed) / n_closed) if n_closed else 0.0
+    expectancy = gross_expectancy - avg_fee_r
     payoff = (avg_win / abs(avg_loss)) if avg_loss else None
-    total_r = sum(t.r_multiple for t in closed)
+    total_r = sum(t.r_multiple - t.fee_r for t in closed)
 
     return StrategyResult(
         strategy=name,
@@ -229,6 +278,8 @@ def _summarise(name: str, trades: List[Trade]) -> StrategyResult:
         avg_win_r=round(avg_win, 4),
         avg_loss_r=round(avg_loss, 4),
         expectancy_r=round(expectancy, 4),
+        gross_expectancy_r=round(gross_expectancy, 4),
+        fee_r_per_trade=round(avg_fee_r, 6),
         payoff=round(payoff, 4) if payoff is not None else None,
         total_r=round(total_r, 4),
         open_at_end=open_at_end,

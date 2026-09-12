@@ -337,12 +337,34 @@ async def test_balance_is_None_not_zero_when_unreadable():
 @pytest.mark.asyncio
 async def test_cancelling_an_order_that_is_already_gone_is_success(monkeypatch):
     """A stop left resting after its position closes becomes an order to OPEN
-    the opposite position. 'Already gone' is the desired end state."""
+    the opposite position. 'Already gone' is the desired end state.
+
+    `resolve_symbol` IS STUBBED, AND IT HAS TO BE. `cancel_order` resolves the
+    symbol inside its own `try`, and `Venue.markets()` deliberately does not
+    catch — so `load_markets()` performs a real network round trip and any
+    failure there lands in the same `except` as the venue's reply. A DNS failure
+    then returns False and this test fails for a reason that has nothing to do
+    with what it is checking.
+
+    That is not hypothetical: it failed exactly this way in a full-suite run
+    (`[Errno 11001] getaddrinfo failed`) while passing in isolation, which is the
+    signature of a test that depends on the network being healthy rather than on
+    the behaviour under test. The behaviour under test is only "an 'unknown
+    order' error is treated as success", and the market lookup is incidental to
+    it.
+
+    `cancel_order` returning False on a genuine network failure is CORRECT and is
+    not what changed — it really could not cancel.
+    """
     v = venue("binance")
+
+    async def resolved(symbol):
+        return f"{symbol}:USDT"
 
     async def unknown(*_a, **_k):
         raise RuntimeError("binance Unknown order sent.")
 
+    monkeypatch.setattr(v, "resolve_symbol", resolved)
     monkeypatch.setattr(v.private, "cancel_order", unknown)
     assert await v.cancel_order("123", "BTC/USDT") is True
 
@@ -372,3 +394,145 @@ def test_binance_defaults_to_futures_and_bybit_to_linear_swaps():
     assert venue("binance").private.options["defaultType"] == "future"
     assert venue("bybit").private.options["defaultType"] == "swap"
     assert venue("bybit").private.options["defaultSubType"] == "linear"
+
+
+# ---------------------------------------------------------------------------
+# Margin mode — bounding the loss of one position to its own margin
+# ---------------------------------------------------------------------------
+#
+# Nothing ever set this, so the venue used whatever its UI was last left on.
+# Under CROSS margin the whole account balance backs every position, so one
+# liquidation reaches funds that were never allocated to that trade — which at
+# the 10x ceiling is the difference between losing a position's margin and
+# losing the account.
+#
+# The three refusals below are NOT failures, and each is a specific Binance code
+# whose meaning had to be read off the venue's own error table rather than
+# guessed. -4046 in particular used to be matched in `ensure_leverage`, where it
+# can never be raised: it is NO_NEED_TO_CHANGE_MARGIN_TYPE, a margin-type code.
+
+
+class _MarginVenue:
+    """A Venue with just enough wired up to exercise `ensure_margin_mode`."""
+
+    def __init__(self, venue_id="binance", raises=None):
+        from backend.services.venue import Venue
+
+        self.v = Venue.__new__(Venue)
+        self.v.id = venue_id
+        self.v._margin_mode_set = {}
+        self.v._funding_cache = {}
+        self.calls = []
+        self._raises = raises
+
+        class _Private:
+            async def set_margin_mode(_s, mode, symbol, params):
+                self.calls.append((mode, symbol, params))
+                if self._raises:
+                    raise Exception(self._raises)
+
+        self.v.private = _Private()
+        self.v.has_credentials = lambda: True
+
+        async def _resolve(symbol):
+            return f"{symbol}:USDT"
+
+        self.v.resolve_symbol = _resolve
+
+
+@pytest.mark.asyncio
+async def test_isolated_is_the_default_margin_mode(monkeypatch):
+    """Isolated bounds a position's maximum loss to the margin the Risk Gateway
+    allocated to it — the same principle as the mandatory stop."""
+    monkeypatch.delenv("MARGIN_MODE", raising=False)
+    h = _MarginVenue()
+    assert await h.v.ensure_margin_mode("SOL/USDT") is True
+    assert h.calls[0][0] == "isolated"
+
+
+@pytest.mark.asyncio
+async def test_cross_is_honoured_when_the_operator_asks_for_it(monkeypatch):
+    """It is their account, and cross is more capital efficient. The bound is
+    gone, which is their decision to make."""
+    monkeypatch.setenv("MARGIN_MODE", "cross")
+    h = _MarginVenue()
+    assert await h.v.ensure_margin_mode("SOL/USDT") is True
+    assert h.calls[0][0] == "cross"
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_mode_falls_back_to_isolated(monkeypatch):
+    monkeypatch.setenv("MARGIN_MODE", "nonsense")
+    h = _MarginVenue()
+    assert await h.v.ensure_margin_mode("SOL/USDT") is True
+    assert h.calls[0][0] == "isolated"
+
+
+@pytest.mark.asyncio
+async def test_no_need_to_change_is_success_not_failure(monkeypatch):
+    """Binance -4046 NO_NEED_TO_CHANGE_MARGIN_TYPE means the mode is ALREADY what
+    we asked for. Treating it as a failure would abort a correctly configured
+    trade every time."""
+    monkeypatch.delenv("MARGIN_MODE", raising=False)
+    h = _MarginVenue(raises="binance {'code':-4046,'msg':'No need to change margin type.'}")
+    assert await h.v.ensure_margin_mode("SOL/USDT") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("err", [
+    "binance {'code':-4047,'msg':'Margin type cannot be changed if there exists open orders.'}",
+    "binance {'code':-4048,'msg':'Margin type cannot be changed if there exists position.'}",
+])
+async def test_a_mode_pinned_by_an_existing_position_does_not_abort_the_trade(err, monkeypatch):
+    """Adding to an existing position must not be blocked — the mode is already
+    established for it. Accepted, but NOT cached, so a later entry on a flat book
+    tries again rather than assuming this one succeeded."""
+    monkeypatch.delenv("MARGIN_MODE", raising=False)
+    h = _MarginVenue(raises=err)
+    assert await h.v.ensure_margin_mode("SOL/USDT") is True
+    assert "SOL/USDT" not in h.v._margin_mode_set
+
+
+@pytest.mark.asyncio
+async def test_any_other_refusal_aborts_the_entry(monkeypatch):
+    """Same rule `ensure_leverage` applies: opening a real position whose risk
+    containment could not be established is trading on a number we know we do
+    not have."""
+    monkeypatch.delenv("MARGIN_MODE", raising=False)
+    h = _MarginVenue(raises="binance {'code':-1022,'msg':'Signature for this request is not valid.'}")
+    assert await h.v.ensure_margin_mode("SOL/USDT") is False
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_mode_is_not_re_sent(monkeypatch):
+    """One HTTP round trip per symbol per process. Repeating it on every entry
+    spends the key's rate budget on a setting that has not changed — and that
+    budget is what places orders."""
+    monkeypatch.delenv("MARGIN_MODE", raising=False)
+    h = _MarginVenue()
+    await h.v.ensure_margin_mode("SOL/USDT")
+    await h.v.ensure_margin_mode("SOL/USDT")
+    assert len(h.calls) == 1
+
+
+def test_4046_is_no_longer_matched_as_a_leverage_code():
+    """-4046 is NO_NEED_TO_CHANGE_MARGIN_TYPE and can only be raised by the
+    margin-type endpoint, so matching it in `ensure_leverage` was dead and
+    misleading. Binance's set-leverage endpoint is idempotent and needs no no-op
+    case; Bybit's 110043 is the real one and stays."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("backend/services/venue.py").read_text(encoding="utf-8")
+    fn = next(
+        n for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "ensure_leverage"
+    )
+    literals = {
+        n.value for n in ast.walk(fn)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+    assert not any("-4046" in s for s in literals), (
+        "-4046 is a margin-type code; it belongs in ensure_margin_mode"
+    )
+    assert any("110043" in s for s in literals), "Bybit's leverage no-op must stay"

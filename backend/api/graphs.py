@@ -475,3 +475,22 @@ def _warm_registry() -> None:
             getattr(importlib.import_module(module), config_fn)()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not warm %s.%s: %s", module, config_fn, exc)
+
+
+@router.get("/order-stream")
+async def order_stream_status() -> Dict[str, Any]:
+    """What the venue has pushed about our orders, and whether we are listening.
+
+    THE FIELD THAT MATTERS IS `connected`. Reconciliation compares books once a
+    minute; this stream is what makes a resting stop firing at the venue visible
+    in milliseconds instead. When `connected` is false that fresher signal is
+    gone and the only thing watching venue order state is the once-a-minute poll
+    — which is the pre-existing behaviour, degraded rather than broken, and worth
+    surfacing rather than inferring from an empty list.
+
+    `recent` is a bounded diagnostic ring, newest first. It is NOT a record of
+    truth — `trades` is that — and nothing in the system reads back from it.
+    """
+    from backend.services.order_stream import get_order_stream
+
+    return get_order_stream().snapshot()

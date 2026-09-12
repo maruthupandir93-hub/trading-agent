@@ -725,3 +725,85 @@ def test_the_opportunity_nodes_cannot_reach_the_execution_plane():
         elif isinstance(node, ast.Import):
             imported.update(a.name.split(".")[-1] for a in node.names)
     assert not (imported & FORBIDDEN_IMPORTS)
+
+
+# ---------------------------------------------------------------------------
+# A strategy that is not signalling must never win selection
+# ---------------------------------------------------------------------------
+#
+# `_score_one` tested `mtf_trend is None` BEFORE `signal == "HOLD"`, so whenever
+# the higher-timeframe trend was unmeasurable a strategy that had declined to
+# trade collected the 0.5 "neutral" contribution meant for a real signal whose
+# alignment merely could not be checked:
+#
+#     0 x 0.4 (signal) + 0.5 x 0.25 (trend) + 1.0 x 0.15 (vol) + 0.5 x 0.2 (record)
+#       = 0.375   >=   MIN_SCORE_TO_SELECT (0.35)
+#
+# Measured against the real scorers on flat candles, SEVEN of the eleven
+# strategies — Scalping, Breakout, Range, Grid, Arbitrage, VWAP and
+# VolatilityBreakout — were selectable while signalling nothing at all. The score
+# was built entirely out of three "we could not measure this" midpoints.
+#
+# `detect_opportunity` then re-reads the same signal function, gets HOLD again,
+# and ends the run. Five of the last fifteen traced runs died exactly there, and
+# the trace reads as a setup evaluated and rejected on its merits when nothing
+# was ever on offer.
+
+
+def _flat_bars(n: int = 200) -> List[Dict[str, Any]]:
+    """Candles with no direction, on which every strategy returns HOLD."""
+    return [{"open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 10.0}
+            for _ in range(n)]
+
+
+def test_a_hold_signal_can_never_reach_the_selection_threshold():
+    """The regression that let a non-signalling strategy be selected.
+
+    Driven through the REAL strategy functions rather than a stub, because the
+    bug was an interaction between the live signal output and the scorer's branch
+    order — a fixture that returned "HOLD" from a fake would have reproduced it,
+    but a fixture kinder than the real scorers would not have caught it coming
+    back.
+    """
+    from backend.agents.strategy_ensemble import STRATEGY_FUNCTIONS
+    from backend.graphs.nodes.opportunity import _score_one
+
+    bars = _flat_bars()
+    holders = [name for name, fn in STRATEGY_FUNCTIONS.items() if fn(bars) == "HOLD"]
+    assert holders, "fixture is wrong: no strategy returned HOLD on flat candles"
+
+    for name in holders:
+        # `mtf_trend=None` is the branch that was mis-ordered. `volatility="LOW"`
+        # is the most generous volatility fit available, so this is the highest
+        # score a HOLD can possibly reach.
+        score, detail = _score_one(name, bars, None, "LOW", None)
+        assert score is not None
+        assert score < MIN_SCORE_TO_SELECT, (
+            f"{name} signals HOLD yet scores {score} against the "
+            f"{MIN_SCORE_TO_SELECT} selection bar ({detail}). A strategy with no "
+            f"opinion must not compete for selection."
+        )
+
+
+def test_an_unmeasurable_trend_still_costs_a_real_signal_nothing():
+    """The other half of the branch order, which must NOT have changed.
+
+    A real BUY/SELL whose higher-timeframe alignment cannot be measured still
+    gets the midpoint. Scoring a missing measurement as a failure would
+    systematically penalise every strategy whenever the 1h/4h fetch was thin,
+    which is the reason that branch exists.
+    """
+    from backend.agents.strategy_ensemble import STRATEGY_FUNCTIONS
+    from backend.graphs.nodes.opportunity import _score_one
+
+    bars = _flat_bars()
+    signalling = [name for name, fn in STRATEGY_FUNCTIONS.items() if fn(bars) in ("BUY", "SELL")]
+    if not signalling:
+        pytest.skip("no strategy signals on this fixture; nothing to assert here")
+
+    for name in signalling:
+        unknown, _ = _score_one(name, bars, None, "LOW", None)
+        assert unknown >= MIN_SCORE_TO_SELECT, (
+            f"{name} signals but scores {unknown} with an unmeasurable higher "
+            f"timeframe — a thin 4h fetch must not disqualify a real setup."
+        )

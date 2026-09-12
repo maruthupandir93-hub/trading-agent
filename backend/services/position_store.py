@@ -72,7 +72,48 @@ _FIELDS = (
     "strategy",
     "run_id",
     "entry_context",
+    # The fee paid to OPEN, so the close can net the whole round trip rather than
+    # only its own side. See `backend/services/fees.py`.
+    "entry_fee",
+    # The entry-to-stop distance AT ENTRY. The trailing stop measures progress in
+    # R, and the current `stop_loss` stops being a usable denominator as soon as
+    # anything moves it — the partial take-profit sets it to break-even, making
+    # `abs(entry - stop)` zero.
+    "initial_risk",
+    # The funding rate captured at entry, so a close can charge the settlements
+    # the position lived through without an HTTP call on the close path.
+    "funding_rate",
 )
+
+
+# THE SQL IS GENERATED FROM `_FIELDS`, NOT WRITTEN OUT BESIDE IT.
+#
+# `_FIELDS`' own comment has always claimed it keeps "the row dicts, the INSERT
+# and the SELECT" from drifting apart. It did not: the INSERT named its sixteen
+# columns literally and bound `*[row.get(f) for f in _FIELDS]` positionally, and
+# the SELECT listed them a third time. Adding a field to the tuple therefore
+# produced a silent mismatch — the values would shift by one against the columns,
+# writing each position's `strategy` into `run_id` and so on, or fail the
+# statement outright once the counts diverged.
+#
+# That is the same class of bug as `stop_order_id` being named where it was
+# consumed and never produced, which cost a real incident: the column existed,
+# the schema comment explained why it mattered, and every row was NULL.
+#
+# Deriving all three from one tuple makes the drift impossible rather than
+# merely tested-against. `updated_at` is appended separately because it is
+# generated here, not carried on the row.
+_UPDATABLE = tuple(f for f in _FIELDS if f != "tar_id")
+_ALL_COLUMNS = _FIELDS + ("updated_at",)
+_INSERT_SQL = "\n".join((
+    "INSERT INTO monitored_positions (" + ", ".join(_ALL_COLUMNS) + ")",
+    "VALUES (" + ", ".join(f"${i}" for i in range(1, len(_ALL_COLUMNS) + 1)) + ")",
+    "ON CONFLICT (tar_id) DO UPDATE SET",
+    ",\n".join(
+        f"  {f} = EXCLUDED.{f}" for f in _UPDATABLE + ("updated_at",)
+    ),
+))
+_SELECT_SQL = "SELECT " + ", ".join(_FIELDS) + " FROM monitored_positions"
 
 
 def _as_naive_utc(value: Any) -> Optional[datetime.datetime]:
@@ -147,32 +188,7 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
                 await conn.execute("DELETE FROM monitored_positions")
                 for row in rows:
                     await conn.execute(
-                        """
-                        INSERT INTO monitored_positions (
-                          tar_id, status, symbol, tab, side, qty,
-                          entry_price, stop_loss, take_profit, peak_price,
-                          opened_at, stop_order_id, tp_order_id, strategy, run_id,
-                          entry_context, updated_at
-                        )
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-                        ON CONFLICT (tar_id) DO UPDATE SET
-                          status      = EXCLUDED.status,
-                          symbol      = EXCLUDED.symbol,
-                          tab         = EXCLUDED.tab,
-                          side        = EXCLUDED.side,
-                          qty         = EXCLUDED.qty,
-                          entry_price = EXCLUDED.entry_price,
-                          stop_loss   = EXCLUDED.stop_loss,
-                          take_profit = EXCLUDED.take_profit,
-                          peak_price  = EXCLUDED.peak_price,
-                          opened_at   = EXCLUDED.opened_at,
-                          stop_order_id = EXCLUDED.stop_order_id,
-                          tp_order_id = EXCLUDED.tp_order_id,
-                          strategy    = EXCLUDED.strategy,
-                          run_id      = EXCLUDED.run_id,
-                          entry_context = EXCLUDED.entry_context,
-                          updated_at  = EXCLUDED.updated_at
-                        """,
+                        _INSERT_SQL,
                         *[row.get(f) for f in _FIELDS],
                         datetime.datetime.now(datetime.timezone.utc),
                     )
@@ -209,14 +225,7 @@ async def load_watch_list() -> List[Dict[str, Any]]:
 
     try:
         async with pool.acquire() as conn:
-            records = await conn.fetch(
-                """
-                SELECT tar_id, status, symbol, tab, side, qty, entry_price,
-                       stop_loss, take_profit, peak_price, opened_at, stop_order_id,
-                       tp_order_id, strategy, run_id, entry_context
-                FROM monitored_positions
-                """
-            )
+            records = await conn.fetch(_SELECT_SQL)
     except Exception as e:
         logger.error(
             "Failed to read the monitored-position watch list: %s. Treating it as EMPTY, "

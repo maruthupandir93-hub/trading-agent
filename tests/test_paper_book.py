@@ -35,7 +35,20 @@ from backend.services.portfolio_store import apply_paper_fill, book_equity, posi
 
 @pytest.fixture(autouse=True)
 def book(monkeypatch):
-    """A fresh in-memory book with no database behind it."""
+    """A fresh in-memory book with no database behind it, and NO trading fee.
+
+    THE FEE IS ZEROED HERE ON PURPOSE, and it is not a fixture being kinder than
+    the venue. Every test in this file asserts MARGIN AND DIRECTION mechanics —
+    that margin is locked and released proportionally, that a short profits when
+    price falls, that capital in one position is unavailable to another. A fee
+    shifts every one of those figures by a constant that has nothing to do with
+    the property under test, and folding it into each expected number would make
+    the arithmetic unreadable without testing anything more.
+
+    Fees are charged by this book and are covered explicitly at the bottom of
+    this file, and exhaustively in `tests/test_fees.py`.
+    """
+    monkeypatch.setenv("FEE_TAKER_RATE", "0")
     state = {"paper": {"cash": 10_000.0, "positions": []}, "real": {"positions": []}}
     monkeypatch.setattr(portfolio_store, "_portfolio", state)
 
@@ -314,3 +327,112 @@ async def test_leverage_is_what_decides_whether_it_fits(book):
     )
     assert at_10x["ok"] is True   # 50,000 notional, 5,000 margin
     assert book["cash"] == pytest.approx(5_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Fees — charged where they are actually paid
+# ---------------------------------------------------------------------------
+#
+# The book deducted margin and never the commission, so a book that had traded a
+# hundred times looked identical to one that had never traded. Margin is LOCKED
+# and comes back on the close; a fee is SPENT and does not.
+#
+# These opt back IN to the fee the fixture above zeroes.
+
+
+@pytest.mark.asyncio
+async def test_an_entry_charges_its_fee_to_cash(book, monkeypatch):
+    monkeypatch.setenv("FEE_TAKER_RATE", "0.0005")
+    result = await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="buy", qty=10.0, price=100.0, leverage=5,
+    )
+    assert result["ok"] is True
+    # 1,000 notional at 5x = 200 margin, plus 1,000 * 0.05% = 0.50 fee.
+    assert result["fee"] == pytest.approx(0.5)
+    assert book["cash"] == pytest.approx(10_000.0 - 200.0 - 0.5)
+
+
+@pytest.mark.asyncio
+async def test_a_round_trip_at_the_same_price_LOSES_the_fees(book, monkeypatch):
+    """The headline consequence, and the one the system was blind to.
+
+    Flat price used to return cash exactly to its starting figure. In reality a
+    round trip that goes nowhere costs both legs' commission — which is why a
+    strategy with a thin positive gross edge can be a reliable net loser.
+    """
+    monkeypatch.setenv("FEE_TAKER_RATE", "0.0005")
+    start = book["cash"]
+    await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="buy", qty=10.0, price=100.0, leverage=5,
+    )
+    result = await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="sell", qty=10.0, price=100.0, leverage=5,
+        reduce_only=True,
+    )
+    assert result["grossRealized"] == pytest.approx(0.0)
+    assert result["realized"] == pytest.approx(-0.5)      # the exit leg
+    assert book["cash"] == pytest.approx(start - 1.0)     # both legs
+    assert book["cash"] < start
+
+
+@pytest.mark.asyncio
+async def test_the_entry_fee_is_not_charged_twice(book, monkeypatch):
+    """Each leg is accounted where it is PAID, so the close nets only its own.
+
+    `position_monitor` reports a round trip's P&L net of both legs because a
+    trade ROW must state the whole trip. This book instead moves cash at each
+    event. Conflating the two would double-charge the entry.
+    """
+    monkeypatch.setenv("FEE_TAKER_RATE", "0.0005")
+    await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="buy", qty=10.0, price=100.0, leverage=5,
+    )
+    result = await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="sell", qty=10.0, price=110.0, leverage=5,
+        reduce_only=True,
+    )
+    # Gross +100; the close subtracts ONLY its own leg (1,100 * 0.05% = 0.55).
+    assert result["grossRealized"] == pytest.approx(100.0)
+    assert result["realized"] == pytest.approx(100.0 - 0.55)
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_is_affordable_only_before_fees_is_REFUSED(book, monkeypatch):
+    """Cash must never go negative, and the fee is part of what an entry costs.
+
+    Checking `margin > free_cash` and then subtracting `margin + fee` lets a
+    position sized to exactly the available cash pass the check and push the
+    balance negative. That is not cosmetic: `book_equity` is free cash + locked
+    margin + unrealized, so a negative first term understates equity, which
+    understates the next position's size, and every later risk calculation is
+    wrong in a compounding way.
+
+    Reachable rather than theoretical under broker-style sizing: at 100% capital
+    allocation the Risk Gateway deliberately sizes to the whole pool, so
+    "exactly affordable before fees" is the normal case at the top of the range.
+    """
+    monkeypatch.setenv("FEE_TAKER_RATE", "0.0005")
+    book["cash"] = 200.0
+
+    # 1,000 notional at 5x = exactly 200.00 margin, plus a 0.50 fee.
+    result = await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="buy", qty=10.0, price=100.0, leverage=5,
+    )
+    assert result["ok"] is False
+    assert result["fee"] == pytest.approx(0.5)
+    assert book["cash"] == pytest.approx(200.0), "a refused entry must not move cash"
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_clears_margin_AND_fee_is_accepted(book, monkeypatch):
+    """The other side of the bound — the check must not be so strict it refuses a
+    position the account can actually afford."""
+    monkeypatch.setenv("FEE_TAKER_RATE", "0.0005")
+    book["cash"] = 200.5
+
+    result = await portfolio_store.apply_paper_fill(
+        symbol="SOL/USDT", side="buy", qty=10.0, price=100.0, leverage=5,
+    )
+    assert result["ok"] is True
+    assert book["cash"] == pytest.approx(0.0)
+    assert book["cash"] >= 0.0

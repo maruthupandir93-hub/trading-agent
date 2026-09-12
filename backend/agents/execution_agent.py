@@ -12,6 +12,7 @@ from backend.core.db import get_db_pool
 from backend.core.system_state import may_open_new_position
 from backend.models.events import EventType, BaseEvent, TarApprovedEvent, OrderRoutedEvent, OrderFilledEvent
 from backend.services.exchange_client import get_exchange_client
+from backend.services.fees import modelled_fee, resolve_fee
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,13 @@ class ExecutionAgent(BaseAgent):
                 return
             # A simulated order fills completely by definition.
             filled_qty = tar.approved_size
-            fee = (fill_price * tar.approved_size) * 0.0004  # 4 bps, simulated
+            # Modelled at the configured TAKER rate, via the one module that owns
+            # fee arithmetic. This used to be a bare `* 0.0004` — a second, lower
+            # fee rate hardcoded here and nowhere else, so the paper book and the
+            # backtest disagreed about what a trade costs while both reported the
+            # result as P&L. `services/fees` is now the only place the number
+            # lives, and `measured=False` records that no venue confirmed it.
+            fee_result = modelled_fee(fill_price * tar.approved_size)
         else:
             from backend.services.venue import get_venue
 
@@ -304,6 +311,28 @@ class ExecutionAgent(BaseAgent):
                     "was sized for that leverage, so filling it at the venue's current setting "
                     "would stake a different amount of margin than the Risk Gateway approved.",
                     tar.tar_id, venue.id, tar.approved_leverage, tar.symbol,
+                )
+                return
+
+            # MARGIN MODE, BEFORE LEVERAGE IS COMMITTED TO AND BEFORE THE ORDER.
+            #
+            # Nothing used to set this, so the venue used whatever its UI was last
+            # left on. Under CROSS margin the entire account balance backs every
+            # position — one liquidation can reach funds that were never allocated
+            # to that trade, which at the 10x ceiling is the difference between
+            # losing a position's margin and losing the account.
+            #
+            # Aborts on an unexplained refusal for the same reason leverage does:
+            # opening a real position whose risk containment could not be
+            # established is trading on a number we know we do not have. The two
+            # cases that are NOT failures — already correct, or pinned by an
+            # existing position — are handled inside `ensure_margin_mode`.
+            if not await venue.ensure_margin_mode(tar.symbol):
+                logger.error(
+                    "TAR %s NOT executed: %s would not confirm the margin mode on %s. The "
+                    "position's maximum loss would not be bounded by the margin the Risk "
+                    "Gateway allocated to it.",
+                    tar.tar_id, venue.id, tar.symbol,
                 )
                 return
 
@@ -356,8 +385,6 @@ class ExecutionAgent(BaseAgent):
                 )
                 return
             fill_price = float(raw_fill)
-            fee_info = order.get("fee", {})
-            fee = fee_info.get("cost", 0.0) if fee_info else 0.0
 
             # The ACTUAL filled amount from the exchange. ccxt reports it as
             # `filled`; fall back to `amount` only if absent, and treat a
@@ -385,6 +412,20 @@ class ExecutionAgent(BaseAgent):
                     tar.tar_id, filled_qty, tar.approved_size,
                     filled_qty / tar.approved_size * 100,
                 )
+
+            # The venue's own commission when it reported one, the modelled taker
+            # rate when it did not. Resolved AFTER `filled_qty` is known so a
+            # partial fill is costed on what actually filled, not on what was
+            # requested — a fee modelled on the requested size would overstate the
+            # cost of every partial fill.
+            #
+            # Never fetched with a second HTTP call when absent: that would sit
+            # between the fill and the position reaching the stop-loss watch list.
+            # An unwatched position is a safety problem; an unmeasured fee is an
+            # accounting one. See `services/fees`.
+            fee_result = resolve_fee(order, qty=filled_qty, price=fill_price)
+
+        fee = fee_result.cost
 
         latency_ms = (time.monotonic() - started_at) * 1000.0
 
@@ -454,6 +495,12 @@ class ExecutionAgent(BaseAgent):
             getattr(tar, "run_id", None),
             getattr(tar, "strategy", None),
             getattr(tar, "entry_context", None),
+            # The opening leg's own cost. The close records its own, and
+            # `position_monitor` nets BOTH into the realized figure — so this row
+            # carries the fee without carrying a pnl, which is what keeps the
+            # "a row with a pnl is a realized close" rule intact.
+            fee_result.cost,
+            fee_result.measured,
         )
         await self._persist_execution_quality(str(tar.tar_id), order_id, tar.symbol, exchange_name, quality)
 
@@ -799,6 +846,8 @@ class ExecutionAgent(BaseAgent):
         run_id: Optional[str] = None,
         strategy: Optional[str] = None,
         entry_context: Optional[str] = None,
+        fee: Optional[float] = None,
+        fee_measured: Optional[bool] = None,
     ):
         pool = get_db_pool()
         if not pool:
@@ -818,8 +867,9 @@ class ExecutionAgent(BaseAgent):
                     """
                     INSERT INTO trades
                         (id, ts, tab, symbol, side, qty, price, origin_tag,
-                         exchange_order_id, run_id, strategy, entry_context)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                         exchange_order_id, run_id, strategy, entry_context,
+                         fee, fee_measured)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     """,
                     # `tab` comes from the TAR instead of the hardcoded 'real'
                     # this used to pass. Simulated fills were being written
@@ -837,6 +887,12 @@ class ExecutionAgent(BaseAgent):
                     # What the agent saw. The trade row could otherwise only ever
                     # record WHAT happened, never WHY.
                     entry_context,
+                    # THE COST OF THIS FILL, and whether the venue confirmed it.
+                    # Every P&L figure in this system was gross before these two
+                    # columns — see `services/fees`. `fee_measured` is kept beside
+                    # the cost so a modelled paper fee can never be mistaken for a
+                    # commission the exchange actually charged.
+                    fee, fee_measured,
                 )
         except Exception as e:
             logger.error(f"Failed to persist trade {trade_id}: {e}")

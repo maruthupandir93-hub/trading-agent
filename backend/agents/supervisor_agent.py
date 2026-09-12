@@ -37,6 +37,7 @@ decision).
 """
 
 import datetime
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -78,6 +79,39 @@ MIN_KLINES_FOR_ATR = 15
 # market conditions half an hour ago is not evidence about now, and silently
 # acting on a stale one is how a system ends up trading yesterday's thesis.
 DEBATE_STALENESS_SECONDS = 600
+
+
+def _debate_confidence(debate: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The debate's confidence as a PERCENT, or None when there was no debate.
+
+    `decisions.debate_confidence_pct` is a percent column and `score_debate`
+    emits a 0-1 fraction, so the conversion belongs here, at the storage
+    boundary — the same rule `position_store._as_naive_utc` follows for
+    timestamps. Writing 0.38 into a column every reader scales as a percentage
+    would report 0.38% where 38% was meant, and a number that is wrong by 100x
+    but still plausible is worse than a missing one.
+
+    None rather than 0.0 when absent, because "no debate had run" and "the
+    debate found nothing" are different facts and only one of them is evidence
+    about the market (invariant 6).
+    """
+    if not debate:
+        return None
+    value = debate.get("confidence")
+    if value is None:
+        return None
+    try:
+        return round(float(value) * 100.0, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _debate_direction(debate: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The debate's verdict ('LONG' / 'SHORT' / 'NEUTRAL'), or None if it never ran."""
+    if not debate:
+        return None
+    value = debate.get("direction") or debate.get("winning_dir")
+    return str(value) if value else None
 
 
 class SupervisorAgent(BaseAgent):
@@ -254,8 +288,17 @@ class SupervisorAgent(BaseAgent):
         except Exception as e:
             logger.error("Failed to update decision %s: %s", decision_id, e)
 
-    async def _refuse(self, symbol: str, cause: str) -> None:
+    async def _refuse(
+        self, symbol: str, cause: str, debate: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Record and log a decision NOT to trade.
+
+        `debate` is OPTIONAL because the refusal paths genuinely differ: a system
+        that is paused, or a symbol with no live price, is refused before any
+        debate has been scored, and there is no confidence to report. Passing it
+        where it exists is what lets a later reader compare the confidence that
+        was reached against the bar it had to clear — the exact comparison that
+        exposed `dynamic_thresholding`'s unreachable scale.
 
         Refusals are persisted alongside approvals. A decision log that only
         contains the trades that happened cannot answer "why didn't it act
@@ -290,6 +333,18 @@ class SupervisorAgent(BaseAgent):
             price=0.0,
             outcome="rejected",
             rationale=f"No TAR submitted: {cause}",
+            # THE CAUSE IS THE STRUCTURED REASON. Recorded in both columns on
+            # purpose rather than picking one: `rationale` is the human sentence
+            # an operator reads on the Decisions page, `rejection_reasons` is the
+            # machine-readable list everything else groups by. Writing only the
+            # first is what made 3,063 consecutive refusals un-analysable.
+            #
+            # Filled here, in the one method every refusal path goes through,
+            # rather than at the 16 call sites — a reason that has to be passed
+            # twice is a reason that will eventually be passed once.
+            rejection_reasons=[cause],
+            debate_confidence_pct=_debate_confidence(debate),
+            debate_recommendation=_debate_direction(debate),
         )
 
     async def _consider_trade(self, event: StressTestedEvent) -> None:
@@ -312,6 +367,7 @@ class SupervisorAgent(BaseAgent):
                 symbol,
                 "no debate conclusion available for this symbol, so trade direction is unknown "
                 "(previously this defaulted to LONG)",
+                debate,
             )
             return
 
@@ -321,12 +377,13 @@ class SupervisorAgent(BaseAgent):
                 symbol,
                 f"the only debate conclusion for this symbol is {age:.0f}s old "
                 f"(limit {DEBATE_STALENESS_SECONDS}s)",
+                debate,
             )
             return
 
         direction = debate["direction"]
         if direction not in ("LONG", "SHORT"):
-            await self._refuse(symbol, f"debate concluded {direction} — no directional trade to make")
+            await self._refuse(symbol, f"debate concluded {direction} — no directional trade to make", debate)
             return
             
         side = "buy" if direction == "LONG" else "sell"
@@ -334,7 +391,7 @@ class SupervisorAgent(BaseAgent):
         # --- price: real, or nothing ------------------------------------
         price = get_price(symbol)
         if price <= 0:
-            await self._refuse(symbol, "no live price available (market data feed returned 0)")
+            await self._refuse(symbol, "no live price available (market data feed returned 0)", debate)
             return
 
         # --- stop: computed from real volatility, or nothing ------------
@@ -344,6 +401,7 @@ class SupervisorAgent(BaseAgent):
                 symbol,
                 f"only {len(klines)} candle(s) available, need {MIN_KLINES_FOR_ATR} to compute ATR "
                 f"and therefore a stop-loss",
+                debate,
             )
             return
             
@@ -355,14 +413,14 @@ class SupervisorAgent(BaseAgent):
         required_confidence = get_required_confidence(regime)
         
         if debate.get("confidence", 0) < required_confidence:
-            await self._refuse(symbol, f"Confidence {debate.get('confidence', 0):.2f} does not meet the threshold {required_confidence:.2f} required for regime '{regime}'")
+            await self._refuse(symbol, f"Confidence {debate.get('confidence', 0):.2f} does not meet the threshold {required_confidence:.2f} required for regime '{regime}'", debate)
             return
             
         # --- PHASE 37: Bayesian Expected Value Evaluation ------------------
         from backend.algorithms.bayesian_engine import calculate_trade_probabilities
         bayesian_probs = calculate_trade_probabilities(debate)
         if bayesian_probs["expected_value"] <= 0:
-            await self._refuse(symbol, f"Bayesian evaluation rejected trade: Expected Value is {bayesian_probs['expected_value']:.3f} (P(Profit)={bayesian_probs['p_profit']:.2f})")
+            await self._refuse(symbol, f"Bayesian evaluation rejected trade: Expected Value is {bayesian_probs['expected_value']:.3f} (P(Profit)={bayesian_probs['p_profit']:.2f})", debate)
             return
         # Record the probabilities into the debate dict so it can be logged downstream
         debate["bayesian_probs"] = bayesian_probs
@@ -370,7 +428,7 @@ class SupervisorAgent(BaseAgent):
         atr = calculate_atr(klines)
         sltp = compute_stop_loss_take_profit(price, atr, side)
         if sltp is None:
-            await self._refuse(symbol, f"ATR computed as {atr}, so no stop-loss could be derived")
+            await self._refuse(symbol, f"ATR computed as {atr}, so no stop-loss could be derived", debate)
             return
 
         # --- size: from the stop distance and real equity ---------------
@@ -382,6 +440,7 @@ class SupervisorAgent(BaseAgent):
                 symbol,
                 f"equity for the '{tab}' tab is unknown, so a risk-based position size "
                 f"cannot be computed",
+                debate,
             )
             return
 
@@ -395,7 +454,7 @@ class SupervisorAgent(BaseAgent):
         final_risk_fraction = calculate_dynamic_risk(base_risk, regime_multiplier, ev)
 
         if final_risk_fraction <= 0:
-            await self._refuse(symbol, f"dynamic sizing returned zero risk for EV {ev:.3f} in regime {regime}")
+            await self._refuse(symbol, f"dynamic sizing returned zero risk for EV {ev:.3f} in regime {regime}", debate)
             return
 
         size = calculate_position_size(equity, price, atr, final_risk_fraction)
@@ -404,6 +463,7 @@ class SupervisorAgent(BaseAgent):
                 symbol,
                 f"risk-based sizing returned {size} for equity ${equity:.2f} at ATR {atr:.6g} "
                 f"— the smallest position consistent with the risk budget rounds to zero",
+                debate,
             )
             return
 
@@ -417,7 +477,7 @@ class SupervisorAgent(BaseAgent):
             symbol=symbol, side=side, proposed_notional=size * price, equity=equity
         )
         if not exposure["allowed"]:
-            await self._refuse(symbol, f"CIO exposure limit: {exposure['detail']}")
+            await self._refuse(symbol, f"CIO exposure limit: {exposure['detail']}", debate)
             return
         if exposure["max_notional"] < size * price:
             # Size down to the permitted notional rather than declining.
@@ -428,7 +488,7 @@ class SupervisorAgent(BaseAgent):
             )
             size = reduced
             if size <= 0:
-                await self._refuse(symbol, f"CIO exposure limit leaves no room: {exposure['detail']}")
+                await self._refuse(symbol, f"CIO exposure limit leaves no room: {exposure['detail']}", debate)
                 return
 
         # This path requests no leverage. Clamped to the ceiling regardless,
@@ -451,7 +511,7 @@ class SupervisorAgent(BaseAgent):
             }
         )
         if not validation.approved:
-            await self._refuse(symbol, "pre-submission risk checks failed: " + "; ".join(validation.rejection_reasons))
+            await self._refuse(symbol, "pre-submission risk checks failed: " + "; ".join(validation.rejection_reasons), debate)
             return
 
         rationale = (
@@ -551,7 +611,37 @@ class SupervisorAgent(BaseAgent):
         price: float,
         outcome: str,
         rationale: str,
+        rejection_reasons: Optional[List[str]] = None,
+        debate_confidence_pct: Optional[float] = None,
+        debate_recommendation: Optional[str] = None,
     ) -> None:
+        """Write one row to the decision audit trail.
+
+        `rejection_reasons` USED TO BE OMITTED FROM THIS INSERT ENTIRELY, and the
+        column is `jsonb NOT NULL DEFAULT '[]'` — so every row took the default
+        and the structured reason was empty on 100% of them. Read from the live
+        table:
+
+            decisions with EMPTY rejection_reasons: 3063 of 3063
+
+        The cause survived only inside the free-text `rationale`, so the Decisions
+        page and every analytic over "why is this agent not trading?" saw nothing
+        at all. Diagnosing the unreachable-threshold bug above required regex over
+        prose because of this; the column exists precisely so that is not
+        necessary.
+
+        `debate_confidence_pct` and `debate_recommendation` were dropped the same
+        way. They are what makes a rejection ANALYSABLE rather than merely logged
+        — the confidence-versus-threshold gap is the number that showed the gate
+        was impossible, and it was reconstructible only by parsing a sentence.
+
+        A NULL confidence and an ABSENT one are not distinguished here, and do not
+        need to be: the column is nullable and every refusal that has a debate
+        passes it. A refusal raised BEFORE the debate exists (paused system, no
+        price) genuinely has no confidence to report, and NULL is the honest value
+        rather than 0.0 — which would read as "the debate was certain of nothing"
+        instead of "no debate had happened yet".
+        """
         pool = get_db_pool()
         if not pool:
             return
@@ -559,8 +649,9 @@ class SupervisorAgent(BaseAgent):
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO decisions (id, ts, symbol, side, tab, origin_tag, requested_qty, requested_price, outcome, urgency, rationale)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    INSERT INTO decisions (id, ts, symbol, side, tab, origin_tag, requested_qty, requested_price, outcome, urgency, rationale,
+                                           rejection_reasons, debate_confidence_pct, debate_recommendation)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     """,
                     decision_id,
                     datetime.datetime.utcnow(),
@@ -576,6 +667,13 @@ class SupervisorAgent(BaseAgent):
                     outcome,
                     "normal",
                     rationale,
+                    # json.dumps, not the list: asyncpg binds jsonb from a JSON
+                    # string. Passing the list raises
+                    # "invalid input for query argument" and the except below
+                    # would swallow it into the same silence this fix is undoing.
+                    json.dumps(list(rejection_reasons or [])),
+                    debate_confidence_pct,
+                    debate_recommendation,
                 )
         except Exception as e:
             logger.error(f"Failed to persist decision: {e}")

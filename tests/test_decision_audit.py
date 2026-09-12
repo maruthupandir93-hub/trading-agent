@@ -164,3 +164,89 @@ def test_other_constrained_columns_are_parseable(table, column, sample):
     empty set, every assertion above would pass vacuously."""
     allowed = _check_constraint_values(column, table)
     assert sample in allowed, (allowed, sample)
+
+
+# ---------------------------------------------------------------------------
+# The audit trail must carry the STRUCTURED reason, not only the prose one
+# ---------------------------------------------------------------------------
+#
+# `_persist_decision` named 11 columns and `rejection_reasons` was not among
+# them. That column is `jsonb NOT NULL DEFAULT '[]'`, so every row silently took
+# the default. Read from the live table:
+#
+#     decisions with EMPTY rejection_reasons: 3063 of 3063
+#
+# This is the same class of bug as the outcome CHECK above — the schema and the
+# writer disagreed and nothing failed — but with the opposite symptom. The
+# outcome mismatch REJECTED the insert loudly into a swallowed log; this one
+# accepted it and wrote a well-formed, useless row. Diagnosing why the agent had
+# stopped trading meant regexing prose out of `rationale`, which is exactly the
+# work `rejection_reasons` exists to make unnecessary.
+
+SUPERVISOR = pathlib.Path("backend/agents/supervisor_agent.py")
+
+
+def _persist_decision_insert_columns() -> set[str]:
+    """The columns `_persist_decision`'s INSERT actually names.
+
+    Read from the SQL string in the source rather than by calling the function,
+    because the failure being guarded is a column the writer never mentions —
+    a mocked DB accepts every shape and so proves nothing about this.
+    """
+    tree = ast.parse(SUPERVISOR.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_persist_decision":
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "INSERT INTO decisions" in sub.value:
+                inside = sub.value.split("(", 1)[1].split(")", 1)[0]
+                return {c.strip() for c in inside.split(",") if c.strip()}
+    raise AssertionError("could not find the INSERT INTO decisions statement")
+
+
+def test_the_decision_insert_records_the_structured_rejection_reasons():
+    """A refusal whose reason survives only as prose is not an audit trail."""
+    columns = _persist_decision_insert_columns()
+    assert "rejection_reasons" in columns, (
+        "decisions.rejection_reasons is NOT NULL DEFAULT '[]', so omitting it from "
+        "the INSERT writes an empty list on every row rather than failing. 3,063 "
+        f"consecutive refusals were stored that way. Columns named: {sorted(columns)}"
+    )
+
+
+def test_the_decision_insert_records_the_debate_numbers():
+    """Confidence and direction are what make a refusal analysable.
+
+    The confidence-versus-threshold gap is the number that exposed
+    `dynamic_thresholding`'s unreachable scale, and it was reconstructible only
+    by parsing a sentence. See `tests/test_dynamic_thresholding.py`.
+    """
+    columns = _persist_decision_insert_columns()
+    for column in ("debate_confidence_pct", "debate_recommendation"):
+        assert column in columns, f"{column} is never written; refusals stay unanalysable"
+
+
+def test_every_refusal_passes_a_structured_reason():
+    """`_refuse` is the single path every refusal takes, so the reason is filled there.
+
+    Asserted against the source rather than by calling it: the property is "the
+    one funnel every refusal goes through supplies this", and a test that drove
+    one call site would pass while the other fifteen regressed.
+    """
+    tree = ast.parse(SUPERVISOR.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_refuse":
+            passed = {
+                kw.arg
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Call)
+                for kw in sub.keywords
+                if kw.arg
+            }
+            assert "rejection_reasons" in passed, (
+                "_refuse must hand the cause to _persist_decision as the structured "
+                "reason. A reason that has to be passed twice is a reason that will "
+                "eventually be passed once."
+            )
+            return
+    raise AssertionError("_refuse not found in supervisor_agent.py")

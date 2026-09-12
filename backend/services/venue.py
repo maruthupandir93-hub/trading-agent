@@ -93,6 +93,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -101,6 +102,12 @@ import ccxt.async_support as ccxt
 logger = logging.getLogger(__name__)
 
 SUPPORTED = ("binance", "bybit")
+
+# How long a funding rate is reused before re-reading it. The rate is republished
+# once per settlement (every 8h) and drifts slowly in between, so a minute is far
+# inside the resolution that matters — it exists to stop a burst of fills on one
+# symbol becoming a burst of identical public requests.
+_FUNDING_TTL_S = 60.0
 
 
 def configured_venue() -> str:
@@ -258,6 +265,14 @@ class Venue:
         # Symbols whose leverage this process has already set. Re-sending it on
         # every order is a wasted private call, and on Bybit an outright error.
         self._leverage_set: Dict[str, int] = {}
+        # symbol -> the margin mode this client has CONFIRMED with the venue.
+        # Cached for the same reason leverage is: the call is one HTTP round trip
+        # per symbol per process, and repeating it on every entry spends the
+        # key's rate budget on a setting that has not changed. A refusal is
+        # deliberately NOT cached — see `ensure_margin_mode`.
+        self._margin_mode_set: Dict[str, str] = {}
+        # symbol -> (monotonic timestamp, rate). See `funding_rate`.
+        self._funding_cache: Dict[str, tuple] = {}
         # caller's symbol -> this venue's perpetual market key. "" is a cached
         # NEGATIVE result: the market list does not change while we run, so a
         # symbol that has no perpetual today will not grow one.
@@ -565,7 +580,18 @@ class Venue:
             # "leverage not modified" is Bybit (110043) and Binance (-4046) saying
             # the value is ALREADY what we asked for. That is the desired state,
             # so treating it as a failure would abort a correctly-configured trade.
-            if "not modified" in message.lower() or "110043" in message or "-4046" in message:
+            # "leverage not modified" is Bybit's 110043 saying the value is
+            # ALREADY what we asked for, which is the desired state — treating it
+            # as a failure would abort a correctly-configured trade.
+            #
+            # `-4046` USED TO BE LISTED HERE AND IT DOES NOT BELONG. Binance's
+            # -4046 is NO_NEED_TO_CHANGE_MARGIN_TYPE ("No need to change margin
+            # type."), not a leverage code at all — it can only ever be raised by
+            # the margin-type endpoint, so matching it here was dead and
+            # misleading. Binance's set-leverage endpoint is idempotent and
+            # returns 200 when the value is unchanged, so it needs no no-op case.
+            # It now lives in `ensure_margin_mode`, where it is actually raised.
+            if "not modified" in message.lower() or "110043" in message:
                 self._leverage_set[symbol] = leverage
                 return True
             logger.error(
@@ -574,6 +600,152 @@ class Venue:
                 self.id, leverage, symbol, message,
             )
             return False
+
+    async def ensure_margin_mode(self, symbol: str, mode: Optional[str] = None) -> bool:
+        """Set isolated/cross margin before the entry. Mirrors `ensure_leverage`.
+
+        WHY THIS MATTERS MORE SINCE THE LEVERAGE CEILING WENT TO 10x
+        -----------------------------------------------------------
+        Nothing in this system ever set the margin mode, so the venue used
+        whatever its UI was last left on. Under CROSS margin the whole account
+        balance backs every position, so one bad trade can be liquidated against
+        funds that were never allocated to it — at 10x that is the difference
+        between losing a position's margin and losing the account.
+
+        ISOLATED by default, because it makes the maximum loss on a position equal
+        to the margin the Risk Gateway actually allocated to it. That is the same
+        principle as the mandatory stop: bound the downside of one decision.
+        `MARGIN_MODE=cross` is honoured for an operator who wants the capital
+        efficiency and accepts that the bound is gone — it is their account.
+
+        THE THREE VENUE RESPONSES THAT ARE NOT FAILURES
+        -----------------------------------------------
+        One is a no-op and two are refusals, and all three mean the mode is
+        ALREADY FIXED for this symbol rather than that anything is wrong:
+
+            -4046  "No need to change margin type."              already correct
+            -4047  "Margin type cannot be changed if there
+                    exists open orders."                         already committed
+            -4048  "Margin type cannot be changed if there
+                    exists position."                            already committed
+
+        -4047 and -4048 are accepted WITH A WARNING rather than silently: the mode
+        in force is then whatever the existing position was opened under, which
+        may not be the configured one, and the operator should know that the bound
+        they think they have may not be the bound they have.
+
+        Any OTHER error returns False and the caller aborts the entry — the same
+        rule `ensure_leverage` applies, for the same reason: opening a real
+        position whose risk containment we could not establish is trading on a
+        number we know we do not have.
+        """
+        if not self.has_credentials():
+            return False
+
+        wanted = (mode or os.getenv("MARGIN_MODE") or "isolated").strip().lower()
+        if wanted not in ("isolated", "cross"):
+            logger.warning(
+                "MARGIN_MODE=%r is not 'isolated' or 'cross'; using isolated.", wanted
+            )
+            wanted = "isolated"
+
+        if self._margin_mode_set.get(symbol) == wanted:
+            return True
+
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            logger.error("%s: %s has no linear perpetual market", self.id, symbol)
+            return False
+
+        try:
+            params = {"category": "linear"} if self.id == "bybit" else {}
+            await self.private.set_margin_mode(wanted, resolved, params)
+            self._margin_mode_set[symbol] = wanted
+            return True
+        except Exception as exc:
+            message = str(exc)
+            lowered = message.lower()
+
+            # Already in the requested mode. The desired state, not a failure.
+            if "-4046" in message or "no need to change margin" in lowered or "110026" in message:
+                self._margin_mode_set[symbol] = wanted
+                return True
+
+            # Cannot be changed now because something is already open under it.
+            # Accepted so an ADD to an existing position is not blocked, but said
+            # out loud because the mode in force may not be the configured one.
+            if (
+                "-4047" in message
+                or "-4048" in message
+                or "exists position" in lowered
+                or "exists open orders" in lowered
+            ):
+                logger.warning(
+                    "%s: margin mode for %s is pinned by an existing position or order and "
+                    "could NOT be set to %s (%s). The position will use whatever mode it was "
+                    "opened under — if that is cross, its loss is not bounded by its own margin.",
+                    self.id, symbol, wanted, message,
+                )
+                # NOT cached: the mode was not established, so a later entry on a
+                # flat book must try again rather than assume this one succeeded.
+                return True
+
+            logger.error(
+                "%s: could not set %s margin on %s (%s). NOT opening a position whose risk "
+                "containment could not be established.",
+                self.id, wanted, symbol, message,
+            )
+            return False
+
+    async def funding_rate(self, symbol: str) -> Optional[float]:
+        """The current per-settlement funding rate, or None if it cannot be read.
+
+        READ ON THE PUBLIC CLIENT. Funding is public market data and needs no
+        credentials, so spending the authenticated key's rate budget on it would
+        throttle the requests that place orders — the same split `public`/`private`
+        reasoning the rest of this class follows.
+
+        Cached briefly because the rate only moves meaningfully between
+        settlements, while this is called on every fill: several entries on one
+        symbol in a minute must not become several identical HTTP requests.
+
+        None, never 0.0, when unreadable. A zero rate is a real market state
+        (the perpetual trading at spot) and `services/funding` treats it as one —
+        collapsing "could not ask" into it would silently report every position
+        as owing no funding, which is the bug this whole module exists to end.
+        """
+        now = time.monotonic()
+        cached = self._funding_cache.get(symbol)
+        if cached is not None and (now - cached[0]) < _FUNDING_TTL_S:
+            return cached[1]
+
+        resolved = await self.resolve_symbol(symbol)
+        if resolved is None:
+            return None
+        try:
+            info = await self.public.fetch_funding_rate(resolved)
+        except Exception as exc:
+            # WARNING, not error, and None is returned: funding is an accounting
+            # input, not a trading gate. A failure here must never stop a fill
+            # being recorded — it just means the cost is estimated from the
+            # venue baseline instead of the live rate, and `FundingEstimate`
+            # says so in its own detail string.
+            logger.warning(
+                "%s: could not read the funding rate for %s (%s). Funding on this "
+                "position will be estimated from the venue baseline.",
+                self.id, symbol, exc,
+            )
+            return None
+
+        rate = info.get("fundingRate") if isinstance(info, dict) else None
+        if rate is None:
+            return None
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            return None
+        self._funding_cache[symbol] = (now, value)
+        return value
 
     # -- orders ----------------------------------------------------------
 
