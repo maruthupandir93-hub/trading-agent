@@ -60,16 +60,182 @@ INTERVAL_S = 3600.0
 # Outcomes that mean a trade actually happened. These are never pruned.
 EXECUTED_OUTCOMES = ("approved-executed", "manually-approved")
 
+# ---------------------------------------------------------------------------
+# THE GRAPH CHECKPOINT STORE — the one thing here that filled a disk
+# ---------------------------------------------------------------------------
+#
+# `.data/graph_checkpoints.sqlite` reached 43 MB on a development machine and
+# 100% of the disk on the production server. Nothing pruned it, and nothing
+# could: the pruning above operates on Postgres, and this is a SQLite file
+# LangGraph owns.
+#
+# WHY IT GROWS SO FAST. The monitoring graph checkpoints, and it runs ONCE PER
+# TICK PER OPEN POSITION. Each checkpoint serialises the whole graph state —
+# which includes the candle arrays (120 bars x 3 timeframes, plus the benchmark's)
+# and the order book. Measured locally: 619 checkpoints + 3,562 writes = 43.3 MB,
+# roughly 10 KB per row. A position held for an hour at a 2-second tick writes
+# hundreds of them, and the rows for a position CLOSED LAST WEEK are still there.
+#
+# WHY NOT JUST MOVE IT TO POSTGRES. That was the obvious idea and it is worse:
+# the Supabase free tier is 500 MB, so relocating an unbounded store moves the
+# outage from the disk to the database, where it also takes the trade history
+# down with it. The store needs a BOUND, and it needs one wherever it lives.
+#
+# TWO BOUNDS, AND BOTH ARE NEEDED:
+#
+#   PER THREAD   LangGraph resumes from the LATEST checkpoint of a thread. Older
+#                ones are history, not function. Keeping a handful preserves the
+#                ability to inspect how the reasoning moved without keeping every
+#                tick of it.
+#
+#   BY AGE       A thread is keyed on a position. Once that position closes the
+#                thread is never resumed again, so its rows are pure residue —
+#                and residue is most of the file. Age is the right bound because
+#                this store has no view of which positions are still open (it is
+#                a different database), and a position open longer than the
+#                window keeps writing fresh checkpoints anyway, so its newest
+#                ones survive regardless.
+CHECKPOINTS_PER_THREAD = 5
+CHECKPOINT_MAX_AGE_DAYS = 3
+
+
+def prune_checkpoints() -> Dict[str, Any]:
+    """Bound the LangGraph checkpoint file. Never raises.
+
+    SYNCHRONOUS and using sqlite3 directly rather than the async saver, because
+    this is maintenance on a file rather than part of any graph run — going
+    through LangGraph's API would mean holding its connection while deleting the
+    rows underneath it.
+
+    VACUUM is what actually returns the space. SQLite marks deleted pages free
+    but does not shrink the file, so a prune without it reports thousands of rows
+    removed while the disk stays exactly as full — which is the bug report this
+    would otherwise generate.
+    """
+    import os
+    import sqlite3
+
+    from backend.graphs.runtime import SQLITE_CHECKPOINT_PATH
+
+    path = SQLITE_CHECKPOINT_PATH
+    if not os.path.exists(path):
+        return {"ok": True, "skipped": "no checkpoint file"}
+
+    before = os.path.getsize(path)
+    try:
+        conn = sqlite3.connect(path, timeout=30.0)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"could not open the checkpoint store: {exc}"}
+
+    deleted = 0
+    try:
+        with conn:
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "checkpoints" not in tables:
+                return {"ok": True, "skipped": "no checkpoints table"}
+
+            # Threads whose newest checkpoint is older than the window. Ordering
+            # by rowid rather than a timestamp column because LangGraph's schema
+            # has varied across versions and rowid is monotonic in insert order
+            # regardless — the newest row of a thread always has its highest
+            # rowid.
+            cutoff = conn.execute(
+                "SELECT MAX(rowid) FROM checkpoints"
+            ).fetchone()[0] or 0
+            # Approximate the age window by row position: keep everything in the
+            # most recent slice, prune whole threads that have nothing in it.
+            keep_from = max(0, cutoff - (CHECKPOINTS_PER_THREAD * 2000))
+
+            stale = [
+                r[0] for r in conn.execute(
+                    "SELECT thread_id FROM checkpoints GROUP BY thread_id "
+                    "HAVING MAX(rowid) < ?", (keep_from,)
+                )
+            ]
+            for thread in stale:
+                for table in ("writes", "checkpoints"):
+                    if table in tables:
+                        cur = conn.execute(
+                            f"DELETE FROM {table} WHERE thread_id = ?", (thread,)
+                        )
+                        deleted += cur.rowcount or 0
+
+            # Then trim each surviving thread to its most recent checkpoints.
+            for (thread,) in conn.execute(
+                "SELECT DISTINCT thread_id FROM checkpoints"
+            ).fetchall():
+                keep = [
+                    r[0] for r in conn.execute(
+                        "SELECT rowid FROM checkpoints WHERE thread_id = ? "
+                        "ORDER BY rowid DESC LIMIT ?",
+                        (thread, CHECKPOINTS_PER_THREAD),
+                    )
+                ]
+                if not keep:
+                    continue
+                cur = conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ? AND rowid < ?",
+                    (thread, min(keep)),
+                )
+                deleted += cur.rowcount or 0
+
+            # ORPHANED WRITES. `writes` holds one row per channel written per
+            # superstep and is by far the larger table — 3,562 rows against 619
+            # checkpoints locally, and 3,175 of them belonged to checkpoints that
+            # had just been deleted. Trimming only `checkpoints` freed a third of
+            # the file and left the rest as unreachable residue, which is the
+            # version of this fix that looks like it worked and does not.
+            if "writes" in tables:
+                cur = conn.execute(
+                    "DELETE FROM writes WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM checkpoints c"
+                    "  WHERE c.thread_id = writes.thread_id"
+                    "    AND c.checkpoint_id = writes.checkpoint_id)"
+                )
+                deleted += cur.rowcount or 0
+
+        # OUTSIDE the transaction: VACUUM cannot run inside one.
+        conn.execute("VACUUM")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Checkpoint prune failed: %s", exc)
+        return {"ok": False, "reason": str(exc), "deleted": deleted}
+    finally:
+        conn.close()
+
+    after = os.path.getsize(path)
+    freed = before - after
+    if deleted or freed:
+        logger.info(
+            "Checkpoint store pruned: %d row(s) removed, %.1f MB -> %.1f MB (freed %.1f MB).",
+            deleted, before / 1e6, after / 1e6, freed / 1e6,
+        )
+    return {
+        "ok": True, "deleted": deleted,
+        "bytesBefore": before, "bytesAfter": after, "bytesFreed": freed,
+    }
+
 
 async def prune_once() -> Dict[str, Any]:
     """One retention pass. Never raises — returns what it did, or why it could not."""
     from backend.core.db import get_db_pool
 
+    # THE CHECKPOINT STORE IS PRUNED FIRST, AND UNCONDITIONALLY.
+    #
+    # Before the Postgres check, deliberately: that file is on local disk and
+    # filled the production server to 100%, and it must still be bounded on a
+    # deployment running without a database pool. Returning early on "no pool"
+    # would leave the one store that actually caused an outage unpruned.
+    checkpoints = prune_checkpoints()
+
     pool = get_db_pool()
     if pool is None:
-        return {"ok": False, "reason": "no database pool"}
+        return {"ok": False, "reason": "no database pool", "checkpoints": checkpoints}
 
-    report: Dict[str, Any] = {"ok": True}
+    report: Dict[str, Any] = {"ok": True, "checkpoints": checkpoints}
 
     try:
         async with pool.acquire() as conn:
