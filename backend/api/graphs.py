@@ -494,3 +494,99 @@ async def order_stream_status() -> Dict[str, Any]:
     from backend.services.order_stream import get_order_stream
 
     return get_order_stream().snapshot()
+
+
+@router.get("/excursion")
+async def excursion_study(limit: int = Query(2000, ge=1, le=20000)) -> Dict[str, Any]:
+    """Would a trailing stop beat the current exit rules? Answered from real fills.
+
+    THIS ENDPOINT EXISTS BECAUSE THE QUESTION WAS UNANSWERABLE.
+
+    Asked to replay a trail against five days of live trading, the honest answer
+    was that it could not be done: a trailed stop sits at `peak - TRAILING_STOP_R`
+    and `trades` recorded entry and exit but never the path between. 1,173 real
+    positions and the data simply was not there.
+
+    `mfe_r` and `mae_r` are now written on every close, so this computes the
+    comparison directly rather than modelling it:
+
+      * `trailWouldHaveBeaten` — closes whose MFE ran far enough that a trail
+        would have exited ABOVE where they actually did.
+      * `stopTooTight` — closes that were stopped out having first gone close to,
+        but not through, the stop in the other direction... i.e. winners the stop
+        converted into losers. High MAE on WINNING trades says the same thing from
+        the other side: the stop was nearly hit on trades that went on to work.
+
+    `sampleSize` is the number of closes carrying an excursion, NOT the number of
+    closes. Rows written before this instrumentation have `mfe_r IS NULL` and are
+    excluded rather than counted as zero — a zero MFE is a real and much rarer
+    fact (a trade that never went a tick into profit) and conflating the two would
+    understate every average here.
+    """
+    from backend.core.db import get_db_pool
+    from backend.agents.position_monitor import TRAILING_STOP_R
+
+    pool = get_db_pool()
+    if pool is None:
+        return {"available": False, "reason": "no database pool"}
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT symbol, pnl, mfe_r, mae_r, note
+            FROM trades
+            WHERE pnl IS NOT NULL AND mfe_r IS NOT NULL
+            ORDER BY ts DESC LIMIT $1
+            """,
+            limit,
+        )
+
+    if not rows:
+        return {
+            "available": False,
+            "reason": (
+                "no closed trade carries an excursion yet. Rows written before this "
+                "instrumentation have mfe_r NULL; the study becomes answerable as "
+                "new trades close."
+            ),
+            "sampleSize": 0,
+        }
+
+    mfes = [float(r["mfe_r"]) for r in rows]
+    maes = [float(r["mae_r"]) for r in rows if r["mae_r"] is not None]
+    winners = [r for r in rows if float(r["pnl"]) > 0]
+    losers = [r for r in rows if float(r["pnl"]) <= 0]
+
+    # How often the peak ran far enough that a trail would have kept more than a
+    # break-even exit. A trail only beats break-even when MFE exceeds the trail
+    # distance — below that its stop sits at or under the entry.
+    beat = [m for m in mfes if m > TRAILING_STOP_R]
+
+    def _avg(xs):
+        return round(sum(xs) / len(xs), 4) if xs else None
+
+    return {
+        "available": True,
+        "sampleSize": len(rows),
+        "trailDistanceR": TRAILING_STOP_R,
+        "mfe": {
+            "mean": _avg(mfes),
+            "max": round(max(mfes), 4),
+            "onWinners": _avg([float(r["mfe_r"]) for r in winners]),
+            "onLosers": _avg([float(r["mfe_r"]) for r in losers]),
+        },
+        "mae": {
+            "mean": _avg(maes),
+            "max": round(max(maes), 4) if maes else None,
+            # THE STOP-WIDTH ANSWER. A high MAE on trades that still WON means the
+            # stop was nearly hit on trades that went on to work — widen it and
+            # those become wins rather than losses.
+            "onWinners": _avg([float(r["mae_r"]) for r in winners if r["mae_r"] is not None]),
+            "onLosers": _avg([float(r["mae_r"]) for r in losers if r["mae_r"] is not None]),
+        },
+        "trailWouldHaveBeatenBreakEven": {
+            "count": len(beat),
+            "fraction": round(len(beat) / len(rows), 4),
+            "meanCaptureR": _avg([m - TRAILING_STOP_R for m in beat]),
+        },
+    }

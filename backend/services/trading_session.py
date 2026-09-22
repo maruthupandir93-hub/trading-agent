@@ -83,12 +83,38 @@ SESSION_POLL_S = float(os.getenv("SESSION_POLL_S", "12") or 12)
 # Default floor: stop if equity falls to 50% of where the session started.
 DEFAULT_FLOOR_FRACTION = 0.5
 
-# Hard ceiling on how long a session may run unattended, and on how many trades
-# it may place. Both exist because "until the target is reached" is not a bound —
-# a session that never reaches it and never loses enough to hit the floor would
-# otherwise run forever, spending API quota and model tokens.
-MAX_SESSION_HOURS = 72.0
-MAX_TRADES_PER_SESSION = 200
+# Ceilings on how long a session may run and how many trades it may place.
+#
+# UNLIMITED BY DEFAULT (0 = no limit), at the operator's explicit request, and the
+# reasoning is sound: a session's real bound is its TARGET, and a high target
+# legitimately needs many trades over many days. With 72h/200 as hard limits a
+# session that was working correctly toward an ambitious target would be killed
+# mid-run and reported as "expired" — a failure message for a system doing exactly
+# what it was told.
+#
+# WHAT IS LOST BY REMOVING THEM, STATED PLAINLY. "Until the target is reached" is
+# not a bound. A session that never reaches its target and never falls to its
+# floor now runs until the operator stops it, spending API quota and model tokens
+# the whole time. The floor, the daily target and the emergency stop are what
+# bound it instead — and the floor is the one that matters, because it is the only
+# one that ends a session that is simply losing.
+#
+# Both remain settable for an operator who wants a bound back.
+def _env_limit(name: str, default: float) -> float:
+    """A positive limit, or 0.0 meaning unlimited. Never raises on a bad value."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a number; using %s.", name, raw, default)
+        return default
+    return max(0.0, value)
+
+
+MAX_SESSION_HOURS = _env_limit("MAX_SESSION_HOURS", 0.0)
+MAX_TRADES_PER_SESSION = _env_limit("MAX_TRADES_PER_SESSION", 0.0)
 
 
 @dataclass
@@ -455,10 +481,10 @@ async def _run_session(session_id: str) -> None:
             session.last_cycle_at = time.time()
 
             # -- terminating conditions, checked BEFORE acting ----------------
-            if (time.time() - session.started_at) > MAX_SESSION_HOURS * 3600:
+            if MAX_SESSION_HOURS > 0 and (time.time() - session.started_at) > MAX_SESSION_HOURS * 3600:
                 _finish(session, "expired", f"ran for more than {MAX_SESSION_HOURS:.0f}h without reaching the target")
                 break
-            if session.trades_opened >= MAX_TRADES_PER_SESSION:
+            if MAX_TRADES_PER_SESSION > 0 and session.trades_opened >= MAX_TRADES_PER_SESSION:
                 _finish(session, "expired", f"placed {MAX_TRADES_PER_SESSION} trades without reaching the target")
                 break
 

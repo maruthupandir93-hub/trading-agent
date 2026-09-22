@@ -360,6 +360,43 @@ class SupervisorAgent(BaseAgent):
             await self._refuse(symbol, "system is paused or emergency-stopped by the operator")
             return
 
+        # ---- SCOPE: may we open anything at all, in this instrument, now? -----
+        #
+        # THIS PATH HAD NONE OF THESE CHECKS, AND IT IS THE PATH THAT TRADED.
+        #
+        # Every gate written over this project's life — the tradeable-instrument
+        # blocklist, session scope, one-position-at-a-time — lives in
+        # `graphs/nodes/risk_gateway`, which this method never touches. It did not
+        # matter while `dynamic_thresholding` demanded 0.60-0.99 confidence on a
+        # scale whose ceiling was 0.44: this supervisor refused everything, 2,948
+        # decisions, zero trades.
+        #
+        # Rescaling those thresholds to the debate's real units was correct — an
+        # unreachable gate is a bug. But it unblocked THIS path, and the ledger
+        # shows what that meant: 4,080 fills in five days, 856 closes on BTC
+        # (which is on the untradeable list), up to three symbols at once, and no
+        # session ever started.
+        #
+        # ENTRIES ONLY. `_consider_trade` opens; closes are the position monitor's
+        # and never come through here, so invariant 4 is untouched.
+        from backend.services.trade_scope import entry_refusal
+
+        try:
+            from backend.agents.position_monitor import get_position_monitor
+
+            held = [p.get("symbol") for p in get_position_monitor().snapshot_open()]
+        except Exception as exc:  # noqa: BLE001
+            # FAIL CLOSED. If the book cannot be read we cannot know whether the
+            # concurrency limit is already met, and opening anyway is how "one
+            # position at a time" becomes three.
+            await self._refuse(symbol, f"could not read the open-position book ({exc})", debate)
+            return
+
+        scope_refusal = entry_refusal(symbol, held)
+        if scope_refusal is not None:
+            await self._refuse(symbol, scope_refusal, debate)
+            return
+
         # --- direction: from the debate, never assumed ------------------
         debate = self._debates.get(symbol)
         if debate is None:
@@ -533,7 +570,24 @@ class SupervisorAgent(BaseAgent):
             direction=direction,
             requested_size=size,
             requested_leverage=requested_leverage,
-            strategy="Event-Driven Multi-Agent Pipeline",
+            # STRATEGY IS None HERE, AND THAT IS THE HONEST VALUE.
+            #
+            # This used to be the string "Event-Driven Multi-Agent Pipeline" — a
+            # description of the PATH, not a strategy profile. It landed in
+            # `trades.strategy` on every fill this supervisor produced, and
+            # `services/strategy_performance` aggregates exactly that column: so
+            # 2,426 closed trades accumulated under one label that matches none of
+            # the eleven real strategies, every profile's
+            # `historical_success_rate` stayed None, and the 0.2 track-record
+            # weight in strategy scoring stayed permanently neutral. The learning
+            # loop looked wired and was measuring a name.
+            #
+            # This path runs a DEBATE; it does not select a strategy profile, so
+            # it has nothing to attribute. `position_monitor` already applies the
+            # same rule to a manual position — "a human's click was not chosen by
+            # an algorithm, and crediting one would poison the measurement it
+            # feeds". A pipeline label poisons it the same way.
+            strategy=None,
             supervisor_rationale=rationale,
             stop_loss=sltp["stopLoss"],
             take_profit=sltp["takeProfit"],

@@ -413,6 +413,81 @@ def max_leverage_ceiling(tab: str) -> int:
     return ABSOLUTE_MAX_LEVERAGE_PAPER if tab == "paper" else ABSOLUTE_MAX_LEVERAGE
 
 
+# Maintenance margin rate assumed when computing the liquidation distance.
+#
+# 0.5% is Binance USDⓈ-M's lowest tier (and Bybit's is comparable) for the small
+# notionals this system trades. It rises with position size, so assuming the
+# LOWEST rate makes the computed liquidation distance the LARGEST it could be —
+# which is the optimistic direction. `LIQUIDATION_SAFETY_FACTOR` below is what
+# makes the overall result conservative, and it is the number to change if this
+# ever trades size big enough to cross a tier.
+MAINTENANCE_MARGIN_RATE = 0.005
+
+# How much of the distance to liquidation the stop is allowed to consume.
+#
+# 0.5 — the stop must sit within HALF the distance to liquidation. Not 0.9, and
+# the margin is not timidity: the liquidation distance computed here is an
+# approximation (it ignores fees, funding accrued against the position, and the
+# venue's tiered maintenance rate), and the price can gap THROUGH a stop. A stop
+# at 90% of the way to liquidation is one bad tick from being overtaken by the
+# thing it exists to pre-empt.
+LIQUIDATION_SAFETY_FACTOR = 0.5
+
+
+def liquidation_distance(leverage: float) -> float:
+    """Roughly how far price may move against a position before liquidation.
+
+    As a FRACTION of entry price. At 10x with a 0.5% maintenance rate this is
+    ~9.5%: the margin is 10% of notional, and the venue liquidates once equity
+    falls to the maintenance requirement rather than to zero.
+    """
+    if leverage <= 0:
+        return 1.0
+    return max(0.0, (1.0 / leverage) - MAINTENANCE_MARGIN_RATE)
+
+
+def liquidation_safe_leverage(stop_distance_fraction: float, requested: int) -> int:
+    """The highest leverage at which the STOP still fires before LIQUIDATION.
+
+    THE GAP THIS CLOSES. Nothing in this system compared the two. The stop is
+    2.5 x ATR and the liquidation distance is a function of leverage, so at high
+    enough leverage — or wide enough volatility — the venue liquidates the
+    position BEFORE its stop is touched. When that happens:
+
+      * the stop never fires, so every protective mechanism built around it
+        (the resting venue stop, the monitor, the trailing stop) is bypassed;
+      * the loss is the ENTIRE margin, not the risk the gateway sized for;
+      * at a 100% capital allocation that margin is the whole account.
+
+    Measured against this system's own numbers: SOL's ATR% ranged 0.145-1.288
+    over 880 bars, so a 2.5-ATR stop is at most ~3.2% and sits safely inside 10x's
+    ~9.5% liquidation distance TODAY. A volatility expansion to ATR% 4 puts the
+    stop at 10% — outside it. The volatility regime gate does not reliably catch
+    this, because it ranks volatility by PERCENTILE: a market that has been
+    violent for a while reads NORMAL against its own recent history.
+
+    A CAP THAT CAN ONLY LOWER, exactly like `max_leverage_ceiling`, and combined
+    with it by min(). It never raises the operator's chosen leverage and never
+    reaches the absolute ceiling on its own.
+
+    Returns at least 1: leverage below 1x is not a thing, and at 1x the
+    liquidation distance is ~99.5% — a stop that cannot fit inside THAT is a stop
+    wider than the instrument can move, which the ATR checks reject on their own.
+    """
+    if stop_distance_fraction is None or stop_distance_fraction <= 0:
+        # No usable stop distance. Do not silently widen leverage on an unknown —
+        # the caller's own invariant-3 checks refuse a trade with no stop, and
+        # returning the request unchanged leaves that refusal to them.
+        return max(1, int(requested))
+
+    allowed = max(1, int(requested))
+    while allowed > 1:
+        if stop_distance_fraction <= liquidation_distance(allowed) * LIQUIDATION_SAFETY_FACTOR:
+            return allowed
+        allowed -= 1
+    return 1
+
+
 def check_leverage(requested_leverage: float, tab: str = "real") -> RiskCheck:
     """Ceiling check. Runs before any stop-distance math, so a very tight
     stop cannot compute its way past the ceiling."""

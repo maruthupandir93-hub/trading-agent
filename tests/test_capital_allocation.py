@@ -60,6 +60,19 @@ def _empty_ledger(monkeypatch):
         "backend.services.ai_memory.get_memory_stats",
         lambda: {"trade_ledger": []},
     )
+    # THE SCOPE GATES ARE TURNED OFF FOR THIS FILE, DELIBERATELY.
+    #
+    # Every test here drives `gate()` to check SIZING — how the capital fraction
+    # and leverage turn into a quantity. The session-scope and one-position-at-a-
+    # time gates run BEFORE sizing and would refuse these states for reasons that
+    # have nothing to do with what is being measured, so leaving them on would
+    # make this file assert "the gate rejected" over and over while testing none
+    # of the arithmetic it exists to pin.
+    #
+    # Their own behaviour is covered in `tests/test_session_scope.py`, including
+    # the fact that they run ahead of sizing.
+    monkeypatch.setenv("SESSION_ONLY_TRADING", "false")
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "99")
 
 
 def _session(monkeypatch, fraction: float, leverage: int = 1) -> None:

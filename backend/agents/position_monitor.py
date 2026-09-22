@@ -151,6 +151,21 @@ PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank
 # ceiling — the position can run while giving back at most 1R from its peak.
 #
 # TRAILING_STOP_R = 0 disables the trail entirely (back to fixed stop + target).
+# FIXED PROFIT TARGET, as a percentage of the ENTRY PRICE. 0 disables it.
+#
+# Added because 53.4% of this system's closed trades realised essentially nothing:
+# the scale-out banks half at +1R, moves the runner's stop to break-even, and the
+# runner then closes at ~0.00 far more often than it reaches the ATR target. The
+# operator's description was exact — "it takes a profit and holding and sometimes
+# the price reverses and when it reaches 0.00 it finishes".
+#
+# With this set, a position closes ENTIRELY at the first favourable move of this
+# size. Every trade is then a clean win or a clean stop, with no runner left at
+# break-even to scratch. It overrides the partial take-profit (see `_check_price`)
+# rather than stacking with it, because stacking would reintroduce the break-even
+# runner this is meant to remove.
+PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.0)
+
 TRAILING_STOP_R = _env_float("TRAILING_STOP_R", 1.0)        # distance behind peak, in R
 TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, before it arms
 
@@ -161,6 +176,20 @@ class _Tracked:
     __slots__ = (
         "tar_id", "symbol", "side", "tab", "qty", "entry_price",
         "stop_loss", "take_profit", "opened_at", "peak_price",
+        # THE ADVERSE EXTREME — the mirror of `peak_price`, and the half that was
+        # never recorded.
+        #
+        # `peak_price` answers "how far did this go my way?" (maximum favourable
+        # excursion). `worst_price` answers "how far did it go against me before
+        # it worked?" (maximum adverse excursion), which is the only way to tell a
+        # stop that was genuinely hit from one that was merely too tight — a trade
+        # that dipped to -0.9R and then reached the target is evidence the stop was
+        # nearly right; a hundred of them is evidence it is too tight.
+        #
+        # Neither is derivable from a closed trade log afterwards: the log records
+        # entry and exit, never the path between. That is exactly why the trailing
+        # stop could not be evaluated against five days of real fills.
+        "worst_price",
         # The venue's id for the RESTING stop protecting this position, when one
         # was placed. None for paper (there is no venue order) and None when the
         # venue refused it — which is a materially less safe position and is
@@ -387,6 +416,7 @@ class PositionMonitorAgent(BaseAgent):
                 "stop_loss": appr.get("stop_loss"),
                 "take_profit": appr.get("take_profit"),
                 "peak_price": None,
+                "worst_price": None,
                 "opened_at": None,
                 # A pending approval has no venue order yet — the stop is placed
                 # on the FILL — so this is genuinely None rather than dropped.
@@ -416,6 +446,7 @@ class PositionMonitorAgent(BaseAgent):
                 "stop_loss": pos.stop_loss,
                 "take_profit": pos.take_profit,
                 "peak_price": pos.peak_price,
+                "worst_price": pos.worst_price,
                 "opened_at": pos.opened_at,
                 # WAS MISSING ENTIRELY, and `save_watch_list` binds by name from
                 # `_FIELDS` — so `stop_order_id` was written as NULL on every
@@ -585,6 +616,13 @@ class PositionMonitorAgent(BaseAgent):
                 # position. The entry is the one value guaranteed to have been
                 # reached, so it is the honest conservative floor.
                 peak_price=row["peak_price"] if row["peak_price"] is not None else row["entry_price"],
+                # Same fallback and the same reasoning as peak_price: the entry is
+                # the one price guaranteed to have been touched, so it is the
+                # honest floor for an excursion we have no record of.
+                worst_price=(
+                    row.get("worst_price") if row.get("worst_price") is not None
+                    else row["entry_price"]
+                ),
                 # Restored so a close after a restart can CANCEL the stop this
                 # process left resting at the venue. An orphaned stop is an order
                 # to open the opposite position the next time price touches it.
@@ -634,6 +672,52 @@ class PositionMonitorAgent(BaseAgent):
     # Phase 30 / spec Section 13 — read and modify, for the monitoring graph
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _excursions(pos: "_Tracked") -> Tuple[Optional[float], Optional[float]]:
+        """(MFE, MAE) in units of INITIAL risk, or (None, None) if unmeasurable.
+
+        WHAT THESE ANSWER THAT A TRADE LOG CANNOT
+        -----------------------------------------
+        A closed trade records entry and exit. It does not record the PATH, and
+        without the path two questions are unanswerable from history:
+
+          * Would a TRAILING stop have beaten a fixed target? A trail sits at
+            `peak - TRAILING_STOP_R`, so the answer depends entirely on where the
+            peak was. Replaying a trail against five days of real fills was
+            impossible for exactly this reason.
+          * Was the stop too TIGHT? A trade that dipped to -0.9R and then reached
+            its target is evidence the stop was nearly right. Many of them is
+            evidence it is converting winners into losers.
+
+        MEASURED IN R, not percent or price, so they are comparable across
+        instruments and volatility regimes — the same reason the trail itself is
+        in R. `initial_risk` is the denominator because it is fixed at entry;
+        using the CURRENT stop would make the scale move whenever the stop did.
+
+        BOTH ARE None WHEN `initial_risk` IS UNKNOWN, never 0.0. A zero MFE is a
+        real and rare fact — a trade that never went a single tick into profit —
+        and it must not be confused with "not measured" (invariant 6).
+
+        MAE is returned as a POSITIVE magnitude of adverse movement: 0.9 means it
+        went 0.9R against the position. Signing it would invite the sign being
+        applied twice by a reader who assumed it was already negative.
+        """
+        if not pos.initial_risk or pos.initial_risk <= 0 or pos.entry_price is None:
+            return None, None
+        d = 1.0 if pos.side == "buy" else -1.0
+        mfe = mae = None
+        if pos.peak_price is not None:
+            mfe = ((pos.peak_price - pos.entry_price) * d) / pos.initial_risk
+        if pos.worst_price is not None:
+            mae = ((pos.entry_price - pos.worst_price) * d) / pos.initial_risk
+        # Clamped at zero: an excursion cannot be negative in its own direction.
+        # A peak below entry means price never went favourable at all, which is
+        # MFE 0, not a negative "favourable" excursion.
+        return (
+            round(max(0.0, mfe), 6) if mfe is not None else None,
+            round(max(0.0, mae), 6) if mae is not None else None,
+        )
+
     async def _persist_closed_trade(
         self, pos: "_Tracked", exit_price: float, realized: float, reason: str,
         qty: Optional[float] = None, fee: Optional["FeeResult"] = None,
@@ -678,8 +762,10 @@ class PositionMonitorAgent(BaseAgent):
                     """
                     INSERT INTO trades
                         (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note,
-                         strategy, run_id, entry_context, fee, fee_measured, funding)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                         strategy, run_id, entry_context, fee, fee_measured, funding,
+                         mfe_r, mae_r)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                            $17, $18)
                     """,
                     str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, row_qty, exit_price, realized,
@@ -707,6 +793,13 @@ class PositionMonitorAgent(BaseAgent):
                     # trade but bleeds funding on long holds looks identical to
                     # one that is simply losing, unless the two are split.
                     funding,
+                    # THE PATH, not just the endpoints. On a PARTIAL close these
+                    # are the excursions SO FAR; the final close carries the
+                    # position's whole life. That difference is deliberate and
+                    # useful — comparing the two shows how much further a runner
+                    # travelled after the scale-out, which is precisely the
+                    # question the partial-vs-trail decision turns on.
+                    *self._excursions(pos),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -964,6 +1057,7 @@ class PositionMonitorAgent(BaseAgent):
             # Seeded at entry, exactly as `_register_fill` does. A None peak
             # would make the first tick look like an unbounded excursion.
             peak_price=entry_price,
+            worst_price=entry_price,
         )
         logger.info(
             "Monitoring MANUAL %s %s %s from %s (stop %s, target %s). %d position(s) watched.",
@@ -1029,6 +1123,11 @@ class PositionMonitorAgent(BaseAgent):
                 "takeProfit": pos.take_profit,
                 "openedAtTs": pos.opened_at.timestamp() if pos.opened_at else None,
                 "peakPrice": pos.peak_price,
+                "worstPrice": pos.worst_price,
+                # Live excursion, so an operator can see how far a position has
+                # travelled in each direction without waiting for it to close.
+                "mfeR": self._excursions(pos)[0],
+                "maeR": self._excursions(pos)[1],
             })
         return out
 
@@ -1209,6 +1308,7 @@ class PositionMonitorAgent(BaseAgent):
             take_profit=approved["take_profit"],
             opened_at=datetime.datetime.utcnow(),
             peak_price=event.fill_price,
+            worst_price=event.fill_price,
             strategy=approved.get("strategy"),
             run_id=approved.get("run_id"),
             entry_context=approved.get("entry_context"),
@@ -1255,19 +1355,62 @@ class PositionMonitorAgent(BaseAgent):
 
             if pos.side == "buy":
                 pos.peak_price = max(pos.peak_price, price)
+                pos.worst_price = min(
+                    pos.worst_price if pos.worst_price is not None else price, price
+                )
                 hit_stop = pos.stop_loss is not None and price <= pos.stop_loss
                 hit_target = pos.take_profit is not None and price >= pos.take_profit
             else:
                 pos.peak_price = min(pos.peak_price, price)
+                # A SHORT's adverse direction is UP. Mirrored rather than shared,
+                # because "worst" is not "lowest" — getting this backwards would
+                # record every short's best price as its worst.
+                pos.worst_price = max(
+                    pos.worst_price if pos.worst_price is not None else price, price
+                )
                 hit_stop = pos.stop_loss is not None and price >= pos.stop_loss
                 hit_target = pos.take_profit is not None and price <= pos.take_profit
 
             if not hit_stop and not hit_target:
+                # ---- FIXED PROFIT TARGET: bank the whole position at +X% -----
+                #
+                # THE SCRATCH PROBLEM, MEASURED. Of 4,003 closed trades, 2,136
+                # (53.4%) realised less than 0.001 — and 1,121 of those exited as
+                # "stop-loss". That is not the market: it is this system's own
+                # scale-out. The partial banks half at +1R and moves the runner's
+                # stop to BREAK-EVEN, so the runner's most likely outcome is an
+                # exit at almost exactly zero. The operator watched a position go
+                # into profit, pull back, and close at 0.00, over and over.
+                #
+                # A fixed percentage target closes the WHOLE position in one go.
+                # Every trade then ends as a clean win at +PROFIT_TARGET_PCT or a
+                # clean loss at the stop — there is no runner left sitting at
+                # break-even, which is the only thing that produced the scratches.
+                #
+                # WHAT THE PERCENTAGE MEANS: a favourable move of that much in
+                # PRICE. With leverage it is amplified against the margin — at 3x
+                # a 2% move is ~6% of the margin deployed, at 10x ~20%. It is
+                # measured on price rather than on account equity so that the same
+                # setting means the same thing whatever leverage the session uses.
+                #
+                # IT BYPASSES THE PARTIAL DELIBERATELY. Leaving both on would
+                # scale out at +1R, move the stop to break-even, and reintroduce
+                # exactly the scratch this exists to remove. Off (0) restores the
+                # previous ATR-target + scale-out behaviour completely.
+                if PROFIT_TARGET_PCT > 0 and pos.entry_price:
+                    move_pct = (
+                        (price - pos.entry_price) / pos.entry_price * 100.0
+                        * (1.0 if pos.side == "buy" else -1.0)
+                    )
+                    if move_pct >= PROFIT_TARGET_PCT:
+                        await self._close(pos, price, "profit-target")
+                        continue
+
                 # PARTIAL PROFIT-TAKING, before the plain HOLD. If the position has
                 # reached +PARTIAL_TP_R and has not yet scaled out, bank part of it
                 # and move the runner's stop to break-even. This is what stops a
                 # +1-2% gain from dying at 0.0 on a pullback.
-                if PARTIAL_TP_FRACTION > 0 and not pos.partial_done:
+                if PROFIT_TARGET_PCT <= 0 and PARTIAL_TP_FRACTION > 0 and not pos.partial_done:
                     r = self._r_multiple(pos, price)
                     if r is not None and r >= PARTIAL_TP_R:
                         await self._take_partial(pos, price)

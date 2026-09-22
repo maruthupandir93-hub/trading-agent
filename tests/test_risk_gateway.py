@@ -155,6 +155,13 @@ def _empty_ledger(monkeypatch):
         "backend.services.ai_memory.get_memory_stats",
         lambda: {"trade_ledger": []},
     )
+    # THE SCOPE GATES ARE OFF FOR THIS FILE. They run before sizing and would
+    # refuse most of these states for reasons unrelated to what is being
+    # measured — this file pins SIZING and the nine risk checks, not who is
+    # allowed to ask. `tests/test_session_scope.py` owns their behaviour,
+    # including the fact that they run ahead of sizing.
+    monkeypatch.setenv("SESSION_ONLY_TRADING", "false")
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "99")
 
 
 # ===========================================================================

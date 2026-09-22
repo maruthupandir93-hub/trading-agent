@@ -1,40 +1,40 @@
 {
-    "last_updated": "2026-09-11T02:21:47.094676",
+    "last_updated": "2026-09-19T02:13:26.715851",
     "trending_coins": [
         {
             "symbol": "USDCUSDT",
-            "change_24h": "0.01%",
-            "volume": "$3,337,368,163",
+            "change_24h": "-0.06%",
+            "volume": "$3,339,122,833",
+            "mtf_trend": "Bearish",
+            "discovered_setup": "Strong Short Setup"
+        },
+        {
+            "symbol": "BTCUSDT",
+            "change_24h": "6.04%",
+            "volume": "$1,927,281,596",
             "mtf_trend": "Bullish",
             "discovered_setup": "Strong Long Setup"
         },
         {
-            "symbol": "BTCUSDT",
-            "change_24h": "-1.44%",
-            "volume": "$1,165,520,815",
-            "mtf_trend": "Bearish",
-            "discovered_setup": "Strong Short Setup"
+            "symbol": "ETHUSDT",
+            "change_24h": "6.56%",
+            "volume": "$1,325,499,280",
+            "mtf_trend": "Bullish",
+            "discovered_setup": "Strong Long Setup"
         },
         {
-            "symbol": "ETHUSDT",
-            "change_24h": "-0.46%",
-            "volume": "$848,180,096",
-            "mtf_trend": "Bearish",
-            "discovered_setup": "Strong Short Setup"
+            "symbol": "SOLUSDT",
+            "change_24h": "10.89%",
+            "volume": "$510,301,356",
+            "mtf_trend": "Bullish",
+            "discovered_setup": "Strong Long Setup"
         },
         {
             "symbol": "ZECUSDT",
-            "change_24h": "-11.91%",
-            "volume": "$344,891,235",
-            "mtf_trend": "Bearish",
-            "discovered_setup": "Strong Short Setup"
-        },
-        {
-            "symbol": "USD1USDT",
-            "change_24h": "-0.01%",
-            "volume": "$208,117,134",
-            "mtf_trend": "Mixed",
-            "discovered_setup": "None"
+            "change_24h": "5.17%",
+            "volume": "$437,538,699",
+            "mtf_trend": "Bullish",
+            "discovered_setup": "Strong Long Setup"
         }
     ]
 }

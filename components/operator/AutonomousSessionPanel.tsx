@@ -556,8 +556,13 @@ export function AutonomousSessionPanel() {
             <label className="block text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-muted)' }}>
               Daily profit target — {dailyPct === 0 ? 'off' : `${dailyPct}% a day`}
             </label>
+            {/* The backend has always accepted up to 50% (`dailyTargetPct` is
+                bounded (0, 0.5] in api/session.py and clamped again in
+                start_session). Only this list capped it at 3%, so an operator
+                who wanted a 10% day had no way to ask for one — a UI limit
+                masquerading as a system limit. */}
             <div className="grid grid-cols-4 gap-1.5">
-              {[0, 1, 2, 3].map((pct) => (
+              {[0, 1, 2, 3, 5, 7, 10].map((pct) => (
                 <button
                   key={pct}
                   type="button"

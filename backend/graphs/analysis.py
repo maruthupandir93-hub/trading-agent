@@ -562,6 +562,10 @@ _subscribed = False
 
 
 from backend.services.tradeable_universe import is_tradeable
+# Imported here beside `is_tradeable` because both answer the same kind of
+# question for the same skip: can this symbol produce a trade at all right now?
+from backend.graphs.nodes.risk_gateway import session_only_trading
+from backend.services.trading_session import active_session
 
 
 def subscribe_to_triggers(checkpointer: Any = None) -> None:
@@ -620,6 +624,44 @@ def subscribe_to_triggers(checkpointer: Any = None) -> None:
                     event.symbol,
                 )
                 return
+
+        # SAME SKIP, FOR A SYMBOL NO RUNNING SESSION NAMED.
+        #
+        # With `SESSION_ONLY_TRADING` on, the Risk Gateway refuses an entry in any
+        # instrument other than the active session's — so a full 24-node run on
+        # another coin reaches a refusal that was knowable from the symbol alone.
+        # Measured over five days, that was most of the work the agent did: 3,766
+        # fills across three symbols while no session was running at all.
+        #
+        # THE GATE IS STILL WHAT MAKES THIS CORRECT. This is purely cost, and it
+        # carries the same open-position exception for the same reason: a held
+        # position must keep reaching the Supervisor so an EXIT can be
+        # recommended, and invariant 4 says a close is never blocked. A symbol we
+        # hold is analysed no matter whose session is running.
+        if session_only_trading():
+            from backend.agents.position_monitor import get_position_monitor
+
+            session = active_session()
+            in_scope = session is not None and (
+                str(session.symbol).split(":")[0].upper()
+                == str(event.symbol).split(":")[0].upper()
+            )
+            if not in_scope:
+                try:
+                    held = any(
+                        p.get("symbol") == event.symbol
+                        for p in get_position_monitor().snapshot_open()
+                    )
+                except Exception:  # noqa: BLE001
+                    # Could not read the book — run it. A wasted run costs tokens;
+                    # a wrongly skipped one is an open position nobody reconsiders.
+                    held = True
+                if not held:
+                    logger.debug(
+                        "Analysis skipped for %s: no session is trading it and nothing "
+                        "is open in it.", event.symbol,
+                    )
+                    return
 
         trigger = TriggerReason(
             kind=event.kind,

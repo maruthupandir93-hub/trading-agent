@@ -83,6 +83,10 @@ _FIELDS = (
     # The funding rate captured at entry, so a close can charge the settlements
     # the position lived through without an HTTP call on the close path.
     "funding_rate",
+    # The adverse extreme, the mirror of peak_price. Persisted so a restart does
+    # not reset a position's excursion record to its entry and quietly understate
+    # how far it went against us.
+    "worst_price",
 )
 
 

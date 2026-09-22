@@ -69,6 +69,7 @@ from backend.core.risk_manager import (
     MARGIN_BUFFER_MULTIPLIER,
     calculate_position_size,
     kelly_risk_fraction,
+    liquidation_safe_leverage,
     max_leverage_ceiling,
     validate_trade,
 )
@@ -107,7 +108,21 @@ from backend.algorithms.market_context import build as build_market_context
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
 from backend.services.trading_session import (
     active_capital_fraction,
+    active_session,
     active_session_leverage,
+)
+
+# THE SCOPE RULES LIVE IN `services/trade_scope`, NOT HERE.
+#
+# They used to be defined in this module, which meant they applied to the GRAPH
+# path only — and `agents/supervisor_agent` is a second path that can submit a
+# trade without passing through this node at all. It traded 4,080 times in five
+# days with none of these checks. A limit that only one of two execution paths
+# respects is not a limit, so the definition moved to a place both can import.
+from backend.services.trade_scope import (
+    max_concurrent_positions,
+    normalise_symbol as _norm_symbol,
+    session_only_trading,
 )
 
 
@@ -288,6 +303,126 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             )
         }
 
+    # ---- ONE POSITION AT A TIME ------------------------------------------
+    #
+    # MEASURED FROM THE LIVE LEDGER, 2026-09-12 to 09-16: 3,766 fills, up to
+    # THREE symbols held simultaneously, 33 opens in a single hour, and 2,253
+    # closed trades that netted +4.15 after paying 288.05 in fees. The agent was
+    # not short of opportunities; it was spending its entire gross edge on
+    # transaction costs by taking every one of them.
+    #
+    # `agents/portfolio_agent.MAX_OPEN_POSITIONS = 3` LOOKED like this limit and
+    # is not. It counts entries in `api/agents._tasks`, which is the task-runner's
+    # registry — not the book, and not what the graph path writes to. Nothing
+    # enforced concurrency on this path at all; the observed ceiling of three was
+    # simply three watched symbols holding one position each.
+    #
+    # Counted from `portfolio.open_positions` — the same live book the margin and
+    # capital-pool checks below already read — rather than by importing the
+    # position monitor, so this node gains no new dependency and stays a pure
+    # reader of state.
+    #
+    # PLACED WITH THE INSTRUMENT GATE, for the identical reason: a refusal that is
+    # a property of the PORTFOLIO must not be reachable by making the trade
+    # smaller or moving its stop. And AFTER the EXIT branch, because invariant 4
+    # is absolute — holding one position must never make it harder to close it.
+    held = [
+        p for p in (portfolio.open_positions if portfolio else []) or []
+        if abs(float(p.get("qty") or 0.0)) > 0
+    ]
+    limit = max_concurrent_positions()
+    if len(held) >= limit:
+        symbols_held = ", ".join(str(p.get("symbol")) for p in held[:5]) or "unknown"
+        return {
+            "risk_assessment": RiskAssessment(
+                approved=False,
+                rejection_reasons=[
+                    f"already holding {len(held)} position(s) ({symbols_held}) and the "
+                    f"limit is {limit}. No new position opens until "
+                    f"one closes."
+                ],
+                checks={
+                    "OnePositionAtATime": {
+                        "status": "reject",
+                        "detail": (
+                            f"{len(held)}/{limit} concurrent positions "
+                            f"in use. Concentrating on one trade at a time is what makes "
+                            f"the session's capital and daily target mean anything — "
+                            f"three simultaneous positions each sized against the same "
+                            f"pool is three times the intended exposure."
+                        ),
+                    }
+                },
+            )
+        }
+
+    # ---- SESSION SCOPE ----------------------------------------------------
+    #
+    # THE OPERATOR DID NOT START A SESSION AND THE AGENT TRADED FOR FIVE DAYS.
+    #
+    # That is not a malfunction — `GRAPH_EXECUTION_ENABLED=true` subscribes the
+    # execution service to every plan the trigger layer produces, and a session is
+    # only ONE of the things that can drive a graph run. But it means the coin,
+    # the capital fraction, the leverage, the daily target and the target equity
+    # the operator sets when starting a session governed NOTHING for those runs:
+    # the trigger path opened BTC, ETH and SOL on its own judgement, including 856
+    # closes on BTC, which is on the untradeable list.
+    #
+    # With `SESSION_ONLY_TRADING` on (the default), an ENTRY requires an active
+    # session and must be in that session's instrument. The agent still watches,
+    # reasons, records decisions and — critically — still CLOSES, because the EXIT
+    # branch above returns before reaching here. What it will not do is open a
+    # position nobody asked for.
+    #
+    # Set `SESSION_ONLY_TRADING=false` to restore the always-on autonomous
+    # behaviour. It is a deliberate choice between "the agent trades whenever it
+    # sees something" and "the agent trades what I told it to", and the second is
+    # what a start/target/daily-target session is FOR.
+    session = active_session()
+    if session_only_trading():
+        if session is None:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        "no trading session is running, and SESSION_ONLY_TRADING is on, "
+                        "so no new position may be opened. Start a session to trade."
+                    ],
+                    checks={
+                        "SessionScope": {
+                            "status": "reject",
+                            "detail": (
+                                "Entries are gated on an operator session so the coin, "
+                                "capital, leverage and targets that session defines "
+                                "actually govern what trades. Exits are unaffected."
+                            ),
+                        }
+                    },
+                )
+            }
+        if _norm_symbol(session.symbol) != _norm_symbol(symbol):
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        f"the running session is on {session.symbol}, not {symbol}. "
+                        f"A session trades one instrument."
+                    ],
+                    checks={
+                        "SessionScope": {
+                            "status": "reject",
+                            "detail": (
+                                f"Session {session.id} is working {session.symbol} from "
+                                f"{session.start_equity:.2f} toward "
+                                f"{session.target_equity:.2f}. Opening {symbol} would "
+                                f"spend that capital on an instrument the operator did "
+                                f"not choose."
+                            ),
+                        }
+                    },
+                )
+            }
+
     # ---- HIGHER-TIMEFRAME ALIGNMENT --------------------------------------
     #
     # 1h and 4h candles have been fetched on every run since the beginning, and
@@ -455,6 +590,38 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     ceiling = max_leverage_ceiling(tab)
     session_leverage = active_session_leverage()
     leverage = max(1, min(session_leverage or GRAPH_REQUESTED_LEVERAGE, ceiling))
+
+    # ---- THE STOP MUST FIRE BEFORE LIQUIDATION DOES ------------------------
+    #
+    # NOTHING IN THIS SYSTEM COMPARED THE TWO. The stop is 2.5 x ATR and the
+    # liquidation distance is a function of leverage, so at high enough leverage
+    # — or wide enough volatility — the venue liquidates the position BEFORE its
+    # stop is touched. Every protective mechanism here is built on that stop: the
+    # resting venue order, the tick monitor, the trailing stop, the partial
+    # take-profit. All of them are bypassed at once, the loss becomes the ENTIRE
+    # margin rather than the risk sized for, and at a 100% capital allocation
+    # that margin is the whole account.
+    #
+    # The volatility regime gate does not catch this. It ranks volatility by
+    # PERCENTILE, so a market that has been violent for a while reads NORMAL
+    # against its own recent history while its ATR is objectively large.
+    #
+    # A CAP THAT CAN ONLY LOWER, combined by min() exactly like the absolute
+    # ceiling above (invariant 2). It never raises the operator's chosen leverage.
+    # Reported in the checks rather than applied silently: an operator who chose
+    # 10x and got 4x must be able to see that it happened and why.
+    liq_capped = leverage
+    if thesis is not None and thesis.entry_price and thesis.stop_loss:
+        stop_fraction = abs(thesis.entry_price - thesis.stop_loss) / thesis.entry_price
+        liq_capped = liquidation_safe_leverage(stop_fraction, leverage)
+        if liq_capped < leverage:
+            logger.warning(
+                "Leverage reduced %dx -> %dx on %s: a %.2f%% stop would sit outside the "
+                "liquidation distance at %dx, so the position would be liquidated before "
+                "its stop fired.",
+                leverage, liq_capped, symbol, stop_fraction * 100, leverage,
+            )
+        leverage = liq_capped
 
     # ---- SIZING ------------------------------------------------------------
     #

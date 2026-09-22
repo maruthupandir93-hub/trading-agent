@@ -877,11 +877,41 @@ ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS initial_risk numeric;
 -- DISCRETE settlements crossed rather than pro-rated by hours held.
 ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS funding_rate numeric;
 
+-- The ADVERSE extreme reached while this position was open, the mirror of
+-- peak_price. Persisted so a restart does not reset it to the entry and quietly
+-- understate how far the position went against us.
+ALTER TABLE monitored_positions ADD COLUMN IF NOT EXISTS worst_price numeric;
+
 -- Funding paid (positive) or received (negative) over the life of the trade.
 -- Signed, because a SHORT is CREDITED when the rate is positive and that income
 -- is real — a model that only ever subtracts would understate exactly the trades
 -- this system takes most.
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS funding numeric;
+
+-- EXCURSION, IN R. The two numbers a closed trade log cannot otherwise answer.
+--
+-- A trade row records entry and exit. It does NOT record the PATH between them,
+-- and without the path whole classes of question are unanswerable from history:
+--
+--   mfe_r  maximum FAVOURABLE excursion — the best unrealised profit reached,
+--          in units of initial risk. This is what decides whether a trailing
+--          stop would have captured more than a fixed target or a break-even
+--          stop. Replaying a trail against five days of real fills was
+--          impossible precisely because this was not stored: a trailed stop sits
+--          at `peak - 1R`, so its outcome depends entirely on where the peak was.
+--
+--   mae_r  maximum ADVERSE excursion — the worst unrealised loss survived. This
+--          separates a stop that was genuinely hit from one that was merely too
+--          tight. A trade that dipped to -0.9R and then reached its target is
+--          evidence the stop was nearly right; many of them is evidence it is
+--          too tight and is converting winners into losers.
+--
+-- Both are NULL when `initial_risk` is unknown (a position opened before that
+-- column existed, or one with no computable stop). NULL means "not measured" and
+-- must not be read as zero — a zero MFE is a trade that never went a single tick
+-- in profit, which is a completely different and much rarer fact.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS mfe_r numeric;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS mae_r numeric;
 
 
 -- ---------------------------------------------------------------------

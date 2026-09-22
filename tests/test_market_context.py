@@ -332,6 +332,13 @@ def _bear(n):
 
 
 def test_the_counter_trend_rejection_returns_instead_of_crashing(monkeypatch):
+    # The scope gates (session-only, one-position-at-a-time) run BEFORE the HTF
+    # check and would refuse this state first, so the counter-trend branch — the
+    # one that used to raise a NameError and is the whole point of this test —
+    # would never be reached. Turned off here so the test drives what it names.
+    monkeypatch.setenv("SESSION_ONLY_TRADING", "false")
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "99")
+
     from backend.graphs.nodes.risk_gateway import gate
     from backend.graphs.state import (
         MarketSnapshot, PortfolioStateSnapshot, TechnicalAnalysis,
