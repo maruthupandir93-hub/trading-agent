@@ -28,3 +28,16 @@ Thumbs.db
 
 # Local Oracle VM monitor config (personal OCIDs + ssh key)
 scripts/oracle_vm_config.json
+
+# RUNTIME STATE, not source. These were TRACKED, and the app rewrites them on
+# every run — so `git pull` on the server aborted with "Your local changes to the
+# following files would be overwritten by merge" on every single deploy:
+#
+#     backend/data/research_report.json
+#     backend/data/working_memory.json
+#
+# All three are created lazily by their own stores (`working_memory`, `ai_memory`,
+# `research_agent` each do `if not os.path.exists(...)` then write defaults), so
+# untracking them costs a fresh clone nothing. `/.data` above is ignored for the
+# same reason; this directory was simply missed.
+/backend/data/
