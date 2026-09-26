@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import logging
+import os
 
 from backend.algorithms.risk import half_kelly_criterion, volatility_adjusted_size
 
@@ -68,11 +69,51 @@ MAX_DAILY_LOSS_PCT = 5.0
 # silently permit three times the market exposure.
 MAX_PORTFOLIO_EXPOSURE_PCT = 100.0
 
-# Required margin must be covered with room to spare. Using the last available
-# dollar of margin means any adverse tick triggers a margin call before the
-# stop-loss is reached — the position would be liquidated at the exchange's price
-# rather than exited at ours, which makes the computed stop meaningless.
-MARGIN_BUFFER_MULTIPLIER = 1.2
+# Required margin must be covered with room to spare, in the margin CHECK.
+#
+# THIS IS NO LONGER APPLIED TO SIZING — see `risk_gateway`'s capital-pool block.
+# It used to haircut the session's allocation, so choosing "100%" deployed only
+# 83.3% of the balance and the operator was never told why. The operator's
+# report was exact: "I chose 100% allocation but it only takes some amount."
+#
+# The original reasoning — that spending the last dollar of margin means an
+# adverse tick triggers a margin call before the stop is reached — was sound when
+# it was written and is now handled better, in two places that address it
+# directly rather than by withholding capital:
+#
+#   `liquidation_safe_leverage`  caps leverage so the STOP always sits inside the
+#                                liquidation distance. That is the actual
+#                                guarantee the haircut was approximating.
+#   `MARGIN_MODE=isolated`       bounds a position's loss to its own margin, so
+#                                free cash elsewhere is not what protects it.
+#
+# It still applies HERE, to `check_margin`, where it does what it says: refuse a
+# trade whose required margin has no headroom at all. Sizing asks for a share of
+# capital; this check asks whether that share is actually there.
+# 1.0 — the check verifies the margin IS THERE, and nothing more.
+#
+# It was 1.2, demanding 20% headroom on top of the required margin. Once sizing
+# began honouring a 100% allocation literally, that made the gateway reject its
+# own size: it deployed ~$9,992 of a $10,000 account and then refused the trade
+# for needing $11,990. Two halves of one module disagreeing about what "all of
+# it" means.
+#
+# ANY buffer above 1.0 is incompatible with a 100% allocation, by construction —
+# at full allocation required margin equals free margin, so a multiplier greater
+# than one always rejects. The choice is therefore between honouring the control
+# and keeping the headroom; it cannot be both.
+#
+# WHAT THE HEADROOM WAS FOR, AND WHERE IT WENT:
+#   entry fees      -> sizing now reserves them explicitly (`fee_reserve`)
+#   liquidation     -> `liquidation_safe_leverage` caps leverage until the stop
+#                      provably sits inside the liquidation distance, which is
+#                      the guarantee 1.2x was a rough proxy for
+#   loss isolation  -> `MARGIN_MODE=isolated` bounds a position to its own margin
+#
+# Each of those is now handled where it actually belongs, by something that
+# measures the risk rather than withholding a fifth of the capital and hoping.
+# Configurable for an operator who wants the old conservatism back.
+MARGIN_BUFFER_MULTIPLIER = float(os.getenv("MARGIN_BUFFER_MULTIPLIER") or 1.0)
 
 class RiskValidation(BaseModel):
     approved: bool

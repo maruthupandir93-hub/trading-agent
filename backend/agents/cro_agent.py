@@ -1,6 +1,7 @@
 import logging
+import os
 import uuid
-from typing import List
+from typing import List, Optional
 
 from backend.agents.supervisor_agent import SupervisorAgent
 from backend.core.agent_base import BaseAgent
@@ -13,16 +14,91 @@ logger = logging.getLogger(__name__)
 
 # Spec Section 18: "The 99% 24-hour VaR of the entire portfolio must never
 # exceed 5% of total equity."
-MAX_PORTFOLIO_VAR_FRACTION = 0.05
+#
+# READ AT CALL TIME so the operator can raise it knowingly without a restart —
+# and DEFAULTED TO THE SPEC'S 0.05, so it is unchanged unless someone changes it
+# on purpose. It is the one number here that encodes a POLICY rather than a
+# measurement, and raising it is the operator's decision, not this module's.
+def max_portfolio_var_fraction() -> float:
+    raw = os.getenv("MAX_PORTFOLIO_VAR_FRACTION")
+    if raw is None or not raw.strip():
+        return 0.05
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("MAX_PORTFOLIO_VAR_FRACTION=%r is not a number; using 0.05.", raw)
+        return 0.05
+    if not 0.0 < value <= 1.0:
+        logger.warning("MAX_PORTFOLIO_VAR_FRACTION=%r is out of range; using 0.05.", raw)
+        return 0.05
+    return value
 
-# The adverse move used as the worst case when converting notional exposure
-# into a VaR figure. 10% in 24h is a routine daily range for crypto futures,
-# not an extreme — it is intended as a conservative floor, not a tail
-# estimate. A real 99% VaR would be computed from the return distribution;
-# this is a deliberate, documented approximation, and calling it "VaR" while
-# it remains one is the reason this constant is named and commented rather
-# than inlined.
+
+# Kept for the case where the loss is genuinely unbounded by a stop. See
+# `_adverse_move_fraction` for why this is no longer applied to every trade.
 WORST_CASE_ADVERSE_MOVE = 0.10
+
+# How far price is assumed to travel BEYOND the stop before the close fills.
+# A stop is not a guarantee: it is a trigger, and a gap or a thin book fills it
+# worse. 1.5x the stop distance is a deliberate, documented allowance for that,
+# not a measurement — the same class of honest approximation as the constant
+# above, and named rather than inlined for the same reason.
+STOP_SLIPPAGE_MULTIPLIER = 1.5
+
+
+def _adverse_move_fraction(entry: float, stop: Optional[float]):
+    """How far this position can move against us, as a fraction of entry.
+
+    WHY THIS IS NOT A FLAT 10% ANY MORE, AND WHY THAT WAS A MEASUREMENT ERROR
+    ========================================================================
+    The check used `notional x 0.10` for every trade. That is the right shape for
+    a position with NO stop, and this system has no such positions: CLAUDE.md
+    invariant 3 makes a computed stop mandatory, the Risk Gateway hard-rejects
+    without one, and the constraint immediately above this one re-verifies that
+    the stop is on the correct side of entry. The loss a stopped position can
+    take is the STOP DISTANCE plus slippage, not 10% of notional.
+
+    Using 10% regardless capped notional at a flat `0.05 / 0.10 = 0.5x equity`,
+    whatever the stop and whatever the leverage. That silently forbade the
+    broker-style sizing this system documents and the operator configured:
+
+        25% allocation at 3x  ->  0.75x equity notional  ->  REJECTED
+       100% allocation at 3x  ->  3.00x equity notional  ->  REJECTED
+
+    Measured live on 2026-09-25 with a real plan:
+
+        Global VaR limit exceeded: a 10% adverse move on $18815.50 notional is
+        $1881.55, above the 5% of $25088.49 equity limit ($1254.42)
+
+    while the stop on that same trade sat 1.71% away - a real worst case of
+    about $483, a quarter of what the check asserted. Two gates over one
+    quantity disagreed: the Risk Gateway sized the trade and the CRO refused it,
+    so the operator's allocation was decided by a limit nobody could see.
+
+    THIS IS NOT A LOOSENING OF THE POLICY. The 5% VaR limit is untouched and
+    still enforced against equity. What changes is that the number compared
+    against it is derived from the trade's OWN bounded loss rather than from a
+    constant that ignores the stop the whole system is built to guarantee. A
+    WIDER stop now consumes more of the limit, which is the correct direction:
+    it is genuinely more risk.
+
+    Falls back to the flat worst case when no usable stop is present, so an
+    unbounded position is still judged as unbounded.
+    """
+    if stop is None or stop <= 0 or entry <= 0:
+        return WORST_CASE_ADVERSE_MOVE, "no usable stop: flat worst-case move"
+    distance = abs(entry - stop) / entry
+    if distance <= 0:
+        return WORST_CASE_ADVERSE_MOVE, "stop is at entry: flat worst-case move"
+    # Never judged as riskier than an unstopped position would be. A stop wider
+    # than the worst case adds nothing to the estimate, because beyond that point
+    # the flat assumption is already the more conservative of the two.
+    move = min(distance * STOP_SLIPPAGE_MULTIPLIER, WORST_CASE_ADVERSE_MOVE)
+    return move, (
+        "stop {:.2f}% away x{:.1f} slippage allowance".format(
+            distance * 100, STOP_SLIPPAGE_MULTIPLIER
+        )
+    )
 
 class CROAgent(BaseAgent):
     @property
@@ -218,17 +294,29 @@ class CROAgent(BaseAgent):
             return
 
         notional = tar.requested_size * entry
-        implied_var = notional * WORST_CASE_ADVERSE_MOVE
-        var_limit = total_equity * MAX_PORTFOLIO_VAR_FRACTION
+        adverse_move, move_basis = _adverse_move_fraction(entry, tar.stop_loss)
+        var_fraction = max_portfolio_var_fraction()
+        implied_var = notional * adverse_move
+        var_limit = total_equity * var_fraction
 
         if implied_var > var_limit:
+            # THE REFUSAL SAYS WHAT WOULD FIT. A limit that only says "no" leaves
+            # the operator guessing at an allocation, and that guess is what
+            # produced "I chose 100% allocation but it only takes some amount":
+            # the size was being decided by a gate they could not see. The
+            # affordable notional is arithmetic over numbers already in hand, so
+            # stating it invents nothing.
+            affordable = var_limit / adverse_move if adverse_move > 0 else 0.0
             await self._reject(
                 tar,
                 "GLOBAL_VAR_LIMIT",
-                f"Global VaR limit exceeded: a {WORST_CASE_ADVERSE_MOVE * 100:.0f}% adverse move on "
-                f"${notional:.2f} notional is ${implied_var:.2f}, above the "
-                f"{MAX_PORTFOLIO_VAR_FRACTION * 100:.0f}% of ${total_equity:.2f} equity limit "
-                f"(${var_limit:.2f}).",
+                f"Global VaR limit exceeded: a {adverse_move * 100:.2f}% adverse move "
+                f"({move_basis}) on ${notional:.2f} notional is ${implied_var:.2f}, above the "
+                f"{var_fraction * 100:.1f}% of ${total_equity:.2f} equity limit "
+                f"(${var_limit:.2f}). The largest notional that fits is "
+                f"${affordable:.2f} ({affordable / total_equity:.2f}x equity) - reduce the "
+                f"session's allocation or leverage, tighten the stop, or raise "
+                f"MAX_PORTFOLIO_VAR_FRACTION if you accept the larger loss per stop-out.",
             )
             return
 
@@ -242,8 +330,8 @@ class CROAgent(BaseAgent):
         rationale = (
             f"Approved: leverage {tar.requested_leverage}x within {ceiling}x ceiling; "
             f"stop-loss {tar.stop_loss:.6g} verified on the correct side of entry {entry:.6g}; "
-            f"implied VaR ${implied_var:.2f} within ${var_limit:.2f} "
-            f"({MAX_PORTFOLIO_VAR_FRACTION * 100:.0f}% of ${total_equity:.2f} equity). "
+            f"implied VaR ${implied_var:.2f} ({move_basis}) within ${var_limit:.2f} "
+            f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity). "
             f"Correlation caps and the drawdown killswitch are not yet implemented and were NOT checked."
         )
         logger.info(f"CRO APPROVED {tar.tar_id}")

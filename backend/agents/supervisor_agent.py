@@ -360,6 +360,112 @@ class SupervisorAgent(BaseAgent):
             await self._refuse(symbol, "system is paused or emergency-stopped by the operator")
             return
 
+        # ---- ONE ORIGINATOR OF ENTRIES, NOT TWO -------------------------------
+        #
+        # THE OPERATOR'S COMPLAINT, AND THE MEASUREMENT THAT CONFIRMED IT.
+        #
+        # "in the trade history page ... each trade is market data and directly
+        # execute, all agent doesn't working together". That is literally what the
+        # ledger showed. Read live from Postgres:
+        #
+        #     23 trade rows. strategy, run_id AND entry_context NULL on EVERY one.
+        #     5 of the 12 opening rows join `decisions` on the TAR id, and every
+        #     one of those rationales begins "Debate concluded LONG at ...".
+        #
+        # Those are THIS path's rows. It reaches a trade from a four-to-five leg
+        # technical debate (Structure, Momentum, Trend, Volume, StrategyEnsemble)
+        # and submits. It never runs the 24-node graph, so no trade it opens has:
+        #
+        #     the 9-specialist panel      (orderflow, liquidity, news, funding,
+        #                                  portfolio, risk, prediction, event_risk,
+        #                                  market — coverage-scaled and
+        #                                  constraint-dampened)
+        #     regime detection + strategy scoring   -> `trades.strategy`
+        #     the Risk Gateway's entry snapshot     -> `trades.entry_context`
+        #     the run trace link                    -> `trades.run_id`
+        #
+        # Which is exactly why the trade-detail journey renders Market Data, then
+        # an unknown middle, then Execution: the middle was never recorded because
+        # the nodes that record it never ran.
+        #
+        # AND THE TWO PATHS DISAGREE, MEASURABLY. On one live SOL/USDT run taken
+        # while writing this, the full panel reached NEUTRAL at 0.067 confidence
+        # (the portfolio constraint binding at 0.40 because a position was already
+        # open) and the Supervisor node returned DO_NOT_TRADE. This path's own
+        # debate put the same symbol at 0.23-0.24 and traded it. The shortcut is
+        # not a faster route to the same answer; it is a different, less informed
+        # answer that wins because it is cheaper — the graph takes ~5s to reach its
+        # gateway and this path takes milliseconds, so it claims the single
+        # allowed position first and the graph's run is then refused for holding
+        # one.
+        #
+        # SO: WHEN THE GRAPH PATH IS ENABLED, IT IS THE ONLY ORIGINATOR OF
+        # ENTRIES. This is a refusal, not a silent return, so the reason lands in
+        # `decisions` and "why did this not trade?" stays answerable.
+        #
+        # EXITS ARE UNTOUCHED — invariant 4. `_consider_trade` only ever opens;
+        # closes belong to `PositionMonitorAgent` and never come through here.
+        #
+        # REVERSIBLE IN ONE LINE: GRAPH_EXECUTION_ENABLED=false hands this path
+        # back its old role, and it keeps every gate it has. Read at call time for
+        # the `simulation_mode` reason — a frozen import would mean an operator
+        # flipping the flag saw no change until a restart.
+        from backend.services.execution_service import execution_enabled
+
+        if execution_enabled():
+            await self._refuse(
+                symbol,
+                "entries are originated by the 24-node analysis graph while "
+                "GRAPH_EXECUTION_ENABLED=true, so this event-driven path does not "
+                "submit its own. It reaches a trade from the debate alone, without "
+                "the specialist panel, regime detection, strategy scoring or the "
+                "Risk Gateway's entry snapshot — so a trade it opened carried no "
+                "strategy, no run_id and no entry context, and the learning loop "
+                "and the trade-journey view both had nothing to read",
+            )
+            return
+
+        # --- direction: from the debate, never assumed ------------------
+        #
+        # LOADED BEFORE THE SCOPE GATE, AND THE ORDER IS LOAD-BEARING.
+        #
+        # The scope gate used to sit ABOVE this line and pass `debate` to
+        # `self._refuse(...)`. Python makes `debate` a local of this whole method
+        # because it is assigned here, so every one of those refusals raised
+        #
+        #     UnboundLocalError: cannot access local variable 'debate' where it
+        #     is not associated with a value
+        #
+        # rather than recording a refusal. That is why the live `decisions` table
+        # holds 1,995 rejections and NOT ONE of them is a scope rejection: the
+        # gate stopped the trade by crashing, so no row was ever written and the
+        # operator had no way to see the limit working. Proven at runtime before
+        # this was moved, not inferred from reading.
+        debate = self._debates.get(symbol)
+        if debate is None:
+            await self._refuse(
+                symbol,
+                "no debate conclusion available for this symbol, so trade direction is unknown "
+                "(previously this defaulted to LONG)",
+                debate,
+            )
+            return
+
+        age = (datetime.datetime.utcnow() - debate["ts"].replace(tzinfo=None)).total_seconds()
+        if age > DEBATE_STALENESS_SECONDS:
+            await self._refuse(
+                symbol,
+                f"the only debate conclusion for this symbol is {age:.0f}s old "
+                f"(limit {DEBATE_STALENESS_SECONDS}s)",
+                debate,
+            )
+            return
+
+        direction = debate["direction"]
+        if direction not in ("LONG", "SHORT"):
+            await self._refuse(symbol, f"debate concluded {direction} — no directional trade to make", debate)
+            return
+
         # ---- SCOPE: may we open anything at all, in this instrument, now? -----
         #
         # THIS PATH HAD NONE OF THESE CHECKS, AND IT IS THE PATH THAT TRADED.
@@ -395,32 +501,6 @@ class SupervisorAgent(BaseAgent):
         scope_refusal = entry_refusal(symbol, held)
         if scope_refusal is not None:
             await self._refuse(symbol, scope_refusal, debate)
-            return
-
-        # --- direction: from the debate, never assumed ------------------
-        debate = self._debates.get(symbol)
-        if debate is None:
-            await self._refuse(
-                symbol,
-                "no debate conclusion available for this symbol, so trade direction is unknown "
-                "(previously this defaulted to LONG)",
-                debate,
-            )
-            return
-
-        age = (datetime.datetime.utcnow() - debate["ts"].replace(tzinfo=None)).total_seconds()
-        if age > DEBATE_STALENESS_SECONDS:
-            await self._refuse(
-                symbol,
-                f"the only debate conclusion for this symbol is {age:.0f}s old "
-                f"(limit {DEBATE_STALENESS_SECONDS}s)",
-                debate,
-            )
-            return
-
-        direction = debate["direction"]
-        if direction not in ("LONG", "SHORT"):
-            await self._refuse(symbol, f"debate concluded {direction} — no directional trade to make", debate)
             return
             
         side = "buy" if direction == "LONG" else "sell"
@@ -552,7 +632,13 @@ class SupervisorAgent(BaseAgent):
             return
 
         rationale = (
-            f"Debate concluded {direction} at {debate['confidence']:.0f}% confidence "
+            # x100: `score_debate` emits a 0-1 FRACTION and this line renders a
+            # PERCENT. `:.0f` on 0.23 is "0", so every rationale this path has
+            # ever written says "at 0% confidence" — including the five that
+            # became live trades. A confidence of zero is also exactly what a
+            # broken gate would look like, so the one line an operator reads to
+            # audit a trade asserted the opposite of what the gate measured.
+            f"Debate concluded {direction} at {debate['confidence'] * 100:.0f}% confidence "
             f"({', '.join(debate['participants']) or 'no participants recorded'}); "
             f"stress tests passed; stop at {sltp['stopLoss']:.6g} "
             f"({abs(price - sltp['stopLoss']) / price * 100:.2f}% away). "
@@ -604,6 +690,13 @@ class SupervisorAgent(BaseAgent):
             price=price,
             outcome="pending-approval",
             rationale=rationale,
+            # PASSED HERE TOO, AND THEY WERE NOT. `_refuse` fills these on every
+            # rejection, so the live table had a confidence on all 1,995 refusals
+            # and NULL on all 5 decisions that became trades — the analysis columns
+            # were populated on exactly the rows nobody needs them for. Measured
+            # before this line existed.
+            debate_confidence_pct=_debate_confidence(debate),
+            debate_recommendation=_debate_direction(debate),
         )
         await self.publish(tar)
 
@@ -617,9 +710,15 @@ class SupervisorAgent(BaseAgent):
         estimate is optimistic.
         """
         try:
-            from backend.services.ai_memory import get_memory_stats
+            from backend.config import settings
+            from backend.services.ai_memory import stats_for_tab
 
-            stats = (get_memory_stats() or {}).get("global_stats") or {}
+            # THE BOOK BEING TRADED, not both books added together. Paper fills
+            # are simulated against an observed price with no real slippage and
+            # no partial fills, so a paper win rate is optimistic relative to a
+            # real one — and this number goes straight into Kelly, which is at
+            # its most dangerous when its probability estimate is optimistic.
+            stats = stats_for_tab(settings.execution_tab) or {}
         except Exception:
             return None
 

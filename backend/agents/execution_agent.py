@@ -572,7 +572,8 @@ class ExecutionAgent(BaseAgent):
         )
 
     async def close_position(
-        self, symbol: str, entry_side: str, qty: float, tab: str, reason: str
+        self, symbol: str, entry_side: str, qty: float, tab: str, reason: str,
+        observed_price: Optional[float] = None,
     ) -> Optional[float]:
         """Close an open position. Returns the fill price, or None on failure.
 
@@ -593,12 +594,50 @@ class ExecutionAgent(BaseAgent):
         No TAR is required. Requiring one would make an exit dependent on the
         Supervisor and CRO being healthy and unpaused, which is precisely when
         an exit matters most.
+
+        `observed_price` IS THE PRICE THE CALLER DECIDED ON, and passing it fixes
+        a real, ordering-dependent bug on the money path.
+
+        A simulated close used to fill at `self._last_prices[symbol]` — this
+        agent's own cache, fed by TICK_RECEIVED. The position monitor decides on
+        a close from the tick IT received, and both agents subscribe to the same
+        event, so whether the two prices agree depends entirely on which agent
+        the bus reaches first — which is the order they were constructed in
+        `main.py`. CLAUDE.md already says of that ordering: *"Do NOT fix a future
+        instance of this by reordering construction in main.py. That works until
+        the next reorder and no test can see it."*
+
+        Measured, with the monitor constructed first:
+
+            monitor decided profit-target at 122.0587 (a +0.667% move)
+            close filled at 121.25 — the entry price, the executor's stale tick
+            booked P&L -18.80 on a WINNING move, almost exactly the round-trip fee
+
+        A target that fires and books a loss the size of the fees is
+        indistinguishable from the scratch exits this system spent weeks removing.
+
+        REAL FILLS ARE UNAFFECTED. Below, a live close is a market order and its
+        price comes back from the venue; `observed_price` is not consulted, and
+        the "realized P&L from the ACTUAL fill, not the trigger price" rule in
+        `position_monitor._close` still holds there. For a SIMULATED fill there
+        is no separate reality to defer to: the observed price at the moment of
+        the decision IS the honest fill, and it is the one the decision was made
+        against.
+
+        Falls back to the cache when not supplied, so every existing caller keeps
+        working, and refuses when neither is available rather than inventing a
+        price (invariant 6).
         """
         exit_side = "sell" if entry_side == "buy" else "buy"
         exchange_name = "simulated_exchange" if self.simulation_mode else "binance_futures"
 
         if self.simulation_mode:
-            fill_price = self._last_prices.get(symbol, 0.0)
+            # The caller's observed price wins. See the note above: the cache is
+            # a beat behind whenever the bus reaches this agent after the one
+            # that decided to close.
+            fill_price = observed_price if (observed_price or 0) > 0 else 0.0
+            if fill_price <= 0:
+                fill_price = self._last_prices.get(symbol, 0.0)
             if fill_price <= 0:
                 logger.error(
                     "Cannot simulate closing %s: no observed price. The position remains OPEN.",

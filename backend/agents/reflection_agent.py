@@ -207,6 +207,34 @@ class ReflectionAgent(BaseAgent):
         anything yet.
         """
         if event.event_type == "POSITION_CLOSED" and isinstance(event, PositionClosedEvent):
+            # COUNT IT BEFORE REASONING ABOUT IT.
+            #
+            # `ai_memory.global_stats` is what `algorithms/probability`,
+            # `ConfidenceAgent` and `supervisor_agent._measured_win_rate` all read
+            # to answer "how often has this system been right?". Its only writer
+            # was `trading_agent_tick`, a legacy path the autonomous system never
+            # runs — so on 2026-09-25 the file read total_trades 0 while Postgres
+            # held 11 closed trades, and every one of those three readers reported
+            # "unmeasurable" indefinitely.
+            #
+            # Here rather than in `position_monitor` because this agent is already
+            # the POSITION_CLOSED subscriber that owns learning, and the close path
+            # itself must not grow a synchronous file write.
+            #
+            # BEFORE the reflection, not after: the reflection makes an LLM call
+            # that can fail, and the count is a fact that must not depend on a
+            # model answering. `record_closed_trade` never raises.
+            from backend.services.ai_memory import record_closed_trade
+
+            await record_closed_trade(
+                symbol=event.symbol,
+                side=event.side,
+                pnl=event.realized_pnl,
+                strategy=getattr(event, "strategy", None),
+                # WHICH BOOK — the daily-loss gate and Kelly sizing both read
+                # this back, and neither may count the other book's outcomes.
+                tab=getattr(event, "tab", "paper"),
+            )
             await self._reflect_on_close(event)
             return
 

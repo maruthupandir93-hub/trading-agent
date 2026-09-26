@@ -225,6 +225,20 @@ export type TradeLogEntry = {
   // real-tab manual ledger. Lets a real-tab row be traced back to the
   // exact exchange order that produced it.
   exchangeOrderId?: string;
+  // WHICH STRATEGY PROFILE CHOSE THIS TRADE, and WHICH 24-node run decided it.
+  //
+  // Both columns have existed in `trades` and been written by the execution
+  // agent for some time; NOTHING SURFACED THEM. `tradeStore.server.ts`'s SELECT
+  // did not name them, so they could not reach this type, and the trade-detail
+  // journey had no way to tell a trade the full graph produced from one a
+  // shortcut path produced — which is exactly the distinction the operator was
+  // asking about when they said "all the agents don't work together".
+  //
+  // Absent, never defaulted: a trade genuinely taken without a strategy profile
+  // (a human's click, or the event path) must read as "none was recorded", not
+  // as one that was.
+  strategy?: string;
+  runId?: string;
 };
 
 export type Config = {

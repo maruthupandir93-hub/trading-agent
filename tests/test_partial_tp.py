@@ -50,11 +50,20 @@ class FakeExecution:
 
 
 @pytest.fixture
-def monitor(bus):
+def monitor(bus, monkeypatch):
     from backend.agents.position_monitor import PositionMonitorAgent
 
     agent = PositionMonitorAgent()
     agent.rebind_bus(bus)
+    # THE FIXED PROFIT TARGET IS PINNED OFF. It defaults to 2% now and it
+    # deliberately BYPASSES the scale-out: a target closes the whole position, so
+    # no runner is left to scale out of — which is the point, since the runner
+    # sitting at break-even is what closed 53.4% of this system's trades at ~0.00.
+    #
+    # This file tests the scale-out itself, so it opts out of the thing that
+    # replaces it. Leaving it on would make every test here assert the target's
+    # behaviour under the scale-out's name.
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
     return agent
 
 

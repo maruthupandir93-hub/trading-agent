@@ -255,11 +255,30 @@ class MessageBus:
                 # the others from seeing the event. Logged with the callback
                 # name because "Error executing callback" alone gave no way
                 # to tell WHICH subscriber failed.
+                # exc_info=True, AND THAT MATTERS MORE THAN IT LOOKS.
+                #
+                # Without the traceback this line reports WHICH subscriber failed
+                # and WHAT the exception said, but not WHERE. A NameError raised
+                # on the CRO's approval path printed
+                #
+                #     Error in subscriber CROAgent.handle_event for topic
+                #     TAR_SUBMITTED: name 'MAX_PORTFOLIO_VAR_FRACTION' is not defined
+                #
+                # and an approved trade simply never appeared — no fill, no
+                # rejection, no stack, nothing between TAR_SUBMITTED and silence.
+                # This system has hit that exact class of bug three times
+                # (`supervisor_agent`'s sizing dict, `risk_gateway`'s
+                # counter-trend branch, and this one), and every time the cost
+                # was finding the line, not reading the message.
+                #
+                # It cannot become noise: this only fires when a subscriber
+                # raises, which on a healthy system is never.
                 logger.error(
                     "Error in subscriber %s for topic %s: %s",
                     getattr(callback, "__qualname__", repr(callback)),
                     topic,
                     e,
+                    exc_info=True,
                 )
 
 _bus = MessageBus()

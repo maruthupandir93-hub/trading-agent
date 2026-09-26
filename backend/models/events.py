@@ -174,7 +174,12 @@ class TarSubmittedEvent(BaseEvent):
     direction: Literal['LONG', 'SHORT']
     requested_size: float
     requested_leverage: int
-    strategy: str
+    # `strategy: str` was declared HERE as well as below. Pydantic v2 keeps the
+    # LAST declaration, so the required field was silently replaced by the
+    # optional one further down and the duplicate did nothing except make the
+    # model look like it required a strategy when it did not. Removed rather than
+    # reconciled: `execution_service` passes a real name and `supervisor_agent`
+    # deliberately passes None, so optional is the correct contract.
     supervisor_rationale: str
     stop_loss: float
     tab: Literal['paper', 'real']

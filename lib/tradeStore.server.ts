@@ -30,7 +30,8 @@ const FILE = 'trades.json';
 
 /** Columns in the order every SELECT here uses. */
 const COLUMNS = `id, ts, tab, symbol, side, qty, price, note, pnl,
-                 entry_context, debate_id, origin_tag, exchange_order_id`;
+                 entry_context, debate_id, origin_tag, exchange_order_id,
+                 strategy, run_id`;
 
 type Row = {
   id: string;
@@ -46,6 +47,8 @@ type Row = {
   debate_id: string | null;
   origin_tag: string | null;
   exchange_order_id: string | null;
+  strategy: string | null;
+  run_id: string | null;
 };
 
 function fromRow(r: Row): TradeLogEntry {
@@ -70,6 +73,13 @@ function fromRow(r: Row): TradeLogEntry {
     ...(r.debate_id === null ? {} : { debateId: r.debate_id }),
     ...(r.origin_tag === null ? {} : { originTag: r.origin_tag as TradeLogEntry['originTag'] }),
     ...(r.exchange_order_id === null ? {} : { exchangeOrderId: r.exchange_order_id }),
+    // WRITTEN BY THE BACKEND SINCE `trades.strategy` / `trades.run_id` WERE
+    // ADDED, AND READ BY NOBODY UNTIL NOW. The columns were populated, the type
+    // had no field for them, and this SELECT did not ask — so the only place in
+    // the UI that could have shown which strategy chose a trade rendered
+    // "no strategy was selected" on every row, including the ones that had one.
+    ...(r.strategy === null ? {} : { strategy: r.strategy }),
+    ...(r.run_id === null ? {} : { runId: r.run_id }),
   };
 }
 

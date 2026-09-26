@@ -1779,6 +1779,361 @@ finding — "task execution passes 0 as time and hardcodes sell on closes" — d
 NOT apply to the live code: every close path computes `exit_side` by direction
 (`sell if buy else buy`), and no such task scheduler exists in the tree.
 
+### TWO PATHS COULD START A TRADE, AND THE ONE WITHOUT THE AGENTS WON EVERY RACE
+
+The operator's report: *"in the trade history page how the trade happens ... each
+trade is market data and directly execute, all the agent doesn't working
+together"*. It was literally true. Read from the live database on 2026-09-25:
+
+    23 rows in `trades`. strategy, run_id AND entry_context NULL on EVERY one,
+    openings and closings alike.
+    5 of the 12 opening rows join `decisions` on the TAR id, and every one of
+    those rationales opens "Debate concluded LONG at 0% confidence".
+
+Those are the EVENT path's rows. There were two originators of entries:
+
+    GRAPH PATH   trigger/session -> 24 nodes (9 specialists, regime detection,
+                 strategy scoring, debate, Supervisor, Risk Gateway)
+                 -> EXECUTION_PLAN_READY -> execution_service -> TAR -> CRO
+    EVENT PATH   DEBATE_CONCLUDED -> agents/supervisor_agent -> TAR -> CRO
+
+They are NOT two routes to one answer. The event path reaches a trade from a
+four-to-five leg technical debate (Structure, Momentum, Trend, Volume,
+StrategyEnsemble). None of the nodes that produce `strategy`, `run_id` or
+`entry_context` run on it — which is exactly why the trade-detail journey showed
+Market Data, an unknown middle, then Execution. The middle was not lost; the
+nodes that record it never ran.
+
+Measured disagreement, same symbol, same minute: the full panel reached NEUTRAL
+at 0.067 (the portfolio constraint binding at 0.40) and the Supervisor returned
+DO_NOT_TRADE, while the event path's own debate put SOL at 0.23-0.24 and traded
+it. The shortcut wins because it is CHEAPER — milliseconds against the graph's
+~5 seconds to its gateway — so it claimed the one allowed position and the
+graph's run was then refused for already holding one. Adding gates to both paths
+(`services/trade_scope`) stopped the *limit* being bypassed; it did not stop the
+less-informed path being the one that traded.
+
+**So while `GRAPH_EXECUTION_ENABLED=true`, the event path no longer originates
+entries.** It refuses with a reason, so the refusal lands in `decisions` and "why
+did this not trade?" stays answerable. `GRAPH_EXECUTION_ENABLED=false` hands the
+role back, and that path keeps every gate it has. Exits are untouched —
+`_consider_trade` only ever opens, and closes belong to the position monitor
+(invariant 4).
+
+TWO THINGS THIS ALSO EXPLAINS, both reported as separate complaints:
+
+  * **"I chose 100% allocation but it only takes some amount."** The event path
+    hardcodes `requested_leverage = min(1, ceiling)` and sizes by RISK FRACTION;
+    it never reads `capital_fraction` or `active_session_leverage()`. The live
+    open position was $1,687 of a $25,074 book — 6.7%, at 1x. Broker-style
+    sizing lives in `risk_gateway` and was never reached.
+  * **The learning loop measuring nothing.** `strategy_performance.aggregate()`
+    needs `strategy IS NOT NULL`, and only the graph path writes it.
+
+EXPECT FEWER TRADES. That is the point, and it should be said plainly rather than
+discovered: across six live runs on SOL/ETH/XRP/DOGE/BNB on 2026-09-25 every
+instrument was in a Range regime and the Supervisor returned DO_NOT_TRADE on all
+six. The agent was trading because a shortcut was bypassing the panel, not
+because the panel saw opportunities.
+
+`tests/test_single_trade_originator.py` pins all of it.
+
+### `UnboundLocalError` made a working limit invisible
+
+The scope gate added to `supervisor_agent._consider_trade` sat ABOVE
+`debate = self._debates.get(symbol)` and passed `debate` to `self._refuse(...)`.
+Python makes `debate` a local of the whole method because it is assigned later,
+so every scope refusal raised
+
+    UnboundLocalError: cannot access local variable 'debate' where it is not
+    associated with a value
+
+instead of recording one. Proven at runtime, not inferred: the live `decisions`
+table holds 1,995 rejections and NOT ONE is a scope rejection. The gate stopped
+the trade by crashing, so the operator could never see it working — and a limit
+that cannot be observed is indistinguishable from one that is not running.
+
+Related, and the reason it took a runtime probe to find: `MessageBus.publish`
+swallows a subscriber exception and logged it WITHOUT a traceback, so a
+`NameError` on the CRO's approval path printed one line naming the subscriber and
+the message, and an approved trade simply never appeared — no fill, no rejection,
+no stack. It now logs `exc_info=True`. This codebase has hit that class three
+times (`supervisor_agent`'s sizing dict, `risk_gateway`'s counter-trend branch,
+and the CRO), and each time the cost was finding the line, not reading the
+message.
+
+### A DEAD MODEL, NOT A SLOW GRAPH — 300 seconds per run
+
+`openai/gpt-oss-20b` is DEAD on this NVIDIA account. It is still returned by
+`GET /v1/models`, so nothing reports it missing; it simply never answers. Direct
+curl on the same key and endpoint, 2026-09-25:
+
+    openai/gpt-oss-20b                 no HTTP status at all in 120s
+    nvidia/nemotron-3-super-120b-a12b  HTTP 200 in 0.79s
+    mistralai/mistral-nemotron         HTTP 200 in 0.31 / 0.49 / 0.31s (3/3)
+
+It was configured in TWO places — `LLM_MODEL_MECHANICAL` and the consultation
+panel — so every graph run paid up to 60s on the mechanical tier and up to 300s
+on `external_consultation`. A live trace recorded `external_consultation
+300,612.9ms`: the reasoning-tier ceiling to the millisecond, three times of
+three. That is the "the agent is very slow" symptom, and it was one dead model.
+
+Both now point at `mistralai/mistral-nemotron` — a MISTRAL-family model, so the
+consultation remains a genuinely different prior from the NVIDIA Nemotron-3
+reasoning tier, which is the property that makes it a second opinion rather than
+the same model agreeing with itself. Measured after: run 300s+ -> 19.0s,
+`external_consultation` 300,612.9ms -> 3.9ms, a real second opinion returning in
+2.8s with a parsed stance.
+
+**AND THE TIER MISMATCH IS FIXED STRUCTURALLY, not just in config.**
+`ai_consultation` asks for `ModelTier.REASONING`, whose 300s read timeout is
+correct for a slow reasoning model on a path nothing waits on — but
+`external_consultation` is a graph node, `run_analysis_graph` does not return
+until every node finishes, and `trading_session._run_session` awaits that call
+between decisions. So a session that re-decides every 30s was instead blind for
+five minutes. `CONSULT_DEADLINE_S = 30.0` bounds it. The asymmetry is the whole
+argument: the node writes only `consultation` and no gate reads it, so a second
+opinion that does not arrive costs nothing a decision depends on, while waiting
+five minutes for it costs the monitoring cadence of a live position. A timeout is
+recorded as an opinion that did not arrive — never as agreement.
+
+**AND THE DEAD-MODEL DETECTOR DID NOT SEE IT.** `GET /api/monitoring` reported
+`"deadModels": [], "healthy": true` throughout, because `llm/health` counted only
+`model_eol` / `model_not_found` — it was written after gpt-oss-120b went EOL with
+an HTTP 410, and it had learned exactly that one shape of death. A model that
+accepts the request and never answers is just as gone. `_UNRESPONSIVE_THRESHOLD`
+(3) now flags a model that has timed out repeatedly AND has not succeeded ONCE in
+the window. The zero-successes test is what separates it from a 410: a genuinely
+slow model under load times out sometimes and answers the rest of the time, and
+flagging that would send the operator to change a model id when what they need is
+a longer tier timeout. The note reports the reason PER MODEL, because it
+previously asserted "returning end-of-life / not-found responses" for everything
+it flagged — a confident wrong diagnosis that sends you to check a status code
+that never arrived. `tests/test_llm_unresponsive_model.py` pins it.
+
+### The CRO's VaR check ignored the stop, and capped every position at 0.5x equity
+
+Found by running a real plan through the real execution plane, not by reading
+code. The Risk Gateway sized a 25%-allocation 3x session exactly as the
+broker-style section above describes, and the CRO refused it:
+
+    Global VaR limit exceeded: a 10% adverse move on $18815.50 notional is
+    $1881.55, above the 5% of $25088.49 equity limit ($1254.42)
+
+`implied_var = notional * 0.10` is the right shape for a position with NO stop,
+and this system has none: invariant 3 makes a computed stop mandatory, the
+gateway hard-rejects without one, and the CRO's own previous constraint
+re-verifies the stop is on the correct side of entry. The stop on that trade sat
+1.71% away — a real worst case near $483, about a quarter of what the check
+asserted.
+
+The effect was a flat cap of `0.05 / 0.10 = 0.5x equity` notional whatever the
+leverage, so two gates over one quantity disagreed: 25% at 3x (0.75x equity) and
+100% at 3x (3.0x equity) were both sized by the gateway and refused by the CRO.
+
+`_adverse_move_fraction` now derives the move from the trade's own stop distance
+x a named `STOP_SLIPPAGE_MULTIPLIER` (1.5, for gapping through the trigger),
+capped at the flat worst case and FALLING BACK to it when no usable stop is
+present — so an unbounded position is still judged unbounded. **The 5% policy is
+unchanged and still enforced against equity**; only the number compared against
+it is now a measurement rather than a constant that ignores the stop. A WIDER
+stop now consumes more of the limit, which is the correct direction.
+`MAX_PORTFOLIO_VAR_FRACTION` is readable from the env (default 0.05, read at call
+time) so raising it stays the operator's deliberate decision, and the refusal now
+states the largest notional that WOULD fit — a limit that only says "no" is what
+made the operator's allocation feel arbitrary.
+
+`tests/test_cro_var_limit.py` pins the measurement, the fallback and the policy.
+
+### Nothing counted a closed trade, so the win rate was permanently unmeasurable
+
+`services/ai_memory.record_trade` is the only writer of `global_stats`, and its
+only caller is `agents/trading_agent.trading_agent_tick` — the legacy task-based
+path the autonomous system does not run. The autonomous close path is
+`PositionMonitorAgent._close` -> POSITION_CLOSED, and it never touched the file.
+
+    backend/data/ai_memory.json   total_trades 0, wins 0, trade_ledger []
+    Postgres `trades`             11 closed rows carrying a realised pnl
+
+Three readers therefore reported "unmeasurable" forever, and each reads as an
+honest young system rather than a broken feed: `probability.measured_accuracy`
+(so `decision.probability` was null on every run — a live trace says "only 0
+resolved trade(s), need 20"), `ConfidenceAgent` (fell back to its prior every
+call), and `supervisor_agent._measured_win_rate` (so Kelly used the fixed
+fraction instead of the measured edge).
+
+`record_closed_trade` is called from `ReflectionAgent.handle_event`, which is
+already the POSITION_CLOSED subscriber that owns learning. It records stats and a
+bounded ledger and makes NO model call — `record_trade` calls `analyze_mistake`,
+and doing that here would reflect on every loss twice and spend two slots of the
+40/min key budget writing one analysis. It is called BEFORE the reflection,
+because the count is a fact that must not depend on a model answering, and it
+never raises: the money has already moved by the time it runs.
+
+### `trades.strategy` and `trades.run_id` were written and read by nobody
+
+The backend has populated both for some time. `lib/tradeStore.server.ts`'s SELECT
+did not name them, so they could not reach `TradeLogEntry`, and the one view that
+could have shown which strategy chose a trade rendered "no strategy was selected"
+on every row — including rows that had one.
+
+And the trade-detail journey supplied SIX of `buildJourney`'s eight steps:
+`risk` and `decision` were simply omitted from the object literal, so the builder
+took its `unknown` branch for both — "the gateway was not reached", "the run
+ended before a decision" — on EVERY trade ever displayed. Half of the missing
+middle was the caller, not the data. Both are facts about the row rather than
+reconstructions: a fill exists, and by invariant 1 no AI-originated trade reaches
+a book without an approval. Neither asserts a DETAIL it does not have — no
+passed/total count is shown, because the per-check results live in the run trace
+and are not carried on the trade row.
+
+`lib/viz/journey.test.ts` pins the builder for both branches.
+
+### REAL AND PAPER DIVERGED IN TWO PLACES, AND ONLY THE REAL SIDE LOST
+
+Most of this system is tab-agnostic by construction — the graph, the gates, the
+sizing and the exit rules read the same constants whichever book is trading, and
+the only `pos.tab != "real"` branches in `position_monitor` guard VENUE CALLS,
+because a paper fill has no exchange order behind it to protect. Two things were
+not, and neither was visible from the paper side.
+
+**1. THE RESTING TAKE-PROFIT SAT WHERE THE MONITOR NO LONGER EXITS.**
+`pos.take_profit` is the Risk Gateway's 5x-ATR level, and `_place_resting_tp`
+used it directly. But since `PROFIT_TARGET_PCT` became the default exit,
+`_check_price` closes at a FIXED PERCENTAGE instead, which is much nearer.
+Measured on a live 3x SOL/USDT short: the percentage target was a 0.667% move to
+120.56, while the ATR target sat at 116.96 — **5.4x further away**.
+
+While the process is alive both books behave identically, because the in-process
+monitor fires first. The divergence is exactly the window the resting order
+exists for: a real trade reaching its target during a deploy, a restart or an OOM
+kill would sail straight through the venue order and ride back, while the paper
+book booked the win. Same settings, same symbol, different outcome, real money
+only. `_effective_target` now takes whichever level is reached FIRST — and it is
+NOT always the percentage one, because at low leverage a tight ATR target can sit
+inside it, and taking the percentage unconditionally would move the resting order
+AWAY from entry, which is the take-profit equivalent of widening a stop.
+
+It is not re-placed when the setting changes. The exit-rules panel applies on the
+next tick and the in-process monitor picks that up immediately; re-issuing every
+live reduce-only order across the book to fix a window that is not currently open
+is the worse trade.
+
+**2. THE LEDGER DID NOT RECORD WHICH BOOK A TRADE CAME FROM.**
+Nothing wrote `ai_memory`'s ledger until the close path was connected, so every
+reader was reading an empty list and none of them could be wrong. Turning the
+writer on turned the readers on — and two are tab-sensitive:
+
+  * `risk_gateway._ledger()` feeds `validate_trade`'s DAILY-LOSS check. Unfiltered,
+    a bad day on PAPER counts against the real book's limit and halts real
+    trading, and a bad day on REAL money halts paper testing. Neither is a
+    measurement of the book being gated.
+  * `supervisor_agent._measured_win_rate` feeds KELLY SIZING. Paper fills are
+    simulated against an observed price with no real slippage and no partial
+    fills, so a paper win rate is optimistic relative to a real one — and an
+    optimistic probability estimate driving real position size is Kelly at its
+    most dangerous.
+
+`global_stats` stays as the all-books total so every existing reader and the
+`/api/memory` surface keep working; `tab_stats` carries the split and each ledger
+row is stamped. A row written before the field existed is EXCLUDED from both
+books rather than assumed into one: attributing an unlabelled loss to real could
+halt real trading on a paper result, and attributing it to paper could let a real
+daily-loss limit be exceeded. Neither guess is safe.
+
+`tests/test_real_paper_parity.py` pins both, and asserts structurally that the
+exit rules have no per-tab variant and that `_close` / `_check_price` never
+branch on the book.
+
+### The Telegram alert says what the trade IS, not just that one happened
+
+For an operator who reads the channel instead of a dashboard, the messages
+carried the fill and almost nothing else. The ENTRY read "SELL (SHORT) 155 @
+121.37" and **the CLOSE never stated the direction at all** — scrolling the
+channel you could not tell which way a closed position had been facing without
+reading entry and exit and doing the subtraction.
+
+Entry now leads with LONG/SHORT and carries notional AND margin at the chosen
+leverage (showing one without the other is how "10k at 5x" gets misread in either
+direction), the stop and target WITH their distances from entry (a bare price says
+nothing about how far away it is), the risk/reward, the strategy, the entry fee
+and slippage, and the Risk Gateway's entry-context snapshot — which is what turns
+"the bot sold SOL" into something the operator can agree or disagree with. Close
+now leads with the direction and adds hold time, the signed price move, P&L AS A
+PERCENTAGE OF MARGIN ("+106.71" means something different on 1,000 of margin than
+on 20,000), the strategy, and names which book the win rate counted.
+
+**THE JOIN IS SAFE, NOT LUCKY.** None of leverage, stop, target or strategy is on
+`OrderFilledEvent`; they live on `TarApprovedEvent` one hop earlier. The notifier
+caches the approval and joins on the fill, and that works because
+`MessageBus.publish` queues a publish made while a delivery is in flight rather
+than recursing into it — so TAR_APPROVED reaches EVERY subscriber before
+ORDER_FILLED reaches any. That is the same guarantee `position_monitor._pending`
+depends on, and it is why this does NOT depend on the order agents are constructed
+in `main.py`. The cache is bounded and an entry is dropped on close, because a TAR
+that is approved and never fills would otherwise sit there forever on a 24/7
+process. A fill with no cached approval still sends — it loses the terms, never
+the alert, and never invents a leverage.
+
+### A SIMULATED CLOSE FILLED AT THE WRONG PRICE, AND WHICH PRICE DEPENDED ON CONSTRUCTION ORDER
+
+Found by exercising the running system, not by reading code — and it had been
+sitting behind `main.py`'s agent ordering the whole time.
+
+`ExecutionAgent.close_position` filled a simulated close at
+`self._last_prices[symbol]` — its own cache, fed by TICK_RECEIVED.
+`PositionMonitorAgent._check_price` decides to close from the tick IT received.
+Both subscribe to the same event, so whether the two prices agree depends
+entirely on which subscriber the bus reaches first, which is the order the agents
+were constructed. `main.py` builds the executor before the monitor, so production
+happened to be correct; a harness that built the monitor first measured:
+
+    monitor decided profit-target at 122.0587   (a +0.667% move on a long)
+    close filled at 121.25 — the entry price, the executor's stale tick
+    booked P&L -18.80 on a WINNING move, almost exactly the round-trip fee
+
+A profit target that fires and books a loss the size of the fees is
+indistinguishable from the scratch exits this system spent weeks removing, and it
+would have been read as one. This is the same hazard as the inline-delivery bug
+above, and the same rule applies: do not fix it by reordering `main.py`.
+
+`close_position` now takes `observed_price` and both close paths (`_close` and
+`_take_partial`) pass the price they decided on. **REAL FILLS ARE UNAFFECTED** —
+a live close is a market order and its price comes back from the venue, so
+`observed_price` is read only inside the simulation branch and the "realized P&L
+from the ACTUAL fill, not the trigger price" rule still holds there, because
+slippage is real. For a SIMULATED fill there is no separate reality to defer to:
+the observed price at the moment of the decision IS the honest fill, and it is
+the one the decision was made against. It falls back to the cache when not
+supplied, and refuses when neither is available rather than inventing a price.
+Measured after: the same target booked +106.67. `tests/test_close_fill_price.py`.
+
+### The full-system exercise, and what it is allowed to touch
+
+`scratch`-style harnesses that drive the REAL bus against the REAL Postgres are
+the only thing that has found several of the bugs in this file — the dead model,
+the CRO's VaR cap, this close-price bug. They are worth running. But one of them
+ran against the operator's LIVE paper book and left 11 rows in `trades`, an
+orphaned watch row, and a blended position, because it opens on the same symbol
+the operator already holds and `apply_paper_fill` keys positions BY SYMBOL.
+
+Two things make that recoverable, and both are worth keeping:
+
+* **The graph path writes a `run_id` and the event path does not.** While the
+  deployed backend still takes every trade through the event path, that field is
+  an exact discriminator between "the operator's agent did this" and "a harness
+  did this". Cleanup scoped on it removed exactly 11 rows and touched nothing
+  else.
+* **`scripts/repair_paper_book.py`** reports the divergence between the watch
+  list and the book and, with `--confirm`, restores the book from it.
+
+It also produced a MIS-ATTRIBUTION worth recording, because the same trap is
+waiting for the next reader: a close of the operator's position at +34.02 looked
+like the harness's doing and was NOT — it was the live backend, on a real tick,
+through its own 2% target (122.43 against a 119.88 entry is +2.13%). The run_id
+split is what settled it. Check the discriminator before concluding a harness
+caused something.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -1855,7 +2210,7 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 31 files / 457 tests, must all pass
+npm run test                        # vitest; 32 files / 469 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
@@ -1863,7 +2218,7 @@ npm run build                       # catches route/provider issues tsc won't
 Vitest run alongside `tsc` or `next build` on a memory-constrained
 machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (31/31, 457/457, verified over five consecutive runs). The
+deterministic (32/32, 469/469, verified over five consecutive runs). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing
@@ -1888,7 +2243,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2023 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

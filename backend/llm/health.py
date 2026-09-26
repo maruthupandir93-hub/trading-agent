@@ -52,6 +52,31 @@ _WINDOW = 500
 # is enough to distinguish "gone" from "hiccup" without waiting long.
 _DEAD_THRESHOLD = 2
 
+# A model that NEVER ANSWERS is as dead as one that returns 410, and this missed
+# it completely.
+#
+# `openai/gpt-oss-20b` was configured on two tiers of this system on 2026-09-25.
+# It is still listed by the provider's own GET /v1/models, and it returned no
+# HTTP status at all — 120s of curl, and three consecutive 300s timeouts through
+# the provider. Every graph run paid up to 60s on the mechanical tier and up to
+# 300s on `external_consultation`, a live trace recorded the consultation node at
+# 300,612.9ms, and this module reported:
+#
+#     "deadModels": [], "healthy": true
+#
+# because a timeout is classified "timeout", not "model_eol", and only EOL and
+# not-found counted. The detector was built after a model went EOL with an HTTP
+# 410, and it learned exactly that one shape of death.
+#
+# TIMEOUTS NEED A HIGHER BAR THAN A 410, AND A DIFFERENT TEST. A 410 is
+# unambiguous — the endpoint is telling you the model is gone. A timeout is not:
+# a genuinely slow model under load times out sometimes and answers the rest of
+# the time. So a model is called UNRESPONSIVE only when it has timed out this
+# many times in the window AND has not succeeded ONCE in it. One success is
+# enough to say "slow, not gone", which is the distinction that matters: a slow
+# model needs a longer tier timeout, an unresponsive one needs a new model id.
+_UNRESPONSIVE_THRESHOLD = 3
+
 
 def classify(status_code: Optional[int], error: Optional[str], *, timed_out: bool = False,
              empty: bool = False) -> str:
@@ -157,9 +182,37 @@ class LLMHealthTracker:
                 if o.error:
                     last_error[o.model] = o.error
         dead_models = [
-            {"model": m, "occurrences": c, "lastError": last_error.get(m)}
+            {"model": m, "occurrences": c, "reason": "returned EOL/not-found",
+             "lastError": last_error.get(m)}
             for m, c in dead_counts.items() if c >= _DEAD_THRESHOLD
         ]
+
+        # Unresponsive models: every recent call timed out and none succeeded.
+        # See `_UNRESPONSIVE_THRESHOLD` for why this needs a higher bar and the
+        # zero-successes test that a 410 does not.
+        succeeded = {o.model for o in outcomes if o.ok and o.model}
+        timeout_counts: Dict[str, int] = {}
+        for o in failures:
+            if o.error_class == "timeout" and o.model:
+                timeout_counts[o.model] = timeout_counts.get(o.model, 0) + 1
+                if o.error:
+                    last_error.setdefault(o.model, o.error)
+        already = {d["model"] for d in dead_models}
+        for model, count in timeout_counts.items():
+            if model in already or model in succeeded:
+                continue
+            if count >= _UNRESPONSIVE_THRESHOLD:
+                dead_models.append({
+                    "model": model,
+                    "occurrences": count,
+                    "reason": (
+                        f"{count} consecutive timeouts and no successful call in the "
+                        f"window - the endpoint is accepting the request and never "
+                        f"answering. Replace the model id in .env; a longer timeout "
+                        f"will only make each run wait longer."
+                    ),
+                    "lastError": last_error.get(model),
+                })
 
         fallback_rate = len(failures) / total * 100.0
 
@@ -184,13 +237,21 @@ class LLMHealthTracker:
 
 def _note(healthy: bool, fallback_rate: float, dead_models: List[dict]) -> str:
     if dead_models:
-        names = ", ".join(d["model"] for d in dead_models)
+        # THE REASON IS PER MODEL, because the two ways a model dies need the
+        # same fix but look completely different in the logs. This note used to
+        # assert "returning end-of-life / not-found responses" for every flagged
+        # model — which would be flatly wrong for one that is timing out, and a
+        # confident wrong diagnosis sends the operator to check a status code
+        # that never arrived.
+        detail = "; ".join(
+            f"{d['model']} ({d.get('reason', 'repeated failures')})" for d in dead_models
+        )
         return (
-            f"A configured model appears DEAD: {names} is returning end-of-life / "
-            f"not-found responses. Update LLM_MODEL_* (or the consultation model) in "
-            f".env — the provider is silently falling back to the deterministic floor "
-            f"on every call to it. This is exactly the gpt-oss-120b EOL that degraded "
-            f"the learning once before."
+            f"A configured model appears DEAD: {detail}. Update LLM_MODEL_* (or the "
+            f"consultation model) in .env — the provider is silently falling back to "
+            f"the deterministic floor on every call to it. This is the gpt-oss-120b "
+            f"EOL that degraded the learning once, and the gpt-oss-20b hang that cost "
+            f"300s of every graph run."
         )
     if fallback_rate >= 50.0:
         return (

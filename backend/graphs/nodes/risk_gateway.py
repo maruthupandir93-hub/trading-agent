@@ -119,6 +119,7 @@ from backend.services.trading_session import (
 # trade without passing through this node at all. It traded 4,080 times in five
 # days with none of these checks. A limit that only one of two execution paths
 # respects is not a limit, so the definition moved to a place both can import.
+from backend.services.fees import taker_rate
 from backend.services.trade_scope import (
     max_concurrent_positions,
     normalise_symbol as _norm_symbol,
@@ -653,12 +654,29 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         pool_margin = fraction * account_capital
         available_margin = max(0.0, pool_margin - deployed)
 
-        # The margin-call buffer is kept even at 100% allocation: deploying literally
-        # every dollar as margin means an adverse tick triggers liquidation BEFORE
-        # the stop is reached, which makes the computed stop meaningless. So the
-        # deployable margin is the pool, held back by the 1.2x buffer.
+        # THE ALLOCATION IS HONOURED EXACTLY. 100% MEANS 100%.
+        #
+        # This used to divide by the 1.2x margin buffer, so an operator choosing
+        # "100%" got 83.3% of their balance deployed and no explanation. Their
+        # report was exact: "I chose 100% allocation but it only takes some
+        # amount." A control that silently delivers five-sixths of what it says is
+        # worse than one that refuses.
+        #
+        # THE BUFFER'S ORIGINAL JOB IS NOW DONE PROPERLY ELSEWHERE. It was a proxy
+        # for "make sure the stop is reachable before a margin call", and two
+        # things now guarantee that directly rather than by withholding capital:
+        # `liquidation_safe_leverage` above caps leverage until the stop provably
+        # sits inside the liquidation distance, and `MARGIN_MODE=isolated` bounds
+        # each position to its own margin so free cash is not what protects it.
+        #
+        # ONLY THE ENTRY FEE IS RESERVED. `portfolio_store.apply_paper_fill`
+        # refuses a fill when `margin + fee > free_cash`, so sizing to literally
+        # the whole balance would produce a position the book then declines — a
+        # trade that passes every risk check and silently never opens. The reserve
+        # is the fee itself plus a hair, not a fraction of the account.
         usable_cash = cash if cash is not None else account_capital
-        per_trade_margin = min(available_margin, usable_cash / MARGIN_BUFFER_MULTIPLIER)
+        fee_reserve = usable_cash * taker_rate() * 1.5
+        per_trade_margin = min(available_margin, max(0.0, usable_cash - fee_reserve))
 
         if per_trade_margin <= 0.0:
             return {
@@ -787,7 +805,7 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             # positions" from "not supplied".
             "openPositions": list(portfolio.open_positions or []),
             "freeMarginUsd": portfolio.cash,
-            "tradeLedger": _ledger(),
+            "tradeLedger": _ledger(tab),
         },
         # See the module docstring: the graph has every input, so a check that
         # cannot run is a bug here, not a caller limitation.
@@ -943,24 +961,29 @@ def _exit_plan(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _ledger() -> Optional[List[Dict[str, Any]]]:
-    """Today's realised P&L source for the daily-loss check.
+def _ledger(tab: str) -> Optional[List[Dict[str, Any]]]:
+    """Today's realised P&L source for the daily-loss check, FOR ONE BOOK.
 
     Returns None — not `[]` — when the store cannot be read, because an empty
     ledger means "no trades closed today" and an unreadable one means "unknown".
     In strict mode the first passes the check and the second rejects, which is the
     correct difference.
+
+    FILTERED BY TAB, AND THAT IS A REAL-MONEY DISTINCTION. This used to hand
+    `validate_trade` the whole ledger regardless of which book was being gated,
+    so a bad day on PAPER counted against the real book's daily-loss limit and
+    halted real trading, while a bad day on REAL money halted paper testing.
+    Neither is a measurement of the book being gated. It did not bite before only
+    because nothing wrote the ledger at all — connecting the close path is what
+    turned this reader on.
     """
     try:
-        from backend.services.ai_memory import get_memory_stats
+        from backend.services.ai_memory import ledger_for_tab
 
-        stats = get_memory_stats() or {}
+        return ledger_for_tab(tab)
     except Exception as exc:  # noqa: BLE001 - never guess a P&L history
         logger.warning("Risk gateway could not read the trade ledger: %s", exc)
         return None
-
-    ledger = stats.get("trade_ledger")
-    return ledger if isinstance(ledger, list) else None
 
 
 def _idempotency_basis(

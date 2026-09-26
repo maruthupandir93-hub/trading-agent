@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
 import { ResetPaperBookPanel } from '@/components/operator/ResetPaperBookPanel';
 import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
+import { ExitRulesPanel } from '@/components/operator/ExitRulesPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
@@ -253,6 +254,11 @@ export default function SettingsPage() {
       {/* Directly under Trading Mode: which exchange the agent trades on is the
           same class of decision as whether it trades for real, and reading them
           together is how an operator knows what the next order actually does. */}
+      {/* Placed above the venue switch: these are the numbers an operator
+          adjusts while watching the agent trade, and every one of them applies
+          on the next tick with no restart. */}
+      <ExitRulesPanel />
+
       <VenueSwitchPanel />
 
       {/* Housed here, beside the live-trading toggle, because this is already the
