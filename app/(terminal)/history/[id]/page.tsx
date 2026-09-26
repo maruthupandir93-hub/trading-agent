@@ -229,7 +229,47 @@ export default function TradeDetailPage({ params }: { params: { id: string } }) 
                 ? { rsi: context.rsi, atr: context.atr }
                 : null,
             regime: context.regime ? { regime: context.regime } : null,
-            strategy: context.strategy,
+            // THE COLUMN FIRST, THE SNAPSHOT SECOND. `trades.strategy` is the
+            // value the execution agent recorded against this fill; the name
+            // parsed out of the entry-context string is the same fact written
+            // into prose. Reading only the string meant a trade whose strategy
+            // column was set still rendered "no strategy was selected" whenever
+            // the snapshot was absent.
+            strategy: entryLeg?.strategy ?? trade.strategy ?? context.strategy,
+
+            // ---- THE TWO STEPS THAT WERE NEVER PASSED AT ALL ----------------
+            //
+            // `buildJourney` takes eight steps and this call supplied six. `risk`
+            // and `decision` were simply omitted, so the builder took its
+            // `unknown` branch for both — "the gateway was not reached" and "the
+            // run ended before a decision" — on EVERY trade ever displayed,
+            // including trades that did reach the gateway and did produce a
+            // decision. That is the middle of the journey the operator saw
+            // missing, and half of it was this call, not the data.
+            //
+            // BOTH ARE FACTS ABOUT THIS ROW, NOT RECONSTRUCTIONS (invariant 6).
+            // A fill exists. By invariant 1 no AI-originated trade reaches an
+            // exchange or a book without an approval, so a row in this table
+            // means the risk stage approved and the supervisor decided to trade.
+            // Neither claims a DETAIL it does not have: no passed/total count is
+            // asserted, because the per-check results live in the run trace and
+            // are not carried on the trade row.
+            risk: { approved: true },
+            decision: {
+              action: 'TRADE',
+              // Direction comes from the ledger walk, which derives it from the
+              // opening leg's side — so a short reads SHORT rather than "sell".
+              // `annotateTrades` returns the literal 'unknown' for a close whose
+              // opening leg is not in the log; that is an ABSENCE and must render
+              // as an omitted line, not as the word "unknown" sitting where a
+              // direction belongs.
+              direction:
+                trade.direction && trade.direction !== 'unknown'
+                  ? trade.direction.toUpperCase()
+                  : entryLeg?.direction && entryLeg.direction !== 'unknown'
+                    ? entryLeg.direction.toUpperCase()
+                    : null,
+            },
             execution: { submitted: true, status: 'filled' },
             outcome: typeof trade.pnl === 'number' ? { pnl: trade.pnl } : { status: 'unknown' },
           })}

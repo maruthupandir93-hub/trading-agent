@@ -187,14 +187,34 @@ def test_leverage_multiplies_the_notional(monkeypatch):
     assert five_x["execution_plan"].size == pytest.approx(one_x["execution_plan"].size * 5, rel=0.02)
 
 
-def test_full_allocation_at_1x_still_approves_and_keeps_the_margin_buffer(monkeypatch):
-    """100% deploys the account as margin, minus the 1.2x margin-call buffer."""
+def test_full_allocation_deploys_the_WHOLE_account(monkeypatch):
+    """100% MEANS 100%, less only the entry fee.
+
+    This used to assert 83.3% — the account divided by the 1.2x margin buffer —
+    and that haircut was the operator's bug report: "I chose 100% allocation but
+    it only takes some amount." A control that silently delivers five-sixths of
+    what it says is worse than one that refuses.
+
+    The buffer was a proxy for "keep the stop reachable before a margin call".
+    That is now guaranteed directly by `liquidation_safe_leverage`, which caps
+    leverage until the stop provably sits inside the liquidation distance, and by
+    isolated margin, which bounds a position to its own margin. Withholding a
+    sixth of the capital was approximating a guarantee that now exists.
+
+    ONLY THE ENTRY FEE IS RESERVED, because `apply_paper_fill` refuses a fill when
+    `margin + fee > free_cash` — sizing to literally the whole balance would pass
+    every risk check and then silently fail to open.
+    """
+    from backend.services.fees import taker_rate
+
     _session(monkeypatch, 1.0, leverage=1)
     out = gate(_state())
     assert out["risk_assessment"].approved is True
-    # ~83% of the account as notional at 1x (10000 / 1.2), not the full 10000 —
-    # the buffer keeps a stop reachable before a margin call.
-    assert out["execution_plan"].size == pytest.approx((10_000.0 / 1.2) / 100.0, rel=0.02)
+
+    reserve = 10_000.0 * taker_rate() * 1.5
+    assert out["execution_plan"].size == pytest.approx((10_000.0 - reserve) / 100.0, rel=0.001)
+    # and that is essentially the whole account, not five-sixths of it
+    assert out["execution_plan"].size * 100.0 > 9_900.0
 
 
 def test_no_session_uses_risk_based_sizing_not_the_pool(monkeypatch):

@@ -68,7 +68,27 @@ def _env(name: str) -> str:
 class TelegramNotifier:
     """Subscribes to ORDER_FILLED and POSITION_CLOSED; sends per-tab messages."""
 
+    # WHY AN APPROVAL CACHE, AND WHY IT IS NOT ORDERING-DEPENDENT.
+    #
+    # `OrderFilledEvent` carries the fill and nothing about the trade's TERMS —
+    # no leverage, no stop, no target, no strategy. Those live on
+    # `TarApprovedEvent`, one hop earlier. So a message built from the fill alone
+    # can only say "bought 155 SOL", which is the least useful half of what an
+    # operator woken at 3am needs to know.
+    #
+    # The join is SAFE rather than lucky. `MessageBus.publish` queues a publish
+    # made while a delivery is in flight instead of recursing into it, so
+    # TAR_APPROVED reaches EVERY subscriber before ORDER_FILLED reaches any —
+    # the same guarantee `position_monitor._pending` relies on, and the reason
+    # that ordering fix is described in CLAUDE.md as load-bearing. This cache
+    # therefore does not depend on the order agents are constructed in `main.py`.
+    #
+    # Bounded, and entries are dropped on close: a TAR that is approved and never
+    # fills would otherwise sit here forever on a 24/7 process.
+    _MAX_PENDING = 64
+
     def __init__(self) -> None:
+        self._approved: Dict[str, Dict[str, Any]] = {}
         self._token = _env("TELEGRAM_BOT_TOKEN")
         # One chat id per tab. Routing is by the event's own `tab`, so a real fill
         # can never land in the paper channel or vice versa.
@@ -112,7 +132,12 @@ class TelegramNotifier:
             return
         try:
             etype = getattr(event, "event_type", None)
-            if etype == "ORDER_FILLED":
+            if etype == "TAR_APPROVED":
+                # Recorded SYNCHRONOUSLY, not scheduled: the fill follows on the
+                # same bus and a task that had not run yet would miss it. It is a
+                # dict assignment, so it costs the bus nothing.
+                self._remember_approval(event)
+            elif etype == "ORDER_FILLED":
                 asyncio.create_task(self._safe(self._on_entry(event)))
             elif etype == "POSITION_CLOSED":
                 asyncio.create_task(self._safe(self._on_close(event)))
@@ -125,22 +150,109 @@ class TelegramNotifier:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Telegram notification failed (ignored): %s", exc)
 
+    def _remember_approval(self, event: Any) -> None:
+        """Keep the approved terms so the fill message can report them."""
+        try:
+            tar_id = str(getattr(event, "tar_id", "") or "")
+            if not tar_id:
+                return
+            if len(self._approved) >= self._MAX_PENDING:
+                self._approved.pop(next(iter(self._approved)), None)
+            self._approved[tar_id] = {
+                "leverage": getattr(event, "approved_leverage", None),
+                "stop_loss": getattr(event, "stop_loss", None),
+                "take_profit": getattr(event, "take_profit", None),
+                "strategy": getattr(event, "strategy", None),
+                "entry_context": getattr(event, "entry_context", None),
+                "run_id": getattr(event, "run_id", None),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Telegram notifier could not cache an approval: %s", exc)
+
+    @staticmethod
+    def _direction(side: str) -> str:
+        return "LONG" if side == "buy" else "SHORT" if side == "sell" else str(side).upper()
+
+    @staticmethod
+    def _held(seconds: Optional[float]) -> Optional[str]:
+        """Hold time in the largest unit that still reads naturally."""
+        if seconds is None:
+            return None
+        s = float(seconds)
+        if s < 90:
+            return f"{s:.0f}s"
+        if s < 5400:
+            return f"{s / 60:.0f}m"
+        if s < 172800:
+            return f"{s / 3600:.1f}h"
+        return f"{s / 86400:.1f}d"
+
     async def _on_entry(self, event: Any) -> None:
         tab = getattr(event, "tab", "paper")
         side = getattr(event, "side", "?")
-        direction = "LONG" if side == "buy" else "SHORT" if side == "sell" else side
+        direction = self._direction(side)
         emoji = "\U0001F7E2" if side == "buy" else "\U0001F534"  # green / red circle
         symbol = getattr(event, "symbol", "?")
         qty = getattr(event, "fill_quantity", None)
         price = getattr(event, "fill_price", None)
+        fee = getattr(event, "fee", None)
+        slippage = getattr(event, "slippage_bps", None)
+        terms = self._approved.get(str(getattr(event, "tar_id", "") or "")) or {}
 
+        # DIRECTION LEADS THE MESSAGE. It used to be a parenthetical after the
+        # raw side — "SELL (SHORT)" — and the close message did not state it at
+        # all, so an operator scrolling a channel could not tell which way a
+        # position was facing without reading entry and exit prices and doing the
+        # subtraction.
         lines = [
-            f"{emoji} <b>ENTRY</b> · {tab.upper()}",
-            f"<b>{symbol}</b> — {side.upper()} ({direction})",
+            f"{emoji} <b>{direction} OPENED</b> · {tab.upper()}",
+            f"<b>{symbol}</b>",
         ]
+
         if qty is not None and price is not None:
-            lines.append(f"Filled {qty:g} @ {price:g}")
-            lines.append(f"Notional ≈ {qty * price:,.2f} USDT")
+            notional = qty * price
+            lines.append(f"Size: {qty:g} @ {price:g}")
+            lev = terms.get("leverage")
+            if lev:
+                # Margin is what the position actually costs the account;
+                # notional is what it controls. Showing only one of them is how
+                # "10k at 5x" gets misread in either direction.
+                lines.append(
+                    f"Notional: {notional:,.2f} USDT  |  Margin: "
+                    f"{notional / float(lev):,.2f} @ <b>{int(lev)}x</b>"
+                )
+            else:
+                lines.append(f"Notional: {notional:,.2f} USDT")
+
+        # WHAT PROTECTS THIS TRADE AND WHAT PAYS FOR IT, with the distances.
+        # A bare price means nothing without knowing how far away it is.
+        stop = terms.get("stop_loss")
+        target = terms.get("take_profit")
+        if price and stop:
+            dist = abs(price - stop) / price * 100.0
+            lines.append(f"Stop: {stop:g} ({dist:.2f}% away)")
+        if price and target:
+            dist = abs(target - price) / price * 100.0
+            lines.append(f"Target: {target:g} ({dist:.2f}% away)")
+        if price and stop and target:
+            risk = abs(price - stop)
+            reward = abs(target - price)
+            if risk > 0:
+                lines.append(f"Risk/reward: 1:{reward / risk:.1f}")
+
+        if terms.get("strategy"):
+            lines.append(f"Strategy: {terms['strategy']}")
+        if fee is not None:
+            extra = f"  |  slippage {slippage:.1f} bps" if slippage is not None else ""
+            lines.append(f"Entry fee: {fee:,.2f} USDT{extra}")
+
+        # THE REASONING, IN ONE LINE. This is the snapshot the Risk Gateway took
+        # at decision time — RSI, ATR, structure, regime. It is what turns "the
+        # bot bought SOL" into something an operator can agree or disagree with.
+        context = terms.get("entry_context")
+        if context:
+            lines.append(f"\n<i>{str(context)[:220]}</i>")
+
         await self._send(tab, "\n".join(lines))
 
     async def _on_close(self, event: Any) -> None:
@@ -150,26 +262,49 @@ class TelegramNotifier:
         reason = getattr(event, "exit_reason", "closed")
         entry = getattr(event, "entry_price", None)
         exit_price = getattr(event, "exit_price", None)
+        qty = getattr(event, "quantity", None)
+        side = getattr(event, "side", "?")
+        direction = self._direction(side)
+        held = self._held(getattr(event, "held_seconds", None))
+        strategy = getattr(event, "strategy", None)
+        terms = self._approved.pop(str(getattr(event, "trade_id", "") or ""), {}) or {}
 
-        won = pnl is not None and pnl >= 0
-        emoji = "✅" if won else "\U0001F53B"  # check / red-down
+        won = pnl is not None and pnl > 0
+        flat = pnl is not None and pnl == 0
+        emoji = "\u2705" if won else ("\u26AA" if flat else "\U0001F53B")
 
         lines = [
-            f"{emoji} <b>CLOSE</b> · {tab.upper()}",
+            f"{emoji} <b>{direction} CLOSED</b> · {tab.upper()}",
             f"<b>{symbol}</b> — {reason}",
         ]
         if entry is not None and exit_price is not None:
-            lines.append(f"Entry {entry:g} → exit {exit_price:g}")
+            move = (exit_price - entry) / entry * 100.0 * (1.0 if side == "buy" else -1.0)
+            lines.append(f"Entry {entry:g} → exit {exit_price:g} ({move:+.2f}%)")
+        if held:
+            lines.append(f"Held: {held}")
+
         if pnl is not None:
             sign = "+" if pnl >= 0 else ""
-            lines.append(f"P&amp;L: <b>{sign}{pnl:,.2f}</b> USDT")
+            line = f"P&amp;L: <b>{sign}{pnl:,.2f}</b> USDT"
+            # AS A RETURN ON THE MARGIN, which is the number that answers "was
+            # that worth it?". A +100 USDT win means something different on 1,000
+            # of margin than on 20,000, and the raw figure alone cannot say which.
+            lev = terms.get("leverage")
+            if qty and entry and lev:
+                margin = (qty * entry) / float(lev)
+                if margin > 0:
+                    line += f"  ({sign}{pnl / margin * 100.0:.2f}% of margin)"
+            lines.append(line)
+
+        if strategy:
+            lines.append(f"Strategy: {strategy}")
 
         # THE TWO NUMBERS THE OPERATOR ASKED FOR AT CLOSE TIME.
         wr = await self._win_rate(tab)
         if wr is not None:
             wins, closed = wr
             rate = (wins / closed * 100.0) if closed else 0.0
-            lines.append(f"Win rate: <b>{rate:.0f}%</b> ({wins}/{closed})")
+            lines.append(f"Win rate: <b>{rate:.0f}%</b> ({wins}/{closed} on {tab})")
 
         balance = await self._balance(tab)
         if balance is not None:
@@ -303,6 +438,9 @@ def subscribe_telegram_notifier() -> bool:
     bus = get_message_bus()
     bus.subscribe("ORDER_FILLED", notifier.handle_event)
     bus.subscribe("POSITION_CLOSED", notifier.handle_event)
+    # The approval carries the trade's TERMS — leverage, stop, target, strategy,
+    # entry context — none of which are on the fill. See `_remember_approval`.
+    bus.subscribe("TAR_APPROVED", notifier.handle_event)
     channels = [tab for tab, chat in notifier._chats.items() if chat]
     logger.info("Telegram notifier ON for channel(s): %s", ", ".join(channels))
     return True

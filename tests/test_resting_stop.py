@@ -252,10 +252,13 @@ async def test_cancelling_when_there_is_no_resting_stop_is_a_no_op(venue):
 
 
 @pytest.mark.asyncio
-async def test_a_real_position_gets_a_resting_take_profit_on_the_exit_side(venue):
+async def test_a_real_position_gets_a_resting_take_profit_on_the_exit_side(monkeypatch, venue):
     monitor = get_position_monitor()
     pos = tracked(monitor, side="buy")           # long -> TP is a SELL
 
+    # The ATR target is the only target when the percentage exit is off, which is
+    # the arrangement this test was written for.
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
     await monitor._place_resting_tp(pos)
 
     assert len(venue.tps_placed) == 1
@@ -263,6 +266,72 @@ async def test_a_real_position_gets_a_resting_take_profit_on_the_exit_side(venue
     assert tp["side"] == "sell"                  # exit side, mirrors the stop
     assert tp["tp"] == 75_000.0
     assert pos.tp_order_id == "tp-1"
+
+
+@pytest.mark.asyncio
+async def test_the_resting_tp_sits_where_this_monitor_WOULD_ACTUALLY_EXIT(monkeypatch, venue):
+    """A REAL-vs-PAPER divergence, and it only bit real money.
+
+    `pos.take_profit` is the Risk Gateway's 5x-ATR level. But since
+    PROFIT_TARGET_PCT became the default exit, `_check_price` closes at a fixed
+    PERCENTAGE instead — and that is much nearer. Measured on a live 3x SOL/USDT
+    short: the 2%-of-margin target was a 0.667% move to 120.56, while the ATR
+    target sat at 116.96, 5.4x further away.
+
+    So on paper the position closed at the percentage target, and a real one did
+    too WHILE THE PROCESS WAS ALIVE — but the resting order, whose entire purpose
+    is the window when it is NOT alive, sat at the ATR level. A real trade that
+    reached its target during a deploy would sail straight through it and ride
+    back, while the paper book booked the win. Same settings, same symbol,
+    different outcome, real money only.
+    """
+    monitor = get_position_monitor()
+    pos = tracked(monitor, side="buy")           # entry 70,000, ATR target 75,000
+    pos.leverage = 2
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+
+    await monitor._place_resting_tp(pos)
+
+    # 2% of margin at 2x is a 1% PRICE move: 70,000 -> 70,700, well inside the
+    # ATR target. The exchange must enforce the exit this process would take.
+    assert venue.tps_placed[0]["tp"] == pytest.approx(70_700.0)
+
+
+@pytest.mark.asyncio
+async def test_the_resting_tp_never_sits_BEYOND_the_atr_target(monkeypatch, venue):
+    """Whichever level is reached FIRST wins, and it is not always the percentage.
+
+    At low leverage the percentage target can be further away than the ATR one —
+    at 1x, a 2% account target is a 2% price move, and a tight ATR target may sit
+    inside it. Taking the percentage unconditionally would move the resting order
+    AWAY from entry, which is the take-profit equivalent of widening a stop.
+    """
+    monitor = get_position_monitor()
+    pos = tracked(monitor, side="buy")
+    pos.leverage = 1
+    pos.take_profit = 70_350.0                   # a 0.5% ATR target, tighter than 2%
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+
+    await monitor._place_resting_tp(pos)
+    assert venue.tps_placed[0]["tp"] == pytest.approx(70_350.0)
+
+
+@pytest.mark.asyncio
+async def test_a_short_resting_tp_takes_the_HIGHER_of_the_two(monkeypatch, venue):
+    """Direction flips which comparison means "nearer to entry"."""
+    monitor = get_position_monitor()
+    pos = tracked(monitor, side="sell", stop=72_000.0)
+    pos.take_profit = 65_000.0                   # ATR target, 7.1% away
+    pos.leverage = 5
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+
+    await monitor._place_resting_tp(pos)
+
+    # 2% at 5x is a 0.4% move DOWN from 70,000 -> 69,720, nearer than 65,000.
+    assert venue.tps_placed[0]["tp"] == pytest.approx(69_720.0)
 
 
 @pytest.mark.asyncio

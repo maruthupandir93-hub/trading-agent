@@ -40,6 +40,7 @@ providers and says plainly when it has fewer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -66,6 +67,36 @@ CONSULT_CONFIDENCE_CEILING = 0.45
 MIN_DISTINCT_PROVIDERS = 2
 
 MAX_TOKENS_PER_OPINION = 400
+
+# HOW LONG THE WHOLE PANEL MAY TAKE, IN SECONDS.
+#
+# WHY THIS EXISTS, MEASURED RATHER THAN GUESSED. The call below asks for
+# `ModelTier.REASONING` because a second opinion is a judgment call, and that
+# tier's read timeout is 300s — deliberately generous, sized for a slow reasoning
+# model answering a hard question on a path nothing waits on.
+#
+# But something DOES wait on it. `external_consultation` is a node of the
+# analysis graph, and `run_analysis_graph` does not return until every node has
+# finished — so `trading_session._run_session`, which awaits that call between
+# decisions, is blind for as long as this takes. On 2026-09-25 the configured
+# consultation model stopped answering entirely and a live trace recorded:
+#
+#     external_consultation   300,612.9ms
+#
+# 300s to the millisecond: the tier ceiling, three times out of three. A session
+# that re-decides every 30s was instead re-deciding every five minutes, and the
+# cause looked like "the graph is slow" rather than "one advisory model is dead".
+#
+# THE ASYMMETRY IS THE POINT. This node is ADVISORY BY CONSTRUCTION — it writes
+# only `consultation`, and no gate reads that field. So a second opinion that
+# does not arrive costs nothing a decision depends on, while waiting five minutes
+# for it costs the monitoring cadence of a live position. Bounding it is strictly
+# better than both.
+#
+# A timeout here does NOT hide the failure: the opinion is recorded with its
+# error, `llm_health` still classifies the underlying call, and the node reports
+# the panel as unanswered rather than as agreeing.
+CONSULT_DEADLINE_S = 30.0
 
 
 @dataclass
@@ -245,13 +276,36 @@ async def consult(
             continue
 
         try:
-            response = await provider.complete(
-                system=system,
-                user=user,
-                tier=ModelTier.REASONING,
-                max_tokens=request_budget(MAX_TOKENS_PER_OPINION),
-                temperature=DEFAULT_TEMPERATURE,
+            # BOUNDED. See CONSULT_DEADLINE_S — the provider's own read timeout on
+            # this tier is 300s, and an advisory node may not hold a graph run
+            # (and therefore a live session's decision loop) open that long.
+            response = await asyncio.wait_for(
+                provider.complete(
+                    system=system,
+                    user=user,
+                    tier=ModelTier.REASONING,
+                    max_tokens=request_budget(MAX_TOKENS_PER_OPINION),
+                    temperature=DEFAULT_TEMPERATURE,
+                ),
+                timeout=CONSULT_DEADLINE_S,
             )
+        except asyncio.TimeoutError:
+            # Reported as an opinion that did not arrive, never as no opinion and
+            # never as agreement. `_parse` is not reached, so nothing is invented.
+            logger.warning(
+                "Consultation with %s exceeded the %.0fs advisory deadline and was "
+                "abandoned. The run continues without its opinion.",
+                provider.name, CONSULT_DEADLINE_S,
+            )
+            result.opinions.append(Opinion(
+                provider=provider.name,
+                error=(
+                    f"no answer within the {CONSULT_DEADLINE_S:.0f}s advisory deadline "
+                    f"(the model may be unresponsive; this is a second opinion, so the "
+                    f"decision stands without it)"
+                ),
+            ))
+            continue
         except Exception as exc:  # noqa: BLE001
             # One provider failing must not lose the others' answers.
             result.opinions.append(Opinion(provider=provider.name, error=str(exc)))

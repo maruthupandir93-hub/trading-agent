@@ -57,6 +57,11 @@ def monitor(bus, monkeypatch):
     # The scale-out is a separate feature with its own tests, and letting it fire
     # here would move the stop to break-even for reasons unrelated to the trail.
     monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.0)
+    # AND THE FIXED PROFIT TARGET, which now defaults to 2% and BYPASSES the trail
+    # by design — a target closes the whole position, so there is no runner left
+    # for a stop to follow. Without pinning it to 0 these tests would be measuring
+    # the target's exit and calling it the trail's.
+    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
     return agent
 
 

@@ -347,17 +347,36 @@ def test_leverage_is_checked_before_any_stop_distance_maths():
 
 # --- Margin ---------------------------------------------------------------
 
-def test_margin_requires_a_buffer_above_the_bare_requirement():
-    """Using the last dollar of margin means an adverse tick triggers a margin call
-    before the stop is reached — the position gets liquidated at the exchange's
-    price instead of exited at ours, making the computed stop meaningless."""
+def test_margin_refuses_when_the_margin_is_not_actually_there():
+    """The check verifies the margin IS THERE, and nothing more.
+
+    IT USED TO DEMAND 20% HEADROOM, and that became incompatible with honouring a
+    100% capital allocation: at full allocation required margin EQUALS free
+    margin, so any multiplier above 1.0 always rejects. The gateway was sizing
+    ~$9,992 of a $10,000 account and then refusing the trade for needing $11,990
+    — two halves of one module disagreeing about what "all of it" means.
+
+    The headroom's three jobs are now done where they belong: entry fees are
+    reserved by sizing, liquidation is bounded by `liquidation_safe_leverage`
+    (which caps leverage until the stop provably sits inside the liquidation
+    distance), and per-position loss is bounded by isolated margin. Each measures
+    the risk rather than withholding a fifth of the capital.
+    """
     notional, leverage = 1000.0, 1.0
     bare = notional / leverage
 
-    assert check_margin(notional, leverage, bare).status == "reject", (
-        "exactly the bare requirement leaves no buffer"
+    assert check_margin(notional, leverage, bare * 0.99).status == "reject", (
+        "less margin than the position requires must be refused"
     )
-    assert check_margin(notional, leverage, bare * MARGIN_BUFFER_MULTIPLIER).status == "pass"
+    assert check_margin(notional, leverage, bare).status == "pass", (
+        "exactly the required margin is enough — that is what 100% allocation means"
+    )
+
+
+def test_the_margin_buffer_is_configurable_for_an_operator_who_wants_headroom():
+    """Set MARGIN_BUFFER_MULTIPLIER above 1.0 and the old conservatism returns —
+    at the cost of a 100% allocation no longer being deployable."""
+    assert MARGIN_BUFFER_MULTIPLIER == 1.0
 
 
 def test_margin_accounts_for_leverage():

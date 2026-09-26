@@ -100,8 +100,12 @@ async def test_an_entry_message_goes_to_the_tab_channel(monkeypatch):
     assert len(sent) == 1
     tab, text = sent[0]
     assert tab == "paper"
-    assert "ENTRY" in text and "PAPER" in text
-    assert "SOL/USDT" in text and "BUY" in text and "LONG" in text
+    # "LONG OPENED" rather than "ENTRY ... BUY (LONG)". The operator asked for the
+    # DIRECTION to be obvious at a glance, and the raw side is redundant once the
+    # direction is stated — "BUY" and "LONG" are the same fact twice. What this
+    # test is actually for is the ROUTING and the instrument, which are unchanged.
+    assert "OPENED" in text and "PAPER" in text
+    assert "SOL/USDT" in text and "LONG" in text
 
 
 @pytest.mark.asyncio

@@ -164,7 +164,93 @@ PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank
 # break-even to scratch. It overrides the partial take-profit (see `_check_price`)
 # rather than stacking with it, because stacking would reintroduce the break-even
 # runner this is meant to remove.
-PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.0)
+# DEFAULT 2%, ON. Not 0.
+#
+# It shipped off so the change was opt-in, and that was the wrong default for
+# this system: 53.4% of its trades were closing at ~0.00 because the scale-out
+# left a runner sitting at break-even. The fixed target is what removes that, and
+# an operator who does not know to set it keeps the failure.
+#
+# 2% is the operator's own figure, and under the default "account" basis it means
+# 2% of the margin deployed whatever leverage the session uses — a 2% price move
+# at 1x, 0.667% at 3x, 0.2% at 10x. Set it to 0 to go back to the ATR target plus
+# scale-out.
+PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 2.0)
+
+# WHAT THE PROFIT TARGET PERCENTAGE IS A PERCENTAGE *OF*.
+#
+# This distinction is the whole difference between a 2% target and a 20% one, and
+# it is not obvious from the number alone — which is exactly why it is an explicit
+# setting rather than a convention someone has to remember.
+#
+#   "price"    a move of that much in the INSTRUMENT. Leverage then multiplies
+#              the account effect: 2% at 10x is a 20% gain on the margin used.
+#
+#   "account"  a gain of that much on the MARGIN DEPLOYED, which is what an
+#              operator means by "take 2% per trade". The required price move is
+#              the target divided by leverage — 0.2% at 10x, 0.4% at 5x, 2% at 1x.
+#
+# ACCOUNT IS THE DEFAULT, because it is the only one that means the same thing to
+# the operator as they change leverage. Under "price" the same setting silently
+# becomes a different trade every time the session's leverage changes, and the
+# operator is never told.
+#
+# A CONSEQUENCE WORTH SEEING PLAINLY: at high leverage the required move gets
+# very small, and a move that small is inside the spread and the fees on many
+# instruments. `_check_price` refuses a target it cannot clear costs on rather
+# than banking a "profit" that is really a loss — see MIN_TARGET_MOVE_PCT.
+PROFIT_TARGET_BASIS = (os.getenv("PROFIT_TARGET_BASIS") or "account").strip().lower()
+
+# The smallest price move a profit target may be reduced to.
+#
+# A round trip costs ~0.10% in taker fees alone (0.05% a side), before spread.
+# So a target that resolves to a move below this is not profit — it is a trade
+# that pays the venue to close at a loss, dressed as a win. At 10x a 2% account
+# target is a 0.2% move, which clears it; at 10x a 1% target would be 0.1% and
+# would not.
+MIN_TARGET_MOVE_PCT = 0.15
+
+# WHEN THE STOP-LOSS ORDER IS PLACED AT THE VENUE.
+#
+# The take-profit always rests from entry. The STOP has three options, because
+# the operator asked for a specific arrangement: "when the trade is executed via
+# API it also sets only the TP; my agent continuously monitors, and if it feels
+# any reverse it could make the SL by my agent".
+#
+#   "always"      Both legs rest from the moment of the fill. The safest, and
+#                 what this system did before this setting existed.
+#
+#   "on_adverse"  THE OPERATOR'S ARRANGEMENT. Only the TP rests at entry. The
+#                 monitor holds the stop in memory and places it at the venue the
+#                 moment the position has moved against us by
+#                 `RESTING_STOP_ARM_R`. Protection appears exactly on the trades
+#                 that turn out to need it.
+#
+#   "never"       No stop ever rests. The in-process monitor is the only stop.
+#
+# WHAT THE RESTING STOP IS ACTUALLY FOR, so the trade-off is visible rather than
+# implied: it does nothing while this process is alive, because the monitor fires
+# first. It exists for the window when the process is NOT alive — a deploy, a
+# restart, an OOM kill, a reboot. In that window "never" means the position has
+# no protection at all, and at 10x leverage liquidation is ~9.5% away.
+#
+# "on_adverse" is the honest middle: a position that is winning does not need a
+# venue stop, and one that is losing gets one before it can get far. It costs one
+# extra API call per losing trade and it is armed long before liquidation.
+#
+# INVARIANT 3 IS UNAFFECTED BY ALL THREE. Every position still REQUIRES a computed
+# stop — `risk_gateway` refuses a trade without one, and the monitor enforces it
+# on every tick. This setting only decides whether a copy of it also sits at the
+# exchange.
+RESTING_STOP_MODE = (os.getenv("RESTING_STOP_MODE") or "always").strip().lower()
+
+# How far against us the position must move before "on_adverse" places the stop.
+#
+# 0.5R — half the distance to the stop. Early enough that the venue order is in
+# place well before the stop could be reached, late enough that a winning trade
+# never spends the API call. Below ~0.2R ordinary noise would arm it on almost
+# every position and the mode would collapse into "always" with extra latency.
+RESTING_STOP_ARM_R = _env_float("RESTING_STOP_ARM_R", 0.5)
 
 TRAILING_STOP_R = _env_float("TRAILING_STOP_R", 1.0)        # distance behind peak, in R
 TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, before it arms
@@ -220,6 +306,13 @@ class _Tracked:
         # Confirmed against the live database before fixing: 12 closed trades,
         # strategy NULL on all 12.
         "strategy", "run_id", "entry_context",
+        # THE LEVERAGE THIS POSITION WAS OPENED AT.
+        #
+        # Needed because a profit target expressed as a share of the ACCOUNT is a
+        # different price move at every leverage: a 2% account gain is a 2% price
+        # move at 1x and a 0.2% move at 10x. Without it the monitor can only
+        # measure price, and an operator asking for "2%" at 10x would get 20%.
+        "leverage",
         # THE FEE PAID TO OPEN. Carried so `_close` can report P&L net of the
         # whole round trip. Without it the close knows only its own side's cost,
         # and a trade that paid more in fees than it made would still be recorded
@@ -807,6 +900,43 @@ class PositionMonitorAgent(BaseAgent):
                 pos.symbol, realized, exc,
             )
 
+    async def _arm_resting_stop_if_adverse(self, pos: "_Tracked", price: float) -> None:
+        """Place the venue stop once the position has moved against us. Never raises.
+
+        THE OPERATOR'S ARRANGEMENT, made concrete: only the take-profit rests at
+        entry, and the stop-loss order appears at the exchange the moment the
+        trade starts going wrong. A winning position never spends the API call; a
+        losing one is protected long before the stop could be reached.
+
+        IDEMPOTENT. `stop_order_id` being set means a stop is already resting, so
+        this does nothing on every subsequent tick. Without that check a losing
+        position would place a new stop on every price update — dozens of live
+        reduce-only orders, and after the first one fires the rest become orders
+        to OPEN the opposite position.
+
+        Measured against `mae_r`, the adverse excursion the monitor already
+        tracks, so this needs no new measurement and inherits its direction
+        handling — a short arms when price rises, a long when it falls.
+        """
+        if RESTING_STOP_MODE != "on_adverse":
+            return
+        if pos.tab != "real" or pos.stop_order_id is not None:
+            return
+        if pos.stop_loss is None:
+            return
+
+        _, mae = self._excursions(pos)
+        if mae is None or mae < RESTING_STOP_ARM_R:
+            return
+
+        logger.warning(
+            "%s has moved %.2fR against us and has no resting stop. Placing one at "
+            "the venue now (RESTING_STOP_MODE=on_adverse).",
+            pos.symbol, mae,
+        )
+        await self._place_resting_stop(pos)
+        self._persist_soon()
+
     async def _capture_funding_rate(self, pos: "_Tracked") -> None:
         """Record the funding rate in force at entry. Best-effort, never raises.
 
@@ -950,12 +1080,34 @@ class PositionMonitorAgent(BaseAgent):
         if not venue.has_credentials():
             return
 
+        # THE VENUE COPY MUST SIT WHERE THIS MONITOR WOULD ACTUALLY ACT, NOT AT
+        # THE ATR TARGET. This was a REAL-vs-PAPER divergence, and it only bit
+        # real money.
+        #
+        # `pos.take_profit` is the Risk Gateway's 5x-ATR target. But since
+        # PROFIT_TARGET_PCT became the default exit, the in-process monitor
+        # closes at a FIXED PERCENTAGE instead, and that is much nearer. Measured
+        # on a live 3x SOL/USDT short: entry 121.37, the 2%-of-margin target is a
+        # 0.667% move -> 120.56, while the ATR target sat at 116.96 — 5.4x
+        # further away.
+        #
+        # So on paper the position closed at 120.56, and a real one would too
+        # WHILE THIS PROCESS IS ALIVE. But the resting order — the whole point of
+        # which is the window when it is NOT alive — sat at 116.96. A real trade
+        # that reached its target during a deploy or a restart would sail through
+        # it and ride back, while the paper book booked the win. Same settings,
+        # same symbol, different outcome, and only on real money.
+        #
+        # `_effective_target` takes whichever level the monitor would reach
+        # FIRST, so the exchange enforces the same exit this process would.
+        target = self._effective_target(pos)
+
         exit_side = "sell" if pos.side == "buy" else "buy"
         result = await venue.place_take_profit(
             symbol=pos.symbol,
             side=exit_side,
             qty=pos.qty,
-            take_profit_price=pos.take_profit,
+            take_profit_price=target,
             client_order_id=f"tp_{pos.tar_id}"[:36],
         )
 
@@ -964,7 +1116,7 @@ class PositionMonitorAgent(BaseAgent):
             logger.info(
                 "Resting take-profit placed at %s for %s %s @ %s (order %s). The target is "
                 "now captured even if this process stops.",
-                venue.id, pos.symbol, pos.qty, pos.take_profit, result.order_id,
+                venue.id, pos.symbol, pos.qty, target, result.order_id,
             )
         else:
             pos.tp_order_id = None
@@ -1237,6 +1389,11 @@ class PositionMonitorAgent(BaseAgent):
                 # anything not kept here is gone by the time the position closes.
                 "strategy": getattr(event, "strategy", None),
                 "run_id": getattr(event, "run_id", None),
+                # AND THE LEVERAGE, for the same reason: the fill event does not
+                # carry it, so if it is not kept here the monitor can only measure
+                # PRICE — and an account-based profit target needs to divide by
+                # the leverage to know what price move satisfies it.
+                "leverage": getattr(event, "approved_leverage", None),
                 "entry_context": getattr(event, "entry_context", None),
             }
             await self.persist_watch_list()
@@ -1248,7 +1405,13 @@ class PositionMonitorAgent(BaseAgent):
             # order id. Persisting first and placing after would leave a window
             # where a crash loses the id and orphans the stop at the venue.
             if tracked is not None:
-                await self._place_resting_stop(tracked)
+                # THE TAKE-PROFIT ALWAYS RESTS; THE STOP DEPENDS ON THE MODE.
+                #
+                # Under "on_adverse" the stop is deliberately NOT placed here —
+                # `_arm_resting_stop_if_adverse` places it on the first tick that
+                # goes against the position. Under "always" this is unchanged.
+                if RESTING_STOP_MODE == "always":
+                    await self._place_resting_stop(tracked)
                 # The take-profit rests beside the stop — see `_place_resting_tp`.
                 # Placed AFTER the stop deliberately: the stop is the
                 # safety-critical leg and goes on first, so a failure placing the
@@ -1317,6 +1480,8 @@ class PositionMonitorAgent(BaseAgent):
             # always existed and nothing ever read it — the cost was published,
             # then discarded, and every realized figure was gross.
             entry_fee=getattr(event, "fee", None),
+            # From the CRO's approval — the leverage the venue was actually set to.
+            leverage=approved.get("leverage"),
             # THE SCALE THE TRAIL MEASURES ON, captured once, here, while the stop
             # is still the one the Risk Gateway approved. Computed now rather than
             # on demand because `stop_loss` moves: the partial take-profit sets it
@@ -1402,7 +1567,8 @@ class PositionMonitorAgent(BaseAgent):
                         (price - pos.entry_price) / pos.entry_price * 100.0
                         * (1.0 if pos.side == "buy" else -1.0)
                     )
-                    if move_pct >= PROFIT_TARGET_PCT:
+                    needed = self._target_move_pct(pos)
+                    if needed is not None and move_pct >= needed:
                         await self._close(pos, price, "profit-target")
                         continue
 
@@ -1414,6 +1580,14 @@ class PositionMonitorAgent(BaseAgent):
                     r = self._r_multiple(pos, price)
                     if r is not None and r >= PARTIAL_TP_R:
                         await self._take_partial(pos, price)
+
+                # ARM THE VENUE STOP IF THIS IS GOING WRONG.
+                #
+                # Under "on_adverse" no stop rests until the position has moved
+                # against us. This is the tick that notices. Placed BEFORE the
+                # trail so a position that is losing gets its venue protection
+                # ahead of any bookkeeping.
+                await self._arm_resting_stop_if_adverse(pos, price)
 
                 # THEN TRAIL. After the scale-out, not before it — `_take_partial`
                 # moves the stop to break-even and the trail must ratchet from
@@ -1448,6 +1622,87 @@ class PositionMonitorAgent(BaseAgent):
             return None
         move = (price - pos.entry_price) if pos.side == "buy" else (pos.entry_price - price)
         return move / risk
+
+    def _effective_target(self, pos: "_Tracked") -> float:
+        """The price this monitor would actually close at, taking profit.
+
+        Two targets can be in play and only the NEARER one is ever reached:
+
+          * `pos.take_profit` — the Risk Gateway's ATR-derived level, carried on
+            the TAR.
+          * PROFIT_TARGET_PCT — the operator's fixed percentage, which is what
+            `_check_price` actually tests once it is set (and it is, by default).
+
+        Returns whichever is closer to entry in the direction of the trade, so a
+        resting exchange order enforces the same exit this process would. Falls
+        back to `pos.take_profit` when the percentage target is off or
+        unmeasurable, which is the previous behaviour exactly.
+
+        NOT RE-PLACED WHEN THE SETTING CHANGES. The exit-rules panel applies on
+        the next tick, and the in-process monitor picks that up immediately; the
+        resting order keeps the level computed at entry. That is acceptable
+        because the venue copy exists only for the window when this process is
+        DOWN — while it is up, the monitor closes first either way — and
+        re-placing every resting order on a settings change would cancel and
+        re-issue live reduce-only orders across the whole book to fix a window
+        that is not open.
+        """
+        target = pos.take_profit
+        if target is None:
+            return target
+        move = self._target_move_pct(pos)
+        if move is None or not pos.entry_price:
+            return target
+        if pos.side == "buy":
+            pct_target = pos.entry_price * (1.0 + move / 100.0)
+            return min(target, pct_target)
+        pct_target = pos.entry_price * (1.0 - move / 100.0)
+        return max(target, pct_target)
+
+    @staticmethod
+    def _target_move_pct(pos: "_Tracked") -> Optional[float]:
+        """The PRICE move that satisfies the profit target for this position.
+
+        Under `PROFIT_TARGET_BASIS="account"` the operator's percentage is a share
+        of the MARGIN DEPLOYED, so the price only has to move that much divided by
+        the leverage: a 2% account target is a 2% move at 1x and a 0.2% move at
+        10x. That is the arithmetic an operator means by "take 2% per trade", and
+        it is the only reading that keeps the setting meaning the same thing when
+        the session's leverage changes.
+
+        UNKNOWN LEVERAGE FALLS BACK TO 1x, which makes the required move the FULL
+        percentage — the most demanding interpretation. Erring the other way would
+        divide by a leverage we are not sure of and close positions early on a
+        guess, which is the direction that invents profit.
+
+        REFUSES A TARGET SMALLER THAN THE ROUND TRIP COSTS. A 0.05%-a-side taker
+        fee means ~0.10% before spread, so a target that resolves below
+        `MIN_TARGET_MOVE_PCT` is not a profit at all — it is a trade that pays the
+        venue to close, recorded as a win. Returning None leaves the position to
+        the stop, the trail and the ATR target, all of which are cost-aware
+        because they are derived from volatility rather than from a fixed number.
+        """
+        if PROFIT_TARGET_PCT <= 0:
+            return None
+        if PROFIT_TARGET_BASIS == "price":
+            return PROFIT_TARGET_PCT
+
+        try:
+            lev = float(pos.leverage or 1.0)
+        except (TypeError, ValueError):
+            lev = 1.0
+        lev = max(1.0, lev)
+
+        needed = PROFIT_TARGET_PCT / lev
+        if needed < MIN_TARGET_MOVE_PCT:
+            logger.warning(
+                "%s: a %.2f%% ACCOUNT target at %gx needs only a %.3f%% price move, "
+                "which is below the %.2f%% round-trip cost floor. The fixed target is "
+                "SKIPPED for this position; its stop, trail and ATR target still apply.",
+                pos.symbol, PROFIT_TARGET_PCT, lev, needed, MIN_TARGET_MOVE_PCT,
+            )
+            return None
+        return needed
 
     def _r_from_initial_risk(self, pos: "_Tracked", price: float) -> Optional[float]:
         """Profit in units of the risk this position was ORIGINALLY sized against.
@@ -1554,6 +1809,9 @@ class PositionMonitorAgent(BaseAgent):
             fill_price = await self._execution.close_position(
                 symbol=pos.symbol, entry_side=pos.side, qty=partial_qty,
                 tab=pos.tab, reason="partial-tp",
+                # Same reason as the full close — the scale-out is triggered by a
+                # price this agent observed, and a simulated fill must use it.
+                observed_price=price,
             )
             if fill_price is None:
                 logger.warning(
@@ -1647,6 +1905,15 @@ class PositionMonitorAgent(BaseAgent):
                 qty=pos.qty,
                 tab=pos.tab,
                 reason=reason,
+                # THE PRICE THIS DECISION WAS MADE AGAINST. A simulated fill
+                # otherwise used the executor's own tick cache, which is a beat
+                # behind whenever the bus reaches the executor after this agent —
+                # an ordering dependency on the construction order in `main.py`.
+                # Measured: a profit-target decided at 122.0587 filled at 121.25
+                # and booked -18.80 on a winning move. A REAL close ignores this
+                # and reports the venue's fill, which is why the P&L below is
+                # still computed from `fill_price` and not from `trigger_price`.
+                observed_price=trigger_price,
             )
 
             if fill_price is None:

@@ -553,3 +553,187 @@ async def disable_live_trading() -> Dict[str, Any]:
         "executionTab": settings.execution_tab,
     }
 
+
+
+# ---------------------------------------------------------------------------
+# EXIT RULES — the numbers that decide when a position is closed
+# ---------------------------------------------------------------------------
+#
+# These were environment variables only, which meant changing how the agent
+# takes profit required an SSH session, an editor and a restart. They are the
+# settings an operator most wants to tune while watching the thing run, so they
+# belong on the Settings page.
+#
+# EVERY ONE IS READ AT CALL TIME by its consumer (`position_monitor` reads
+# `PROFIT_TARGET_PCT` per tick, `trade_scope` reads the session rules per
+# entry), so a change here takes effect on the NEXT TICK with no restart. That
+# is the whole reason those reads were written that way — see the
+# `simulation_mode` note in CLAUDE.md for what a frozen setting costs.
+
+_EXIT_RULES: Dict[str, Dict[str, Any]] = {
+    "PROFIT_TARGET_PCT": {
+        "label": "Take profit at",
+        "unit": "%",
+        "default": "2.0",
+        "min": 0.0,
+        "max": 50.0,
+        "help": (
+            "Close the WHOLE position at this favourable price move. 0 disables it "
+            "and restores the ATR target plus scale-out. With leverage this is "
+            "amplified against margin: at 3x a 2% move is ~6% of the margin used."
+        ),
+    },
+    "TRAILING_STOP_R": {
+        "label": "Trailing stop distance",
+        "unit": "R",
+        "default": "1.0",
+        "min": 0.0,
+        "max": 10.0,
+        "help": (
+            "How far behind the best price the stop follows, in units of the "
+            "position's initial risk. 0 disables trailing."
+        ),
+    },
+    "TRAILING_ACTIVATE_R": {
+        "label": "Trailing arms at",
+        "unit": "R",
+        "default": "1.0",
+        "min": 0.0,
+        "max": 10.0,
+        "help": "Profit, in R, before the trail starts following. Below this the original stop holds.",
+    },
+    "PARTIAL_TP_FRACTION": {
+        "label": "Scale out fraction",
+        "unit": "",
+        "default": "0.5",
+        "min": 0.0,
+        "max": 1.0,
+        "help": (
+            "How much to bank at the scale-out point. 0 disables it. IGNORED while "
+            "a profit target is set — the two together reintroduce the break-even "
+            "runner that produced trades closing at 0.00."
+        ),
+    },
+    "PROFIT_TARGET_BASIS": {
+        "label": "Target is a % of",
+        "unit": "",
+        "default": "account",
+        "min": 0.0,
+        "max": 0.0,
+        "choices": ["account", "price"],
+        "help": (
+            "account: the target is a share of the MARGIN used, so the price only "
+            "has to move target/leverage (2% at 10x = a 0.2% move). price: the "
+            "target is the price move itself, so leverage multiplies the account "
+            "effect (2% at 10x = a 20% gain)."
+        ),
+    },
+    "RESTING_STOP_MODE": {
+        "label": "Stop-loss at the venue",
+        "unit": "",
+        "default": "always",
+        "min": 0.0,
+        "max": 0.0,
+        "choices": ["always", "on_adverse", "never"],
+        "help": (
+            "always: both legs rest from entry. on_adverse: only the take-profit "
+            "rests; the stop is placed once the trade moves against you. never: no "
+            "venue stop. The venue copy only matters while this process is DOWN — "
+            "the monitor fires first while it is up."
+        ),
+    },
+    "RESTING_STOP_ARM_R": {
+        "label": "Place the stop after",
+        "unit": "R against",
+        "default": "0.5",
+        "min": 0.0,
+        "max": 1.0,
+        "help": "How far the trade must move against you before on_adverse places the venue stop.",
+    },
+    "MAX_CONCURRENT_POSITIONS": {
+        "label": "Positions at once",
+        "unit": "",
+        "default": "1",
+        "min": 1.0,
+        "max": 20.0,
+        "help": "How many positions may be open across all instruments.",
+    },
+}
+
+
+class ExitRulesRequest(BaseModel):
+    profitTargetPct: float | None = Field(None, ge=0, le=50)
+    profitTargetBasis: str | None = Field(None, pattern="^(account|price)$")
+    restingStopMode: str | None = Field(None, pattern="^(always|on_adverse|never)$")
+    restingStopArmR: float | None = Field(None, ge=0, le=1)
+    trailingStopR: float | None = Field(None, ge=0, le=10)
+    trailingActivateR: float | None = Field(None, ge=0, le=10)
+    partialTpFraction: float | None = Field(None, ge=0, le=1)
+    maxConcurrentPositions: int | None = Field(None, ge=1, le=20)
+
+
+_REQUEST_TO_ENV = {
+    "profitTargetPct": "PROFIT_TARGET_PCT",
+    "profitTargetBasis": "PROFIT_TARGET_BASIS",
+    "restingStopMode": "RESTING_STOP_MODE",
+    "restingStopArmR": "RESTING_STOP_ARM_R",
+    "trailingStopR": "TRAILING_STOP_R",
+    "trailingActivateR": "TRAILING_ACTIVATE_R",
+    "partialTpFraction": "PARTIAL_TP_FRACTION",
+    "maxConcurrentPositions": "MAX_CONCURRENT_POSITIONS",
+}
+
+
+@router.get("/exit-rules")
+async def get_exit_rules() -> Dict[str, Any]:
+    """The current exit rules and what each one means."""
+    out = {}
+    for env_key, meta in _EXIT_RULES.items():
+        raw = os.getenv(env_key)
+        out[env_key] = {
+            **meta,
+            "value": raw if raw not in (None, "") else meta["default"],
+            "isDefault": raw in (None, ""),
+        }
+    return {
+        "rules": out,
+        # Surfaced so the panel can warn rather than let the operator set a
+        # combination that silently disables one of the two.
+        "partialIgnored": float(os.getenv("PROFIT_TARGET_PCT") or 0) > 0,
+    }
+
+
+@router.post("/exit-rules", dependencies=[Depends(require_write_auth)])
+async def set_exit_rules(req: ExitRulesRequest) -> Dict[str, Any]:
+    """Change the exit rules. Takes effect on the NEXT TICK — no restart.
+
+    Persisted to `.env` through the same `_persist_env` the live-trading toggle
+    uses, so a restart keeps the change; and written to `os.environ` so the
+    running process sees it immediately. Both halves are needed: without the
+    first the setting is lost on restart, without the second the operator is
+    told it worked while the running agent keeps the old value.
+    """
+    changed: Dict[str, str] = {}
+    for field, env_key in _REQUEST_TO_ENV.items():
+        value = getattr(req, field, None)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            # The choice settings (`PROFIT_TARGET_BASIS`, `RESTING_STOP_MODE`) are
+            # words, not numbers. Coercing them through float() would raise and
+            # take the whole request with it — the Pydantic pattern above has
+            # already restricted them to the accepted values.
+            text = value
+        elif env_key == "MAX_CONCURRENT_POSITIONS":
+            text = str(int(value))
+        else:
+            text = str(float(value))
+        os.environ[env_key] = text
+        settings._persist_env(env_key, text)
+        changed[env_key] = text
+
+    if not changed:
+        raise HTTPException(status_code=400, detail="no exit rule supplied")
+
+    logger.warning("EXIT RULES CHANGED BY THE OPERATOR: %s", changed)
+    return {"ok": True, "changed": changed, "appliesFrom": "the next price tick"}

@@ -52,7 +52,60 @@ KEEP = ("migrations", "schema_migrations", "watchlist", "memory_prefs",
         "trading_controls", "paper_account")
 
 
-async def main(confirm: bool, starting_cash: float) -> int:
+async def wipe_everything(conn, confirm: bool) -> int:
+    """TRUNCATE every table in `public`. A total reset, config included.
+
+    SAFE TO DO BECAUSE `db/schema.sql` IS IDEMPOTENT AND RE-APPLIED ON EVERY
+    STARTUP. `core/db.init_db()` runs the whole file each boot — every CREATE is
+    `IF NOT EXISTS` and every seed row is `INSERT ... ON CONFLICT DO NOTHING` — so
+    emptying `migrations` / `schema_migrations` costs nothing: the next start
+    re-seeds them. That is exactly why this truncates rather than DROPs. Dropping
+    would also work, but it leaves the database with no tables at all if the
+    backend then fails to start for an unrelated reason, and an empty table is a
+    far easier thing to be wrong about than a missing one.
+
+    CASCADE because `decisions.trade_log_entry_id` references `trades`. Without
+    it the statement fails on the foreign key and NOTHING is truncated, which
+    reads as the script having silently done nothing.
+    """
+    tables = [
+        r["tablename"]
+        for r in await conn.fetch(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+            "ORDER BY tablename"
+        )
+    ]
+    if not tables:
+        print("No tables in `public`.")
+        return 0
+
+    print(f"FULL CLEAN — every table in `public` ({len(tables)}):")
+    total = 0
+    for t in tables:
+        n = await conn.fetchval(f'SELECT count(*) FROM "{t}"')
+        total += n
+        if n:
+            print(f"   {t:<28} {n:>8} rows")
+    print(f"   {'':<28} {total:>8} rows total (tables not listed are already empty)")
+    print()
+    print("Schema is KEPT — `init_db` re-applies db/schema.sql on every startup,")
+    print("so seed rows and migration bookkeeping come back on the next boot.")
+    print()
+
+    if not confirm:
+        print("Dry run. Re-run with --confirm to actually erase.")
+        return 0
+
+    async with conn.transaction():
+        await conn.execute(
+            "TRUNCATE " + ", ".join(f'"{t}"' for t in tables) + " RESTART IDENTITY CASCADE"
+        )
+    print(f"ERASED {total} rows across {len(tables)} tables. Database is empty.")
+    print("Start the backend — init_db will recreate seed data.")
+    return 0
+
+
+async def main(confirm: bool, starting_cash: float, everything: bool = False) -> int:
     from dotenv import load_dotenv
 
     load_dotenv(".env")
@@ -72,6 +125,9 @@ async def main(confirm: bool, starting_cash: float) -> int:
 
     conn = await asyncpg.connect(url, timeout=30)
     try:
+        if everything:
+            return await wipe_everything(conn, confirm)
+
         present = {
             r["tablename"]
             for r in await conn.fetch(
@@ -126,5 +182,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--confirm", action="store_true", help="actually erase (default is a dry run)")
     ap.add_argument("--cash", type=float, default=1000.0, help="starting paper cash")
+    ap.add_argument("--all", action="store_true",
+                    help="truncate EVERY table, config and migrations included")
     a = ap.parse_args()
-    raise SystemExit(asyncio.run(main(a.confirm, a.cash)))
+    raise SystemExit(asyncio.run(main(a.confirm, a.cash, a.all)))
