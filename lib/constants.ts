@@ -52,9 +52,33 @@ export const THEMES: Record<string, { label: string; accent: string; accentDim: 
   magenta: { label: 'Cyberpunk', accent: '#ff5fd8', accentDim: '#8a2f70' },
 };
 
+// THE SAME FIVE `db/schema.sql` SEEDS, AND THE TWO MUST AGREE.
+//
+// There are two writers of the `watchlist` table and they used to disagree.
+// `MarketData.tsx` mirrors the browser's copy back to Postgres on every change,
+// so whenever the table is EMPTY the browser refills it from this constant —
+// which is exactly what happened after a full database reset on 2026-09-26:
+// `schema.sql` seeded five crypto pairs and a browser tab immediately wrote
+// NVDA and SPY back on top, leaving seven.
+//
+// Same arrangement (and same hazard) as the ATR multipliers in
+// `lib/riskManager.ts` and `backend/core/risk_manager.py`: two copies of one
+// list, kept in step deliberately. Change `db/schema.sql` and this together.
+//
+// THE EQUITIES ARE GONE ON PURPOSE. This agent trades crypto PERPETUAL FUTURES
+// through ccxt — it cannot open a position in NVDA or SPY at all, so listing
+// them offered the operator a session symbol that every entry path would refuse.
+//
+// BTC STAYS, AND IT IS NOT TRADEABLE. `tradeable_universe` blocks it by default
+// and `start_session` refuses a session on it. It belongs here because it is the
+// market's beta: the regime triggers are attributed to it, `REGIME_WATCH` polls
+// it, and `market_context` reads it as the benchmark for every other symbol's
+// relative strength. "What needs prices?" and "what may we open?" are two
+// different questions with two different answers.
 export const DEFAULT_WATCHLIST = [
   { symbol: 'BTC/USDT', type: 'crypto' as const, binance: 'btcusdt' },
   { symbol: 'ETH/USDT', type: 'crypto' as const, binance: 'ethusdt' },
-  { symbol: 'NVDA', type: 'equity' as const },
-  { symbol: 'SPY', type: 'equity' as const },
+  { symbol: 'SOL/USDT', type: 'crypto' as const, binance: 'solusdt' },
+  { symbol: 'XRP/USDT', type: 'crypto' as const, binance: 'xrpusdt' },
+  { symbol: 'DOGE/USDT', type: 'crypto' as const, binance: 'dogeusdt' },
 ];

@@ -2134,6 +2134,31 @@ through its own 2% target (122.43 against a 119.88 entry is +2.13%). The run_id
 split is what settled it. Check the discriminator before concluding a harness
 caused something.
 
+### The watchlist has TWO seed sources, and only one of them was there
+
+`memory_prefs`, `paper_account` and `trading_controls` all carry a seed row in
+`db/schema.sql`, so a full reset empties them and the next `init_db` puts them
+straight back. `watchlist` had none — making it the ONE table where a reset was a
+permanent loss, with nothing saying so. A reset on 2026-09-26 erased it.
+
+Seeding it exposed the second writer. `components/MarketData.tsx` mirrors the
+BROWSER's copy back to Postgres on every change, so whenever the table is EMPTY
+an open tab refills it from `lib/constants.DEFAULT_WATCHLIST`. Within seconds of
+the schema seeding five crypto pairs, a tab wrote NVDA and SPY back on top and
+the table held seven rows with no indication where the extra two came from.
+
+The two lists are now identical and `lib/watchlistSeed.test.ts` fails when they
+drift — the same arrangement, and the same hazard, as the ATR multipliers in
+`lib/riskManager.ts` and `backend/core/risk_manager.py`.
+
+**THE EQUITIES ARE GONE ON PURPOSE.** This agent trades crypto perpetual futures
+through ccxt and cannot open a position in NVDA or SPY at all, so listing them
+offered the operator a session symbol that every entry path would then refuse —
+which reads as the agent being broken rather than as the instrument being
+impossible. **BTC STAYS AND IS STILL NOT TRADEABLE**, for the reason the
+tradeable-universe section above gives: it is the benchmark every alt decision
+reads, and "what needs prices?" is a different question from "what may we open?".
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -2210,7 +2235,7 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 32 files / 469 tests, must all pass
+npm run test                        # vitest; 33 files / 475 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
@@ -2218,7 +2243,7 @@ npm run build                       # catches route/provider issues tsc won't
 Vitest run alongside `tsc` or `next build` on a memory-constrained
 machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (32/32, 469/469, verified over five consecutive runs). The
+deterministic (33/33, 475/475, verified over five consecutive runs). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing

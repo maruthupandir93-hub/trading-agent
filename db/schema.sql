@@ -445,6 +445,39 @@ CREATE TABLE IF NOT EXISTS watchlist (
   binance_symbol  text
 );
 
+-- SEEDED, AND IT WAS NOT BEFORE — which cost the operator their watchlist.
+--
+-- `memory_prefs`, `paper_account` and `trading_controls` all carry a seed row
+-- here, so a full reset (`scripts/reset_database.py --all`) empties them and the
+-- next `init_db` puts them straight back. `watchlist` had no seed, so it was the
+-- ONE table where a reset was a permanent loss — and nothing said so. On
+-- 2026-09-26 a reset erased four symbols that had to be re-entered by hand.
+--
+-- These five are the operator's trading universe. Kept in the DISPLAY form
+-- (`SOL/USDT`, not `SOL/USDT:USDT`) because that is the form every caller in
+-- this system uses; `Venue.resolve_symbol` maps it to the venue's perpetual at
+-- the order boundary, and `tradeable_universe._normalise` strips the settle
+-- suffix when comparing, so one spelling is enough here.
+--
+-- BTC IS HERE AS A SIGNAL, NOT AS SOMETHING TO TRADE. `tradeable_universe`
+-- blocks it by default (`UNTRADEABLE_SYMBOLS`), and `start_session` refuses a
+-- session on it outright. It stays in the watchlist because it is the market's
+-- beta: `triggers.py` attributes regime triggers to it, `REGIME_WATCH` polls it,
+-- and `market_context` reads it as the benchmark for every other symbol's
+-- relative strength. Removing it as an OBSERVED symbol would blind every alt
+-- decision — the two questions ("what needs prices?" and "what may we open?")
+-- are answered by two different lists on purpose.
+--
+-- ON CONFLICT DO NOTHING, so an operator who removes one from the dashboard does
+-- not have it silently reappear on the next restart. Only a wiped table refills.
+INSERT INTO watchlist (symbol, type) VALUES
+  ('BTC/USDT',  'crypto'),
+  ('ETH/USDT',  'crypto'),
+  ('SOL/USDT',  'crypto'),
+  ('XRP/USDT',  'crypto'),
+  ('DOGE/USDT', 'crypto')
+ON CONFLICT (symbol) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS config (
   id                 text PRIMARY KEY DEFAULT 'default',
   provider           text NOT NULL,
