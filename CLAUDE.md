@@ -2134,6 +2134,103 @@ through its own 2% target (122.43 against a 119.88 entry is +2.13%). The run_id
 split is what settled it. Check the discriminator before concluding a harness
 caused something.
 
+### Paper trades with REAL fills — the Bybit testnet mirror
+
+A simulated fill books at the last observed price, instantly, in full. That is
+honest bookkeeping and also the most flattering possible execution: no spread
+crossed, no slippage, no partial fill, no minimum size, no leverage rejection, no
+rate limit, no venue outage. Every one of those is a real cost that appears on
+day one of real money and on none of the paper days before it.
+
+`services/paper_testnet` + Settings -> "Connect to Bybit testnet". With it on, a
+PAPER entry places a real market order on Bybit's TESTNET and the paper book is
+credited with the price the exchange returned. Same book, same P&L, same panels —
+the fill simply stops being a model. Closes are mirrored too, reduce-only,
+because a mirrored entry that closes only locally leaves a real position open on
+the testnet account which then drifts from the paper book.
+
+FOUR PROPERTIES, EACH ENFORCED RATHER THAN DOCUMENTED:
+
+1. **Unreachable while `LIVE_TRADING` is on.** The execution agent consults it
+   inside `if self.simulation_mode:`, which is false whenever live trading is on.
+   Asserted structurally, because the guarantee IS the code's shape.
+2. **It can never touch mainnet.** `bybit` and `testnet=True` are HARDCODED, not
+   read from `EXCHANGE_ID` — a mirror a config typo could point at mainnet is not
+   a testing aid. Binance is not an option anyway: ccxt dropped its futures
+   testnet, which is why this project's Binance order path is still unverified.
+3. **It never blocks a paper trade.** Any failure — outage, refused size, expired
+   key — falls back to the simulated fill. A paper account that stops working
+   because a sandbox is down is the worse failure.
+4. **The fallback is visible.** `trades.exchange_order_id` is already this
+   system's discriminator: set means a venue order stood behind the row, NULL
+   means it did not.
+
+THE TOGGLE VERIFIES WITH A REAL AUTHENTICATED CALL rather than checking that a
+key exists. A key can be revoked, lack trade permission, or be a MAINNET key
+pasted into the testnet slot, and all three look identical until an order is
+refused. Enabling without credentials is REFUSED — a switch that reports success
+while every order it routes is rejected is the `simulation_mode` failure again.
+
+**`pos.tab != "real"` STOPPED BEING THE RIGHT QUESTION.** Six copies of it
+guarded the venue calls in `position_monitor`, and they all meant "is there a
+real order behind this position?". With the mirror on, a paper position genuinely
+exists at the testnet, so `_venue_backed()` replaces them and `_venue_for()`
+routes each position's orders to ITS venue. Leaving the old guard would open a
+real testnet position with NO stop at the venue — the exact gap the resting stop
+exists to close — and would make the test unfaithful in the one direction that
+matters: it would look safer than the real thing. Sending a mirrored position's
+stop to the MAINNET client would be worse still: live orders against a position
+that does not exist there.
+
+One deliberate asymmetry with the live path: a leverage refusal does NOT abort a
+mirrored order. On mainnet, filling at a leverage we know is wrong is trading on
+a false number and the trade aborts. On testnet the position is play money and a
+less-faithful mirror still beats no mirror.
+
+`tests/test_paper_testnet.py` pins all four properties and the routing.
+
+### The fixed profit target was reversed, and both decisions were right
+
+`PROFIT_TARGET_PCT` shipped OFF, was defaulted to 2.0, and is now 0 again. That
+is not churn — each step corrected the one before, and the arithmetic for the
+last one is worth keeping because it is not obvious.
+
+It was defaulted ON because 53.4% of trades were closing at ~0.00: the scale-out
+banked half at +1R, moved the runner's stop to break-even, and the runner
+scratched. A fixed target closes the WHOLE position and removes that.
+
+The cost nobody had computed: the target is a percentage of MARGIN, so the PRICE
+move it needs is `PROFIT_TARGET_PCT / leverage` — while the stop stays at 2.5x
+ATR and does NOT shrink. They collide as leverage rises. Measured on a live
+XRP/USDT session (ATR 0.504%, stop 1.26%):
+
+    2.0% at 10x  ->  0.20% target vs 1.26% stop  ->  93.2% break-even
+    2.0% at  3x  ->  0.67% target vs 1.26% stop  ->  70.6% break-even
+    0 (ATR pair) ->  2.52% target vs 1.26% stop  ->  36.0% break-even
+
+Measured live win rate at the time: 54.5% (6 of 11). A 93% break-even is losing
+by construction.
+
+**0 DOES NOT MEAN "NO TARGET", and the Settings help text now says so.** Every
+position always carries an ATR stop (2.5x) and an ATR target (5.0x), checked on
+every tick by `_check_price`. This setting only ever added a NEARER exit that
+overrode the target. Turning it off hands the exit back to the ATR pair, which is
+2:1 BY CONSTRUCTION at every leverage and adapts to each instrument's own
+volatility — the property a fixed percentage cannot have. To keep 2:1 with a
+fixed target it has to be about `3.6 x leverage`.
+
+**`PARTIAL_TP_FRACTION` HAD TO MOVE WITH IT (0.5 -> 0).** The scale-out is gated
+on `PROFIT_TARGET_PCT <= 0`, so it was dormant only BECAUSE the target was on.
+Turning the target off alone would have woken it and restored the exact failure
+the target was introduced to remove.
+
+A TESTING LESSON FROM THE SAME CHANGE: `tests/test_partial_tp.py` pinned the
+profit target off in its fixture but INHERITED `PARTIAL_TP_FRACTION` from the
+default. When that default moved to 0 the scale-out stopped firing and four tests
+failed — a file testing the scale-out mechanism had been relying on it being the
+default. A test that reads its own enablement from a default is really a test of
+the default, and it breaks the moment an operator changes their mind.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -2243,7 +2340,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2023 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2059 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

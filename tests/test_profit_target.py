@@ -90,17 +90,60 @@ def _tick(monitor, price):
 # The target itself
 # ---------------------------------------------------------------------------
 
-def test_it_defaults_to_two_percent_and_is_ON(monkeypatch):
-    """It shipped OFF and that was the wrong default for this system.
+def test_it_defaults_to_OFF_and_the_scale_out_is_off_with_it(monkeypatch):
+    """THE DEFAULT WAS 2.0 AND IS NOW 0, AND BOTH DECISIONS WERE RIGHT AT THE TIME.
 
-    53.4% of its trades were closing at ~0.00 because the scale-out left a runner
-    at break-even. The fixed target is what removes that, so an operator who does
-    not know to set it would otherwise keep the failure. Set it to 0 to go back to
-    the ATR target plus scale-out.
+    It first shipped OFF, which was wrong: 53.4% of trades were closing at ~0.00
+    because the scale-out left a runner at break-even, and a fixed target removes
+    that. So it was defaulted ON at 2%.
+
+    That fix had a cost nobody had computed. The target is a percentage of MARGIN,
+    so the PRICE move it needs is `PROFIT_TARGET_PCT / leverage` — while the stop
+    stays at 2.5x ATR and does not shrink. The two collide as leverage rises.
+    Measured on the operator's live XRP/USDT session (ATR 0.504%, stop 1.26%):
+
+        2.0% at 10x  ->  0.20% target vs 1.26% stop  ->  93.2% break-even
+        2.0% at  3x  ->  0.67% target vs 1.26% stop  ->  70.6% break-even
+        0 (ATR pair) ->  2.52% target vs 1.26% stop  ->  36.0% break-even
+
+    Measured live win rate at the time: 54.5% (6 of 11). A 93% break-even is
+    losing by construction, so the operator turned it off on 2026-09-28 and the
+    exit went back to the ATR pair, which is 2:1 BY CONSTRUCTION at every
+    leverage (ATR_TARGET_MULTIPLIER 5.0 / ATR_STOP_MULTIPLIER 2.5).
+
+    0 DOES NOT MEAN "NO TARGET" — `_check_price` tests `pos.take_profit` on every
+    tick regardless. This setting only ever added a NEARER exit that overrode it.
+
+    AND THE SCALE-OUT HAD TO MOVE WITH IT. It is gated on
+    `PROFIT_TARGET_PCT <= 0`, so it was dormant only BECAUSE the target was on.
+    Leaving its default at 0.5 while turning the target off would have restored
+    the exact failure the target was introduced to remove.
     """
     import backend.agents.position_monitor as pm
 
-    assert pm.PROFIT_TARGET_PCT == 2.0
+    assert pm.PROFIT_TARGET_PCT == 0.0
+    assert pm.PARTIAL_TP_FRACTION == 0.0, (
+        "the scale-out must be off too, or turning the target off reintroduces "
+        "the break-even runner"
+    )
+
+
+def test_the_atr_pair_that_takes_over_is_two_to_one():
+    """What the operator actually gets at 0, and why it is leverage-independent.
+
+    The target and stop are both multiples of the SAME measured ATR, so their
+    ratio is fixed no matter how volatile the instrument or how much leverage the
+    session uses. That is the property a fixed percentage cannot have.
+    """
+    from backend.core.risk_manager import (
+        ATR_STOP_MULTIPLIER,
+        ATR_TARGET_MULTIPLIER,
+    )
+
+    payoff = ATR_TARGET_MULTIPLIER / ATR_STOP_MULTIPLIER
+    assert payoff == 2.0
+    breakeven = ATR_STOP_MULTIPLIER / (ATR_STOP_MULTIPLIER + ATR_TARGET_MULTIPLIER)
+    assert round(breakeven * 100, 1) == 33.3
 
 
 def test_the_whole_position_closes_at_the_target(monkeypatch, monitor):

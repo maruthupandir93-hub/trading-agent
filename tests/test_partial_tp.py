@@ -55,15 +55,25 @@ def monitor(bus, monkeypatch):
 
     agent = PositionMonitorAgent()
     agent.rebind_bus(bus)
-    # THE FIXED PROFIT TARGET IS PINNED OFF. It defaults to 2% now and it
-    # deliberately BYPASSES the scale-out: a target closes the whole position, so
-    # no runner is left to scale out of — which is the point, since the runner
-    # sitting at break-even is what closed 53.4% of this system's trades at ~0.00.
+    # BOTH EXIT RULES ARE PINNED, AND NEITHER IS INHERITED FROM ITS DEFAULT.
     #
-    # This file tests the scale-out itself, so it opts out of the thing that
-    # replaces it. Leaving it on would make every test here assert the target's
+    # The fixed target is pinned OFF because it deliberately BYPASSES the
+    # scale-out: a target closes the whole position, so no runner is left to
+    # scale out of. Leaving it on would make every test here assert the target's
     # behaviour under the scale-out's name.
+    #
+    # The FRACTION is pinned ON because the default moved to 0 on 2026-09-28,
+    # when the operator turned the fixed target off — the scale-out is gated on
+    # `PROFIT_TARGET_PCT <= 0`, so it was dormant only because the target was on,
+    # and switching the target off without also disabling it would have woken up
+    # the break-even runner that closed 2,136 of 4,003 trades at ~0.00.
+    #
+    # This file tests the scale-out MECHANISM, which still exists and must keep
+    # working for anyone who opts back into it. A test of a feature that reads
+    # its own enablement from a default is really a test of the default, and it
+    # breaks the moment an operator changes their mind — which is what happened.
     monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
+    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.5)
     return agent
 
 

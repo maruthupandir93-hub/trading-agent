@@ -282,15 +282,62 @@ class ExecutionAgent(BaseAgent):
                     tar.symbol,
                 )
                 return
-            # A simulated order fills completely by definition.
-            filled_qty = tar.approved_size
-            # Modelled at the configured TAKER rate, via the one module that owns
-            # fee arithmetic. This used to be a bare `* 0.0004` — a second, lower
-            # fee rate hardcoded here and nowhere else, so the paper book and the
-            # backtest disagreed about what a trade costs while both reported the
-            # result as P&L. `services/fees` is now the only place the number
-            # lives, and `measured=False` records that no venue confirmed it.
-            fee_result = modelled_fee(fill_price * tar.approved_size)
+            # ---- TESTNET MIRROR: make the paper fill a REAL fill ------------
+            #
+            # A simulated fill is booked at the last observed price, instantly,
+            # in full — honest bookkeeping and also the most flattering possible
+            # execution. No spread crossed, no slippage, no partial fill, no
+            # minimum size, no leverage rejection. Every one of those is a real
+            # cost that appears on day one of real money and on none of the paper
+            # days before it.
+            #
+            # With the mirror on, this places a real market order on Bybit's
+            # TESTNET and books the price the exchange returned. The trade stays
+            # paper — same book, same P&L, same panels — but the fill is no
+            # longer a model of one.
+            #
+            # ONLY REACHABLE HERE, INSIDE `if self.simulation_mode:`, which is
+            # false whenever LIVE_TRADING is on. Live trading and the mirror
+            # cannot both be routing an order.
+            #
+            # A FAILURE FALLS THROUGH TO THE SIMULATED FILL. A test venue being
+            # down must not stop paper trading, and `exchange_order_id` already
+            # discriminates: set means a venue order stood behind this row, NULL
+            # means it did not.
+            from backend.services import paper_testnet
+
+            mirrored = None
+            if tar.tab == "paper" and paper_testnet.active():
+                mirrored = await paper_testnet.place(
+                    symbol=tar.symbol,
+                    side=side,
+                    qty=tar.approved_size,
+                    leverage=tar.approved_leverage,
+                    client_order_id=f"pt_{tar.tar_id}"[:36],
+                )
+
+            if mirrored:
+                exchange_name = "bybit_testnet"
+                order_id = mirrored["order_id"] or order_id
+                fill_price = mirrored["price"]
+                filled_qty = mirrored["filled_qty"]
+                # The venue's own fee is not read back here: Bybit reports it on
+                # the trade record, not the order ack, and a testnet fee schedule
+                # is not the mainnet one anyway. The modelled taker rate is the
+                # honest figure for a paper book, and `fee_measured=False`
+                # already records that no venue confirmed it.
+                fee_result = modelled_fee(fill_price * filled_qty)
+            else:
+                # A simulated order fills completely by definition.
+                filled_qty = tar.approved_size
+                # Modelled at the configured TAKER rate, via the one module that
+                # owns fee arithmetic. This used to be a bare `* 0.0004` — a
+                # second, lower fee rate hardcoded here and nowhere else, so the
+                # paper book and the backtest disagreed about what a trade costs
+                # while both reported the result as P&L. `services/fees` is now
+                # the only place the number lives, and `measured=False` records
+                # that no venue confirmed it.
+                fee_result = modelled_fee(fill_price * tar.approved_size)
         else:
             from backend.services.venue import get_venue
 
@@ -644,6 +691,31 @@ class ExecutionAgent(BaseAgent):
                     symbol,
                 )
                 return None
+            # THE CLOSE IS MIRRORED TOO, and it must be: a mirrored entry that
+            # closes only locally leaves a real position open on the testnet
+            # account, which then drifts from the paper book and makes every
+            # subsequent mirrored trade start from a state nobody recorded.
+            # `reduce_only=True` for the same reason the live path sets it —
+            # without it a close is just an opposite-side order and any surplus
+            # OPENS a position the other way.
+            from backend.services import paper_testnet
+
+            if tab == "paper" and paper_testnet.active():
+                mirrored = await paper_testnet.place(
+                    symbol=symbol,
+                    side=exit_side,
+                    qty=qty,
+                    reduce_only=True,
+                    client_order_id=f"ptc_{symbol.replace('/', '')}_{reason}"[:36],
+                )
+                if mirrored:
+                    fill_price = mirrored["price"]
+                    logger.info(
+                        "Testnet-mirrored close of %s %s %s at %s (%s) — the exchange's "
+                        "price, not a modelled one.",
+                        exit_side, qty, symbol, fill_price, reason,
+                    )
+
             logger.info(
                 "Simulated close of %s %s %s at %s (%s)", exit_side, qty, symbol, fill_price, reason
             )
