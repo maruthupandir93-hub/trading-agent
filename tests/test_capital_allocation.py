@@ -172,19 +172,37 @@ def test_a_smaller_allocation_makes_a_smaller_trade(monkeypatch):
 def test_leverage_multiplies_the_notional(monkeypatch):
     """The operator's leverage is honoured: 5x deploys 5x the notional of 1x.
 
-    This is the fix for 'my leverage did nothing'. On the same 50% allocation and
-    the same account, a 5x session's position is five times a 1x session's — the
+    This is the fix for 'my leverage did nothing'. On the same allocation and the
+    same account, a 5x session's position is five times a 1x session's — the
     Binance/Bybit concept, where allocated margin times leverage is the notional.
+
+    THE ALLOCATION IS 25% RATHER THAN 50%, AND THAT IS NOT COSMETIC. The gateway
+    now caps notional at what the portfolio VaR limit permits instead of letting
+    the CRO refuse it (see `tests/test_var_sizing.py` — that disagreement cost two
+    days of zero trades). With this fixture's stop 2% from entry, the adverse move
+    is 3% and the 5%-of-equity budget buys 500/0.03 = 16,667 notional, i.e. 1.67x
+    equity. At 50% and 5x the ask is 2.5x equity, so it is CAPPED and the
+    multiplication no longer holds — correctly.
+
+    Leverage multiplying notional is true BELOW that ceiling, which is where the
+    operator's complaint lived; the capped range is asserted separately. 25% at 5x
+    is 1.25x equity, comfortably under, so this tests the property in the region
+    where it is a property rather than straddling the boundary.
     """
-    _session(monkeypatch, 0.5, leverage=1)
+    _session(monkeypatch, 0.25, leverage=1)
     one_x = gate(_state())
     assert one_x["risk_assessment"].approved is True
 
-    _session(monkeypatch, 0.5, leverage=5)
+    _session(monkeypatch, 0.25, leverage=5)
     five_x = gate(_state())
     assert five_x["risk_assessment"].approved is True
     assert five_x["execution_plan"].leverage == 5
     assert five_x["execution_plan"].size == pytest.approx(one_x["execution_plan"].size * 5, rel=0.02)
+    # And prove it was NOT capped, so a future change to the VaR budget that
+    # silently starts capping here cannot pass by coincidence. The sizing detail
+    # rides on the assessment's caution notes, not on the plan.
+    notes = " ".join(five_x["risk_assessment"].caution_notes)
+    assert "VaR-CAPPED" not in notes
 
 
 def test_full_allocation_deploys_the_WHOLE_account(monkeypatch):
