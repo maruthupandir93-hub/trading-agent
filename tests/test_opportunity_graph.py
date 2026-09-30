@@ -280,12 +280,57 @@ async def test_scoring_reports_track_record_excluded_until_something_has_a_recor
     `historical_success_rate=None`. Now that scoring CAN use realised results, the
     note is conditional — leaving it unconditional would be a false statement
     about a system that has started learning. With no database in a unit test
-    there is no usable record, so the note must still appear here.
+    there is no usable record, so a note must still appear here.
+
+    IT IS NOW ONE OF TWO NOTES, AND WHICH ONE IS THE POINT. When a backtested
+    prior stands in for the missing record, `HISTORICAL_UNAVAILABLE`'s claim that
+    "scores reflect current-conditions fit only" becomes false — on the single
+    line an operator reads to find out what moved a selection. A prior is not a
+    track record, and a score that used one is not conditions-only; both
+    statements have to stay true, so there are two notes.
     """
+    from backend.graphs.nodes.opportunity import HISTORICAL_FROM_BACKTEST
+
     state = _full_state()
     state.update(enumerate_candidates(state))
     out = await score_candidates(state)
-    assert any(HISTORICAL_UNAVAILABLE == u for u in out["unavailable"])
+    notes = set(out["unavailable"])
+    assert notes & {HISTORICAL_UNAVAILABLE, HISTORICAL_FROM_BACKTEST}, (
+        "the absence of a realised record must always be reported"
+    )
+    # And never both: they make contradictory claims about the same run.
+    assert not (HISTORICAL_UNAVAILABLE in notes and HISTORICAL_FROM_BACKTEST in notes)
+
+
+@pytest.mark.asyncio
+async def test_the_note_names_the_prior_when_a_prior_was_actually_used():
+    """Driven both ways, because the risk here is a note that is merely present
+    rather than a note that is true."""
+    from backend.graphs.nodes.opportunity import HISTORICAL_FROM_BACKTEST
+    from backend.services import strategy_priors
+
+    state = _full_state()
+    state.update(enumerate_candidates(state))
+
+    strategy_priors.reset()
+    out = await score_candidates(state)
+    used = any(
+        "BACKTESTED" in (c.gated_out_reason or "") for c in out["candidate_strategies"]
+    ) or HISTORICAL_FROM_BACKTEST in out["unavailable"]
+    if used:
+        assert HISTORICAL_FROM_BACKTEST in out["unavailable"]
+
+    # With no priors available at all, the original note must come back.
+    import backend.services.strategy_priors as sp
+
+    original, sp.BACKTEST_DIR = sp.BACKTEST_DIR, "/definitely/not/a/path"
+    sp.reset()
+    try:
+        out2 = await score_candidates(state)
+        assert HISTORICAL_UNAVAILABLE in out2["unavailable"]
+    finally:
+        sp.BACKTEST_DIR = original
+        sp.reset()
 
 
 @pytest.mark.asyncio

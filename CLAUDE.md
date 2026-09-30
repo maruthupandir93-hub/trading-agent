@@ -2199,6 +2199,93 @@ less-faithful mirror still beats no mirror.
 
 `tests/test_paper_testnet.py` pins all four properties and the routing.
 
+### The scorer knew nothing it had already measured
+
+`services/strategy_performance` closes the learning loop correctly and had
+never produced a number: it needs `MIN_SAMPLE` (20) real closed trades per
+strategy and `trades` holds zero. So all eleven profiles carried
+`historical_success_rate=None`, the 0.2 track-record weight returned the neutral
+0.5 for every strategy on every run, and selection was decided entirely by
+conditions-fit. Read from the operator's live session on 2026-09-30:
+
+    "DO NOT TRADE: the Grid setup is LONG but the specialist panel reads
+     NEUTRAL at 0.05."
+
+In a Range regime the conditions-fit scorer keeps choosing Grid, Range and
+MeanReversion — the three worst strategies in this project's OWN stored backtest
+(Grid -0.206R, Range -0.184R, MeanReversion -0.103R) — and the specialist panel
+then correctly refuses to act on them. Nothing was broken. The agent simply had
+no way, at SELECTION time, to use what it already knew from `backtests/`.
+
+`services/strategy_priors` carries it there. `opportunity._rate` asks
+`strategy_performance` first and falls back to the prior.
+
+**WHY THIS IS NOT AN INVARIANT-5 VIOLATION**, and it is the same argument
+`strategy_performance` makes: deterministic arithmetic over a committed file,
+no model consulted (asserted against the module's source), and it cannot invent,
+edit, disable or author a strategy — it supplies one field Section 11.3 already
+lists as required. A human ran `scripts/run_backtests.py` and committed the
+result; nothing here generates the evidence it reads.
+
+CLAUDE.md already said "a backtest INFORMS; it does not deploy", and the module
+is built around that sentence:
+
+* **A LIVE MEASUREMENT ALWAYS WINS.** The prior is consulted only when
+  `strategy_performance` has nothing usable for that strategy, so `MIN_SAMPLE`
+  still governs promotion exactly as before. Pinned by asserting the ORDER of
+  the two lookups in the source.
+* **IT IS SHRUNK HALFWAY TOWARD NEUTRAL.** The backtest is in-sample, gross of
+  fees, and was measured over a mostly trending window — `run_backtests.py` says
+  so in its own output. `effective_n` is capped at the same 20-trade floor, so a
+  1,000-candle run buys no more influence than the minimum live sample would:
+  more backtested trades is more of the same window, not more independent
+  evidence.
+* **NO BACKTEST MEANS NEUTRAL, NEVER ZERO.** Same rule as a missing live record.
+
+**THE SHRINKAGE TARGET IS DERIVED FROM THE SCORER'S SCALE, AND THE FIRST VERSION
+GOT IT WRONG IN AN INSTRUCTIVE WAY.** It anchored on break-even (33.3%), which
+is BELOW the win rate `_track_record_score` maps to 0.5 (37.5%, being
+`TRACK_RECORD_FLOOR_WIN_RATE + 0.5 * TRACK_RECORD_SPAN`). So every strategy —
+including the profitable ones — scored lower than an unmeasured one, the whole
+field drifted toward `MIN_SCORE_TO_SELECT`, and the agent would have traded LESS
+rather than better. Those two constants are now NAMED and imported rather than
+restated, because two numbers that must agree in two files is exactly how
+`lib/riskManager.ts` and `core/risk_manager.py` drifted apart on the ATR
+multipliers.
+
+**THE MEASURED EFFECT, STATED HONESTLY BECAUSE IT IS SMALLER THAN IT SOUNDS.**
+Against the committed 2026-09-06 backtest:
+
+    Scalping   38.7% raw -> 38.1% shrunk -> +0.003 on the final score
+    Momentum   37.5%     -> 37.5%        ->  0.000
+    Grid       26.5%     -> 32.0%        -> -0.031
+    VWAP       22.4%     -> 30.0%        -> -0.043
+
+It is ASYMMETRIC, and that is the conservative direction: the neutral-equivalent
+rate (37.5%) sits above the backtest's best performer, so the prior mostly
+DEMOTES strategies the backtest says lose rather than promoting ones it says
+win. Best-to-worst spread on the final score is 0.046 — a tie-breaker between
+two strategies that both see a setup, and enough to push a marginal proposal
+below `MIN_SCORE_TO_SELECT` (0.35). It is NOT an override, by construction:
+conditions still carry 0.8. **It will not stop Grid being proposed in a market
+where Grid is the only thing seeing a setup.** It stops Grid being preferred to
+Breakout when both do.
+
+`HISTORICAL_UNAVAILABLE` gained a sibling for the same
+do-not-state-something-false reason the note was made conditional in the first
+place: its text claims "scores reflect current-conditions fit only", which is a
+false statement about a run that used a prior. `HISTORICAL_FROM_BACKTEST` says
+which evidence was actually used, and a test asserts the two never both appear.
+
+`GET /api/graphs/strategy-performance` returns the prior under `backtestPrior`,
+ALONGSIDE the realised numbers and never merged into them, carrying the caveats
+`run_backtests.py` prints and a JSON file does not preserve on its own. "38%
+backtested" is a claim about a 1,000-candle window in September; "38% realised"
+is a claim about this account's money, and a reader who cannot tell them apart
+will trust the wrong one.
+
+`tests/test_strategy_priors.py` pins all four properties.
+
 ### An external audit found eleven real defects, and they share one shape
 
 A third-party audit (2026-09-30) ran the whole suite green — 2,059 backend, 469

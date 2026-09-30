@@ -347,9 +347,21 @@ async def strategy_performance_summary() -> Dict[str, Any]:
     rate to steer anything yet. It is still reported — an operator should be able
     to see a young strategy's record without it moving the agent.
     """
-    from backend.services import strategy_performance
+    from backend.services import strategy_performance, strategy_priors
 
-    return await strategy_performance.summary()
+    out = await strategy_performance.summary()
+    # THE BACKTESTED PRIOR, ALONGSIDE — never merged into the realised numbers.
+    #
+    # They answer different questions and a reader who cannot tell them apart
+    # will trust the wrong one: "38% backtested" is a claim about a 1,000-candle
+    # window in September, "38% realised" is a claim about this account's money.
+    # Merging them is how a simulated result quietly becomes a track record.
+    #
+    # Reported so an operator can see WHY a strategy is being preferred while no
+    # strategy has a live record yet. The prior is superseded per strategy the
+    # moment `strategy_performance` marks that strategy usable.
+    out["backtestPrior"] = strategy_priors.status()
+    return out
 
 
 @router.post("/run/{symbol:path}")
