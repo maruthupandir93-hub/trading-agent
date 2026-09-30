@@ -509,19 +509,32 @@ async def enable_live_trading(body: Dict[str, Any] = {}) -> Dict[str, Any]:
 
     # Check credentials before enabling — live mode without keys means every
     # order attempt fails at the exchange, which is worse than staying in paper.
+    #
+    # IT ASKS THE VENUE LAYER, WHICH IS WHAT PLACES THE ORDERS. It used to ask
+    # `exchange_client`, the older Binance-only client, and name
+    # BINANCE_API_KEY / BINANCE_SECRET in the refusal. The agent's real order
+    # path is `services/venue`, whose credentials are PER VENUE — a Bybit
+    # deployment with a full set of BYBIT_* keys was refused for the absence of
+    # Binance ones, and the message sent the operator to set a variable that
+    # nothing on their configured venue would ever read. The mirror of that is
+    # the dangerous direction: leftover Binance keys would have PASSED the check
+    # on a Bybit deployment with no Bybit keys at all.
     try:
-        from backend.services.exchange_client import get_exchange_client
-        client = get_exchange_client()
-        if not client.has_credentials():
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        if not venue.has_credentials():
             return {
                 "status": "error",
                 "message": (
-                    "Cannot enable live trading: no exchange credentials configured "
-                    "(BINANCE_API_KEY / BINANCE_SECRET are empty). Set them in .env first."
+                    f"Cannot enable live trading: no credentials for the configured venue "
+                    f"'{venue.id}'. Set {venue.key_variable} and {venue.secret_variable} in "
+                    f".env first — credentials are per venue, because Binance and Bybit are "
+                    f"different accounts holding different money."
                 ),
             }
     except Exception as e:
-        logger.warning("Could not check exchange credentials: %s", e)
+        logger.warning("Could not check venue credentials: %s", e)
 
     settings.set_live_trading(True)
     logger.critical(

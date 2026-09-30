@@ -1286,6 +1286,81 @@ class PositionMonitorAgent(BaseAgent):
         logger.warning("Position monitor cleared: %s watched position(s) dropped (%s).", count, reason)
         return await self.persist_watch_list()
 
+    async def close_tracked(
+        self, symbol: str, reason: str, price: Optional[float] = None
+    ) -> Optional[float]:
+        """Close a WATCHED position through the full close sequence. For the
+        execution service's thesis-invalidated exits.
+
+        WHY THIS EXISTS: `execution_service._close` called
+        `ExecutionAgent.close_position` directly. That places the order and
+        settles the paper book, and it does NOTHING ELSE — every other step of a
+        close lives in `_close` here:
+
+            the closed-trade row (the ONLY row that carries a realized pnl)
+            the watch row's deletion
+            cancelling the resting stop and take-profit at the venue
+            POSITION_CLOSED, which is what drives reflection and learning
+            the Telegram close alert, which subscribes to that same event
+
+        So a graph-driven exit left a stale row in `monitored_positions` for a
+        position that no longer existed. Reproduced: a closed paper book position
+        with one stale monitored position and zero POSITION_CLOSED events. The
+        stale row is not inert — `may_open_new_position` counts it, so the exit
+        the graph took to free the slot did not free it, and the trade produced
+        no lesson because nothing told the reflection agent it had ended.
+
+        Returns the fill price, or None if the position is not watched here or
+        the close did not complete. **None means NOT CLOSED** and the caller must
+        treat it as retryable — `_close` deliberately keeps a position under
+        watch when its fill fails.
+
+        `price` is the price the caller decided against, passed through to
+        `_close` as the simulated fill (see `close_position`'s `observed_price`).
+        It falls back to `market_data.get_price`, and refuses rather than
+        inventing one.
+        """
+        base = str(symbol).split(":")[0].upper()
+        pos = next(
+            (p for p in self._open.values()
+             if str(p.symbol).split(":")[0].upper() == base),
+            None,
+        )
+        if pos is None:
+            return None
+
+        trigger = float(price) if (price or 0) > 0 else 0.0
+        if trigger <= 0:
+            # `market_data.get_price` reads all three caches (agent socket,
+            # dashboard socket, polled ccxt) and refuses a stale tick rather than
+            # handing back a minutes-old price.
+            from backend.services.market_data import get_price
+
+            try:
+                trigger = float(get_price(pos.symbol) or 0.0)
+            except Exception:  # noqa: BLE001 - a price lookup must not raise here
+                trigger = 0.0
+        if not trigger or trigger <= 0:
+            # Invariant 6. A close needs a price to book a realized P&L against,
+            # and a fabricated one would be recorded as the trade's result.
+            logger.error(
+                "Cannot close %s (%s): no observed price. The position remains open and "
+                "under watch.",
+                pos.symbol, reason,
+            )
+            return None
+
+        before = pos.tar_id in self._open
+        await self._close(pos, float(trigger), reason)
+        # `_close` keeps the position tracked when the fill fails, so its
+        # departure from `_open` is the signal that the close completed. Reading
+        # a return value would be nicer; `_close` returns None either way and is
+        # called from the tick loop, where a return nobody reads is the honest
+        # signature.
+        if before and pos.tar_id not in self._open:
+            return float(trigger)
+        return None
+
     def snapshot_open(self) -> List[Dict[str, Any]]:
         """Plain-dict view of every watched position.
 

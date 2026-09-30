@@ -723,9 +723,20 @@ async def specialist_portfolio(state: TradingState) -> Optional[Dict[str, Any]]:
     Also the only writer of `portfolio_state`, which the Risk Gateway (Phase 28)
     and the Supervisor (Phase 27) both read.
     """
+    from backend.core.config import settings
     from backend.services.portfolio_store import get_portfolio
 
-    tab = "paper"
+    # THE BOOK THIS NODE READS FOLLOWS THE EXECUTION TAB. It was hardcoded to
+    # "paper", and this is the only writer of `portfolio_state` — which the
+    # Supervisor (Phase 27) and the Risk Gateway (Phase 28) both read, and which
+    # `PortfolioStateSnapshot.tab` then stamps onto the plan.
+    #
+    # So with LIVE_TRADING on, every real-money decision was made against the
+    # PAPER book's cash, exposure and open positions: the "already holding this"
+    # constraint checked the wrong positions, the equity the gateway sized a
+    # fraction of was the wrong account, and the exit branch above looked for a
+    # real position in a book that could not contain one.
+    tab = settings.execution_tab
     try:
         book = await get_portfolio()
     except Exception as exc:  # noqa: BLE001 - degrade honestly, never guess a book
@@ -752,10 +763,41 @@ async def specialist_portfolio(state: TradingState) -> Optional[Dict[str, Any]]:
         except (KeyError, TypeError, ValueError):
             continue
 
+    # EQUITY IS FREE CASH + LOCKED MARGIN + UNREALIZED, NOT `cash + notional`.
+    #
+    # `cash + held_notional` is the 1x-only formula this project already removed
+    # from `book_equity` and from the TypeScript side, and it survived here. Cash
+    # is FREE cash — the margin was deducted when the position opened — so adding
+    # the full notional back double-counts the leveraged part. At 10x a $900
+    # position funded by $100 reported $1,900 of equity on an account holding
+    # $1,000, and this figure is what the Risk Gateway sizes a fraction of.
+    #
+    # The UNREALIZED term is deliberately absent rather than zero-marked. This
+    # node is not given a price for every held symbol, and fetching them here
+    # would be a second market-data path that could disagree with `market_data`
+    # inside one run (Section 39.4). `book_equity` returns None for equity when
+    # anything is unpriced, which is correct for a panel and useless for a gate,
+    # so the entry-cost reading is computed here and the evidence string says
+    # plainly which one it is — the same promise it already makes about notional.
+    held_margin = 0.0
+    for pos in positions:
+        try:
+            q = abs(float(pos["qty"]))
+            c = float(pos["avgCost"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Falls back to the notional, matching the default the mutators use for
+        # rows written before `marginLocked` existed — which over-counts the
+        # position and therefore caps SOONER, the safe direction.
+        try:
+            held_margin += float(pos.get("marginLocked") or (q * c))
+        except (TypeError, ValueError):
+            held_margin += q * c
+
     equity: Optional[float] = None
     if cash is not None:
         try:
-            equity = float(cash) + held_notional
+            equity = float(cash) + held_margin
         except (TypeError, ValueError):
             equity = None
 
@@ -785,6 +827,10 @@ async def specialist_portfolio(state: TradingState) -> Optional[Dict[str, Any]]:
     evidence: List[str] = [
         f"{len(positions)} open position(s) on the {tab} book",
         "position notional is measured at ENTRY cost, not marked to market",
+        # Said out loud because the number is a GATE input, not just a panel
+        # figure: the Risk Gateway sizes a fraction of it.
+        "equity is free cash + locked margin; unrealized P&L is not measured in "
+        "this node (no per-symbol marks are fetched here)",
         "correlated-cluster analysis not run here — owned by the CIO agent",
         "drawdown from high-water mark not available here — owned by the CEO agent",
     ]

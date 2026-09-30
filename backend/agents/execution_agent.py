@@ -64,6 +64,40 @@ class ExecutionAgent(BaseAgent):
                 settings.USE_TESTNET,
             )
 
+    def routes_to_venue(self, tab: str) -> bool:
+        """Does an order for THIS position go to a real exchange?
+
+        THE BUG THIS FIXES: every routing decision in this file used to be
+        `if self.simulation_mode:` — a PROCESS-WIDE flag — while `tab` was
+        carried on the very same call and ignored. So the venue an order reached
+        was decided by the operator's current global setting rather than by which
+        book the position belongs to, and the two can disagree the moment the
+        setting is changed while something is open.
+
+        Measured consequence, on the close path and with real money:
+
+            operator opens a PAPER position          (LIVE_TRADING off)
+            operator turns LIVE_TRADING on
+            the monitor's stop fires on that paper position
+            -> `close_position` takes the LIVE branch, because the flag flipped
+            -> a reduce-only market order is sent to MAINNET
+
+        Reduce-only bounds it — it cannot OPEN anything — but it is not harmless:
+        if the operator holds a real position in the same symbol, that order
+        closes part of the REAL one to satisfy a paper stop. The paper book then
+        also books its own simulated close, so both books move on one event and
+        neither is right.
+
+        The rule is now BOTH conditions, and each is load-bearing:
+
+          * `tab == "real"` — a paper position has no venue counterpart, so a
+            paper order must never reach one.
+          * `not self.simulation_mode` — the backtest engine pins
+            `simulation_mode=True` and must never place an order however a
+            position is labelled.
+        """
+        return tab == "real" and not self.simulation_mode
+
     @property
     def simulation_mode(self) -> bool:
         """Whether orders are simulated. READ AT CALL TIME, NOT AT CONSTRUCTION.
@@ -246,8 +280,11 @@ class ExecutionAgent(BaseAgent):
                 tar.tar_id, tar.approved_size, len(slices), slices[0], TWAP_WINDOW_MINUTES,
             )
 
-        # 3. Route.
-        exchange_name = "simulated_exchange" if self.simulation_mode else "binance_futures"
+        # 3. Route. BY THE POSITION'S OWN BOOK, not by the global flag — see
+        # `routes_to_venue`. A paper TAR arriving while LIVE_TRADING is on is
+        # simulated, which is what "paper" means.
+        to_venue = self.routes_to_venue(tar.tab)
+        exchange_name = "binance_futures" if to_venue else "simulated_exchange"
         logger.info(f"Routing order to {exchange_name} with idempotency key {idempotency_key}")
 
         # Reference price for slippage measurement, captured before routing.
@@ -264,12 +301,16 @@ class ExecutionAgent(BaseAgent):
         # books differed from the position at the exchange, and the Position
         # Monitor would later try to close a quantity we did not hold.
         filled_qty = 0.0
+        # Did a REAL venue order stand behind this fill? True for a live order
+        # and for a testnet-mirrored paper order; false for a modelled one. This
+        # is what `trades.exchange_order_id` is supposed to encode.
+        venue_backed = to_venue
 
         # Latency measured around the actual exchange round-trip (spec Section
         # 19 requires execution to optimise for latency; it was never measured).
         started_at = time.monotonic()
 
-        if self.simulation_mode:
+        if not to_venue:
             fill_price = expected_price
             if fill_price <= 0:
                 # No tick seen for this symbol yet. A simulated fill at 0
@@ -296,18 +337,24 @@ class ExecutionAgent(BaseAgent):
             # paper — same book, same P&L, same panels — but the fill is no
             # longer a model of one.
             #
-            # ONLY REACHABLE HERE, INSIDE `if self.simulation_mode:`, which is
-            # false whenever LIVE_TRADING is on. Live trading and the mirror
-            # cannot both be routing an order.
+            # PROPERTY 1 — UNREACHABLE WHILE LIVE_TRADING IS ON — IS NOW AN
+            # EXPLICIT TERM IN THIS CONDITION, and it had to become one.
+            #
+            # It used to be a consequence of the branch's SHAPE: the mirror sat
+            # inside `if self.simulation_mode:`, which is false whenever live
+            # trading is on. The branch is now chosen by the position's TAB
+            # (see `routes_to_venue`), so a paper order reaches here even with
+            # LIVE_TRADING on — correctly, since paper is paper. But a structural
+            # guarantee that survives only as long as nobody restructures the
+            # branch is not a guarantee, so `self.simulation_mode` is spelled out.
             #
             # A FAILURE FALLS THROUGH TO THE SIMULATED FILL. A test venue being
-            # down must not stop paper trading, and `exchange_order_id` already
-            # discriminates: set means a venue order stood behind this row, NULL
-            # means it did not.
+            # down must not stop paper trading, and the trade row records which
+            # happened: `exchange_order_id` is set only for a real venue order.
             from backend.services import paper_testnet
 
             mirrored = None
-            if tar.tab == "paper" and paper_testnet.active():
+            if tar.tab == "paper" and self.simulation_mode and paper_testnet.active():
                 mirrored = await paper_testnet.place(
                     symbol=tar.symbol,
                     side=side,
@@ -318,6 +365,7 @@ class ExecutionAgent(BaseAgent):
 
             if mirrored:
                 exchange_name = "bybit_testnet"
+                venue_backed = True
                 order_id = mirrored["order_id"] or order_id
                 fill_price = mirrored["price"]
                 filled_qty = mirrored["filled_qty"]
@@ -537,7 +585,23 @@ class ExecutionAgent(BaseAgent):
             # actually happened at the exchange.
             filled_qty,
             fill_price,
-            order_id,
+            # `exchange_order_id` IS THE SYSTEM'S SIMULATED-VS-VENUE
+            # DISCRIMINATOR, AND IT WAS NOT DISCRIMINATING.
+            #
+            # `order_id` is a uuid4 minted at the top of this method and only
+            # REPLACED when a venue returns its own id. So it was non-NULL on
+            # every row, simulated or not — while this file, the testnet
+            # mirror's four documented safety properties, CLAUDE.md and the
+            # Settings panel all told the operator that NULL means "no venue
+            # order stood behind this row". A property asserted in four places
+            # and true in none is worse than an undocumented one: it is the
+            # thing you reach for to decide whether a paper result was real.
+            #
+            # The uuid is still the CORRELATION id on the bus and in
+            # `execution_quality` — a simulated fill needs one to be traceable.
+            # It simply stops being written into the column that means "the
+            # venue acknowledged this".
+            (order_id if venue_backed else None),
             tar.tab,
             getattr(tar, "run_id", None),
             getattr(tar, "strategy", None),
@@ -569,10 +633,48 @@ class ExecutionAgent(BaseAgent):
         # balance is the book — writing a second copy here would create exactly
         # the two-disagreeing-books problem reconciliation exists to detect.
         if tar.tab == "paper":
-            await self._apply_paper_fill(
+            booked = await self._apply_paper_fill(
                 symbol=tar.symbol, side=side, qty=filled_qty, price=fill_price,
                 leverage=tar.approved_leverage, reduce_only=False,
             )
+            # A REFUSED BOOK WRITE USED TO BE FOLLOWED BY ORDER_FILLED ANYWAY.
+            #
+            # `apply_paper_fill` refuses an open the account cannot fund — not
+            # enough free cash for the margin. That refusal was logged and then
+            # ignored: the row was already in `trades`, ORDER_FILLED went out,
+            # the monitor began watching a position, and the paper book held
+            # nothing. Three components then disagreed about whether a position
+            # existed, and the one holding the MONEY was the one that said no.
+            #
+            # WHAT HAPPENS NEXT DEPENDS ON WHETHER ANYTHING REAL HAPPENED, and
+            # the two cases are genuinely different:
+            #
+            #   modelled fill  — nothing happened anywhere. Stopping here leaves
+            #                    the system consistent: no book entry, no watched
+            #                    position, no fill event. The `trades` row is
+            #                    corrected below rather than left as a phantom.
+            #   mirrored fill  — a REAL order stands at the testnet. Suppressing
+            #                    the event would leave that position open with
+            #                    nothing watching it, which is strictly worse
+            #                    than a book that disagrees. So it is published,
+            #                    loudly, and reconciliation is the operator's.
+            if not booked:
+                if not venue_backed:
+                    logger.error(
+                        "TAR %s NOT opened: the paper book refused the fill (%s %.8g %s @ %.8g). "
+                        "No ORDER_FILLED is being published and the trade row is being removed — "
+                        "a position the book will not fund must not become one the monitor "
+                        "watches.",
+                        tar.tar_id, side, filled_qty, tar.symbol, fill_price,
+                    )
+                    await self._unpersist_trade(str(tar.tar_id))
+                    return
+                logger.critical(
+                    "TAR %s: a REAL order stands at %s for %s but the paper book REFUSED it. "
+                    "Publishing the fill anyway so the position is watched — an unwatched real "
+                    "position is worse than a book that disagrees. RECONCILE THIS MANUALLY.",
+                    tar.tar_id, exchange_name, tar.symbol,
+                )
 
         await self.publish(OrderFilledEvent(
             tar_id=tar.tar_id,
@@ -676,9 +778,14 @@ class ExecutionAgent(BaseAgent):
         price (invariant 6).
         """
         exit_side = "sell" if entry_side == "buy" else "buy"
-        exchange_name = "simulated_exchange" if self.simulation_mode else "binance_futures"
+        # BY THE POSITION'S BOOK, not the global flag. A paper position closed
+        # through the live branch sends a reduce-only order to MAINNET, which
+        # trims the operator's REAL position in the same symbol if they hold one.
+        # See `routes_to_venue`.
+        to_venue = self.routes_to_venue(tab)
+        exchange_name = "binance_futures" if to_venue else "simulated_exchange"
 
-        if self.simulation_mode:
+        if not to_venue:
             # The caller's observed price wins. See the note above: the cache is
             # a beat behind whenever the bus reaches this agent after the one
             # that decided to close.
@@ -700,7 +807,7 @@ class ExecutionAgent(BaseAgent):
             # OPENS a position the other way.
             from backend.services import paper_testnet
 
-            if tab == "paper" and paper_testnet.active():
+            if tab == "paper" and self.simulation_mode and paper_testnet.active():
                 mirrored = await paper_testnet.place(
                     symbol=symbol,
                     side=exit_side,
@@ -775,12 +882,59 @@ class ExecutionAgent(BaseAgent):
             return None
 
         fill = float(raw)
-        # A paper-tab position closed through the real branch (which happens when
-        # LIVE_TRADING is on) still has to settle in the paper book, or cash never
-        # receives its realized P&L.
+
+        # A PRICE IS NOT A CLOSE. The checks above prove the venue ACCEPTED the
+        # order and told us a price; neither proves it moved the whole position.
+        #
+        # This returned `fill` — a truthy float — on any accepted order, and the
+        # caller (`position_monitor._close`) reads a non-None return as "the
+        # position is flat". So a reduce-only close that filled 0 (no liquidity,
+        # the position already gone from under us, a venue that acks then does
+        # nothing) or filled 30 of 100 was recorded as a completed exit: the
+        # watch row was deleted, POSITION_CLOSED was published, a realized P&L
+        # was booked against a quantity that never traded — and the residual
+        # stayed open at the exchange with NOTHING enforcing its stop. That is
+        # the precise failure the resting stop and the monitor both exist to
+        # prevent, reached by reporting success.
+        #
+        # A SHORTFALL RETURNS None, which is the retryable answer. The monitor
+        # keeps the position, keeps watching it, and closes again on the next
+        # tick; `reduce_only=True` means that retry can only ever shrink what is
+        # actually there, so a self-healing retry cannot overshoot into a
+        # reversed position. Booking a partial as complete is not recoverable.
+        filled = result.filled_qty
+        if filled is None:
+            # Unknown is not zero and not full. Refusing to guess (invariant 6):
+            # an unverifiable close is reported as unfinished so it is retried
+            # and reconciled, rather than assumed complete.
+            logger.critical(
+                "Close order %s for %s was accepted at %s but the venue reported NO filled "
+                "quantity. Treating it as INCOMPLETE — the position stays watched and the "
+                "close will be retried. Reconcile against the exchange.",
+                order.get("id"), symbol, fill,
+            )
+            return None
+        filled = float(filled)
+        # A relative tolerance, because a venue's step size legitimately trims
+        # the last fraction and an exact-equality test would call every rounded
+        # close a partial one.
+        if filled < qty * 0.999:
+            logger.critical(
+                "PARTIAL CLOSE of %s: asked to close %.8g, the venue filled %.8g at %s. "
+                "ABOUT %.8g IS STILL OPEN and still carries risk. The position is being kept "
+                "under watch and the close will be retried on the next tick (reduce-only, so "
+                "the retry can only shrink what is actually there).",
+                symbol, qty, filled, fill, qty - filled,
+            )
+            return None
+
+        # A paper-tab position can no longer reach this branch — `routes_to_venue`
+        # sends every paper order to the simulated path — but the settle stays so
+        # a future caller that passes a real tab for a book-backed position is not
+        # silently left with cash that never received its realized P&L.
         if tab == "paper":
             await self._apply_paper_fill(
-                symbol=symbol, side=exit_side, qty=qty, price=fill,
+                symbol=symbol, side=exit_side, qty=filled, price=fill,
                 leverage=1.0, reduce_only=True,
             )
         return fill
@@ -788,14 +942,23 @@ class ExecutionAgent(BaseAgent):
     async def _apply_paper_fill(
         self, *, symbol: str, side: str, qty: float, price: float,
         leverage: float, reduce_only: bool,
-    ) -> Optional[float]:
-        """Move the paper book. Returns realized P&L on a close, else None.
+    ) -> Optional[Dict[str, Any]]:
+        """Move the paper book. Returns the book's own result, or None on failure.
 
-        Never raises. The fill has already happened and been recorded; a book
-        write that failed must not unwind the trade log or leave the caller
-        believing the fill did not occur. It is logged loudly instead, because a
-        book that has drifted from the trade log is a real problem — just not one
-        to solve by pretending the trade did not happen.
+        RETURNS THE RESULT RATHER THAN THE REALIZED P&L, and the change matters:
+        an OPEN has no realized P&L, so the old `Optional[float]` return was
+        `None` both when the book had happily funded the position and when it had
+        REFUSED it. A caller could not tell the two apart, and the open path
+        therefore published ORDER_FILLED over a refusal — the trade log, the
+        monitor and the book then disagreed about whether a position existed.
+
+        `None` now means exactly one thing: the book did not apply this fill.
+        Realized P&L is `result["realized"]` for the callers that want it.
+
+        Never raises. A book write that failed must not unwind a fill that has
+        already happened at a venue; it is logged loudly instead, because a book
+        that has drifted from the trade log is a real problem — just not one to
+        solve by pretending the trade did not happen.
         """
         from backend.services.portfolio_store import apply_paper_fill
 
@@ -828,7 +991,34 @@ class ExecutionAgent(BaseAgent):
                 symbol, result["unmatchedQty"],
             )
 
-        return result.get("realized")
+        return result
+
+    async def _unpersist_trade(self, trade_id: str) -> None:
+        """Remove a trade row for a fill that did not happen anywhere.
+
+        Used on exactly one path: a MODELLED open that the paper book refused.
+        Nothing was sent to any venue and no position exists, so the row is not
+        a record of anything — leaving it would put a phantom opening leg in the
+        ledger that `annotateTrades` would carry as OPEN forever, and that
+        `strategy_performance` would count as an entry with no exit.
+
+        DELIBERATELY NOT REACHABLE FOR A VENUE-BACKED FILL. There the order is
+        real and the row is the only local record of it; deleting it would leave
+        a real position with no trace at all, which is the failure
+        `_persist_trade` already logs an error about when the pool is missing.
+        """
+        pool = get_db_pool()
+        if not pool:
+            return
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM trades WHERE id = $1", trade_id)
+        except Exception as exc:  # noqa: BLE001 - never raise over bookkeeping
+            logger.error(
+                "Could not remove the trade row for the refused open %s: %s. The ledger now "
+                "holds an opening leg for a position that was never funded.",
+                trade_id, exc,
+            )
 
     @staticmethod
     def _slippage_bps(expected_price: float, fill_price: float, side: str) -> Optional[float]:

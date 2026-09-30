@@ -189,6 +189,29 @@ class ExecutionService:
             )
             return receipt
 
+        # --- 1b. CLAIM THE BASIS NOW, BEFORE THE FIRST `await` -------------
+        #
+        # The check above and the `_submitted[basis] = receipt` writes further
+        # down were separated by several awaits — venue rules, quantisation, the
+        # TAR publish. `_handle` is not serialised: the trigger path and the
+        # session loop can both reach it, and an `await` is a yield point, so two
+        # tasks carrying the SAME plan both passed the `basis in _submitted` test
+        # before either recorded it. Measured in a controlled concurrent test:
+        # one plan, two TAR submissions. For an open that means the position is
+        # opened twice, at full size, against one decision.
+        #
+        # Claiming the basis here makes the check-and-set atomic with respect to
+        # the event loop, because nothing between them yields. The later writes
+        # stay: they replace this placeholder with the real outcome so the
+        # duplicate message can report what actually happened to the first one.
+        #
+        # A CLOSE IS DELIBERATELY EXEMPT. `_close` does not record its basis on a
+        # wiring failure precisely so the exit stays retryable (invariant 4), and
+        # claiming it here would undo that — the retry would be refused as a
+        # duplicate while the position stayed open.
+        if event.intent != "close":
+            _submitted[basis] = receipt
+
         # --- 2. Closes bypass everything else ------------------------------
         if event.intent == "close":
             return await self._close(event, receipt)
@@ -332,13 +355,57 @@ class ExecutionService:
         # inverted back here rather than having the plan carry both.
         entry_side = "buy" if event.side == "sell" else "sell"
 
-        fill = await self._agent.close_position(
-            symbol=event.symbol,
-            entry_side=entry_side,
-            qty=event.size,
-            tab=event.tab,
-            reason="thesis-invalidated",
-        )
+        # THROUGH THE MONITOR WHEN IT IS WATCHING THIS POSITION.
+        #
+        # This called `close_position` directly, which places the order and
+        # settles the paper book and does nothing else. Every remaining step of
+        # a close — the closed-trade row carrying the realized pnl, deleting the
+        # watch row, cancelling the resting stop and take-profit, and publishing
+        # POSITION_CLOSED, which is what drives reflection, the learning ledger
+        # and the Telegram alert — lives in `PositionMonitorAgent._close`.
+        #
+        # Reproduced: a graph-driven exit left the paper book flat, one STALE row
+        # in `monitored_positions`, and zero POSITION_CLOSED events. The stale
+        # row is not inert. `may_open_new_position` counts it, so the very slot
+        # this exit was taken to free stayed occupied, and the trade produced no
+        # lesson because nothing told the reflection agent it had ended.
+        #
+        # THE DIRECT CALL REMAINS AS THE FALLBACK, deliberately. A position the
+        # monitor is not tracking still has to be closable — invariant 4 does not
+        # make an exception for a bookkeeping gap — and refusing here would trap
+        # the operator in exactly the position whose accounting is already wrong.
+        fill = None
+        closed_via_monitor = False
+        try:
+            from backend.agents.position_monitor import get_position_monitor
+
+            monitor = get_position_monitor()
+        except Exception as exc:  # noqa: BLE001
+            monitor = None
+            logger.warning("Could not reach the position monitor to close %s: %s", event.symbol, exc)
+
+        if monitor is not None:
+            fill = await monitor.close_tracked(
+                event.symbol, "thesis-invalidated", price=event.entry_price,
+            )
+            closed_via_monitor = fill is not None
+
+        if fill is None:
+            if closed_via_monitor is False and monitor is not None:
+                logger.info(
+                    "The monitor is not tracking %s (or its close did not complete); routing "
+                    "the exit straight to the execution agent. The closed-trade row, the "
+                    "POSITION_CLOSED event and the resting-order cancels will NOT be produced "
+                    "by this path.",
+                    event.symbol,
+                )
+            fill = await self._agent.close_position(
+                symbol=event.symbol,
+                entry_side=entry_side,
+                qty=event.size,
+                tab=event.tab,
+                reason="thesis-invalidated",
+            )
 
         if fill is None:
             receipt.reasons.append(
@@ -357,6 +424,14 @@ class ExecutionService:
             "closed WITHOUT risk validation or CRO review (invariant 4), and without "
             f"checking {ENV_ENABLE} — a flag that gated closes would trap the "
             "operator in positions while it was off."
+        )
+        receipt.notes.append(
+            "closed through the position monitor's full sequence (trade row, watch-row "
+            "removal, resting-order cancels, POSITION_CLOSED)"
+            if closed_via_monitor else
+            "closed by the execution agent DIRECTLY — the monitor was not tracking this "
+            "position, so no closed-trade row, POSITION_CLOSED event or resting-order "
+            "cancel was produced. Reconcile if this position was supposed to be watched."
         )
         logger.info(
             "Execution service CLOSED %s %.10g at %.8g (was %s)",

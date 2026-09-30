@@ -129,14 +129,48 @@ def test_a_real_close_does_not_consult_the_observed_price():
     """The venue's fill is the truth for real money, and slippage is real there.
 
     Asserted against the source because driving a live close needs credentials —
-    what matters is that `observed_price` is read ONLY inside the simulation
-    branch.
+    what matters is that `observed_price` is read ONLY on the simulated path.
+
+    THE ANCHOR MOVED, AND THE REASON IS WORTH RECORDING. This used to split on
+    `if self.simulation_mode:`, which was the branch condition. The branch is
+    now chosen by the POSITION'S TAB (`routes_to_venue`), because deciding the
+    venue from a process-wide flag meant a paper position opened before the
+    operator enabled live trading was CLOSED with a real reduce-only order on
+    mainnet. The property under test is unchanged; only the line that opens the
+    live half is different, so the split is on the venue import — the first line
+    of the live path and the thing that actually marks it.
     """
     src = inspect.getsource(ExecutionAgent.close_position)
-    body = src[src.index("if self.simulation_mode:"):]
-    live = body[body.index("from backend.services.venue import get_venue"):]
+    live = src[src.index("from backend.services.venue import get_venue"):]
     assert "observed_price" not in live, (
         "a live close must report the price the exchange actually filled at"
+    )
+
+
+def test_the_close_branch_is_chosen_by_the_tab_not_the_global_flag():
+    """The routing bug itself, pinned so it cannot come back.
+
+    `close_position` takes `tab` and used to ignore it, branching on
+    `self.simulation_mode` instead. A paper position whose stop fired after the
+    operator turned live trading on therefore sent a reduce-only market order to
+    MAINNET. Reduce-only bounds it — it cannot open anything — but if the
+    operator holds a real position in the same symbol it closes part of the REAL
+    one to satisfy a paper stop, and the paper book books its own simulated close
+    on top, so both books move on one event and neither is right.
+    """
+    agent = ExecutionAgent(simulation_mode=None)
+    src = inspect.getsource(ExecutionAgent.close_position)
+    assert "self.routes_to_venue(tab)" in src, (
+        "the close must route by the position's own book"
+    )
+
+    # And the predicate itself: BOTH terms, because each guards a different way
+    # of placing an order that should not exist.
+    assert agent.routes_to_venue("paper") is False
+    pinned = ExecutionAgent(simulation_mode=True)
+    assert pinned.routes_to_venue("real") is False, (
+        "an explicitly simulated agent (the backtest engine) must never route to "
+        "a venue, whatever a position is labelled"
     )
 
 

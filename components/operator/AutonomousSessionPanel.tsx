@@ -59,6 +59,14 @@ type Session = {
   finished_at: number | null;
   stop_reason: string | null;
   cycles_run: number;
+  // POLLS vs DECISIONS vs FILLS — three different numbers that were read as one.
+  // `cycles_run` increments at the top of every 12s poll, before the pause
+  // check, the equity read and the decision interval, so a paused or occupied
+  // session accumulates cycles without ever calling the graph. "9,000 cycles
+  // and no trade" reads as 9,000 failed decisions when it may be zero attempted
+  // ones, which is exactly how two days were spent looking in the wrong place.
+  analyses_run?: number;
+  plans_approved?: number;
   trades_opened: number;
   last_cycle_at: number | null;
   last_decision: string | null;
@@ -314,6 +322,14 @@ export function AutonomousSessionPanel() {
             <Stat label="Allocation" value={<span className="mono">{Math.round((active.capital_fraction ?? 1) * 100)}%</span>} />
             <Stat label="Account now" value={<Num value={equity} digits={2} prefix="$" />} />
             <Stat label="Trades opened" value={<Num value={active.trades_opened} digits={0} />} />
+            {/* The funnel, in the order it narrows: polls -> decisions ->
+                approved plans -> fills. Shown together because any one of them
+                alone is misread — a large cycle count next to zero trades looks
+                like 9,000 rejected decisions, and is usually far fewer. */}
+            <Stat label="Polls / decisions" value={
+              <span className="mono">{active.cycles_run} / {active.analyses_run ?? '—'}</span>
+            } />
+            <Stat label="Plans approved" value={<Num value={active.plans_approved ?? 0} digits={0} />} />
           </div>
 
           <div className="mb-3">
@@ -650,7 +666,7 @@ export function AutonomousSessionPanel() {
                   {s.symbol} {s.start_equity.toFixed(0)}→{s.target_equity.toFixed(0)}
                 </span>
                 <span style={{ color: 'var(--text-muted)' }}>
-                  {s.cycles_run} cycles, {s.trades_opened} trade(s)
+                  {s.cycles_run} poll(s), {s.analyses_run ?? '—'} decision(s), {s.trades_opened} trade(s)
                   {s.stop_reason ? ` — ${s.stop_reason}` : ''}
                 </span>
               </div>

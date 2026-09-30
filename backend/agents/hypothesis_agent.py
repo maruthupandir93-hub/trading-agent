@@ -236,12 +236,23 @@ class HypothesisAgent(BaseAgent):
 
     @staticmethod
     def _symbol_from(event: ReflectionCompletedEvent) -> str:
-        """ReflectionCompletedEvent carries no symbol.
+        """The market this hypothesis is about, or 'unknown'.
 
-        Returns 'unknown' rather than guessing one. The Reflection agent used to
+        `ReflectionCompletedEvent` now DECLARES `symbol` and the Reflection agent
+        passes it through from `PositionClosedEvent`. It previously did not, so
+        every hypothesis this system ever saved was recorded against "unknown" —
+        a research record about a trade, missing the field that says which market
+        it concerned.
+
+        A missing value is still 'unknown' rather than anything plausible. The
+        original reasoning is unchanged and is the reason this is a method at
+        all: the Reflection agent used to
         hardcode "BTC/USDT" for exactly this reason and every reflection was
         misattributed; inventing a symbol here would reintroduce that.
         """
+        symbol = getattr(event, "symbol", None)
+        if isinstance(symbol, str) and symbol.strip():
+            return symbol.strip()
         return "unknown"
 
     def _derive(self, event: ReflectionCompletedEvent, won: bool) -> tuple:

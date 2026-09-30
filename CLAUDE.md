@@ -2161,9 +2161,19 @@ FOUR PROPERTIES, EACH ENFORCED RATHER THAN DOCUMENTED:
 3. **It never blocks a paper trade.** Any failure — outage, refused size, expired
    key — falls back to the simulated fill. A paper account that stops working
    because a sandbox is down is the worse failure.
-4. **The fallback is visible.** `trades.exchange_order_id` is already this
-   system's discriminator: set means a venue order stood behind the row, NULL
-   means it did not.
+4. **The fallback is visible.** `trades.exchange_order_id` is this system's
+   discriminator: set means a venue order stood behind the row, NULL means it
+   did not. **THAT WAS ASSERTED IN FOUR PLACES AND TRUE IN NONE UNTIL
+   2026-09-30.** `order_id` is a `uuid.uuid4()` minted at the top of
+   `_execute_tar` and only REPLACED when a venue returns its own id, so it was
+   non-NULL on every row — simulated, mirrored or live alike. This file, the
+   `paper_testnet` docstring and the Settings panel's footer all told the
+   operator otherwise, and it is the field you reach for to answer "was this
+   paper result real?". `_execute_tar` now tracks `venue_backed` and writes the
+   column only when one was. The uuid is still the CORRELATION id on the bus and
+   in `execution_quality` — a simulated fill needs one to be traceable — it just
+   stops being written into the column that means "the venue acknowledged
+   this".
 
 THE TOGGLE VERIFIES WITH A REAL AUTHENTICATED CALL rather than checking that a
 key exists. A key can be revoked, lack trade permission, or be a MAINNET key
@@ -2188,6 +2198,159 @@ a false number and the trade aborts. On testnet the position is play money and a
 less-faithful mirror still beats no mirror.
 
 `tests/test_paper_testnet.py` pins all four properties and the routing.
+
+### An external audit found eleven real defects, and they share one shape
+
+A third-party audit (2026-09-30) ran the whole suite green — 2,059 backend, 469
+frontend, tsc, build — and then found eleven confirmed defects with its own
+scenarios. Every one was verified against the source before anything was
+changed, and they are worth reading together because they are the SAME BUG
+ELEVEN TIMES:
+
+> a value is carried all the way to the decision point, and then not used.
+
+    close_position(tab=...)     branched on a process-wide flag
+    specialist_portfolio        hardcoded tab = "paper"
+    load_portfolio              read `side` from a SELECT that never asked for it
+    supervisor's exit branch    read direction from the SIGN of a quantity
+    paper_testnet.place         substituted the requested qty for the filled one
+    _execute_tar                ignored the paper book's refusal
+    close_position (live)       checked the price and not the filled quantity
+
+In each case the code LOOKS like it is using the right input. That is why a
+green suite could sit on top of them, and why the tests added for them
+(`tests/test_audit_findings.py`) assert against the INPUT REACHING THE DECISION
+rather than against a happy path.
+
+**THE TWO THAT COULD MOVE REAL MONEY.**
+
+*Execution routed by the global live/paper setting, not by the position.* Every
+routing decision in `execution_agent` was `if self.simulation_mode:` while `tab`
+was carried on the very same call. So:
+
+    a PAPER position is opened while LIVE_TRADING is off
+    the operator turns LIVE_TRADING on
+    the monitor's stop fires on that paper position
+    -> the close takes the LIVE branch, because the flag flipped
+    -> a reduce-only market order is sent to MAINNET
+
+`reduceOnly` bounds it — it cannot OPEN anything — but it is not harmless: if
+the operator holds a real position in the same symbol, that order closes part of
+the REAL one to satisfy a paper stop, and the paper book books its own simulated
+close on top. Both books move on one event and neither is right.
+`routes_to_venue(tab)` is now the single predicate and needs BOTH terms:
+`tab == "real"` stops a paper order reaching a venue, and `not simulation_mode`
+stops the backtest engine reaching one however a position is labelled.
+
+One consequence: the testnet mirror's property 1 (unreachable while LIVE_TRADING
+is on) was a consequence of the branch's SHAPE and is now an EXPLICIT term in
+the condition. A guarantee that holds only until someone restructures the branch
+is not a guarantee, and `tests/test_paper_testnet.py` asserts the condition
+rather than the ordering of two substrings.
+
+*A price is not a close.* The live close checked `result.ok` and
+`average_price` and returned the fill — but never `filled_qty`. The caller reads
+a non-None return as "the position is flat", so a reduce-only close that filled
+0, or 30 of 100, deleted the watch row, cancelled the resting stop AND
+take-profit, published POSITION_CLOSED and booked a realised P&L against a
+quantity that never traded, **while the residual stayed open at the exchange
+with nothing enforcing its stop**. That is the precise failure the resting stop
+and the monitor both exist to prevent, reached by reporting success. A shortfall
+now returns None, which is the retryable answer: the monitor keeps watching and
+closes again next tick, and `reduce_only=True` is what makes the retry safe —
+it can only ever shrink what is actually there. The tolerance is RELATIVE
+(0.999) because a venue's step size legitimately trims the last fraction.
+
+**THE REST, EACH WITH THE CONSEQUENCE THAT MADE IT WORTH FIXING.**
+
+* `specialist_portfolio` hardcoded `tab = "paper"` and is the ONLY writer of
+  `portfolio_state`, which the Supervisor (Phase 27) and the Risk Gateway (Phase
+  28) both read. Every real-money decision was made against the paper book's
+  cash, exposure and positions. Its equity was also still `cash + notional` —
+  the 1x-only formula removed from `book_equity` and from the TS side, which
+  survived here and is the number the gateway sizes a fraction of. It is
+  `cash + locked margin` now, with the absent unrealized term NAMED in the
+  evidence rather than zero-marked, because this node has no per-symbol marks
+  and fetching them would be a second market-data path inside one run.
+* `load_portfolio`'s SELECT omitted `side`. The row builder reads it
+  defensively (`if "side" in r.keys()`), so it took the "buy" default on every
+  row and **every stored short came back from a restart as a long**. Same shape
+  as the `TarApprovedEvent` fields that were passed but never declared: a
+  defensive read of a value that does not arrive is indistinguishable from a
+  legitimate absence.
+* The graph Supervisor's exit branch read `qty > 0` as LONG. The book stores a
+  POSITIVE quantity plus an explicit `side` — added because it could not
+  represent a short at all otherwise — so every short read as a long and the
+  confident LONG verdict that should close a short was discarded. One-sided and
+  therefore invisible from the winning side: longs exited on an opposing view
+  exactly as designed, shorts never did.
+* `paper_testnet.place` did `float(filled) if filled else float(qty)`, so an
+  order the testnet accepted and filled NOTHING came back as a complete fill of
+  everything asked for. That is exactly the flattering execution the mirror
+  exists to remove.
+* `_execute_tar` ignored `apply_paper_fill`'s refusal and published ORDER_FILLED
+  anyway, so an unfundable open left the trade log, the monitor and the book
+  disagreeing — with the component holding the MONEY as the one saying no. It
+  now stops, and removes its own trade row, when nothing happened anywhere; when
+  a REAL order stands behind it (mirrored) it publishes and logs CRITICAL,
+  because an unwatched real position is worse than a book that disagrees.
+  `_apply_paper_fill` had to change its return type for this: `Optional[float]`
+  meant `None` for both "refused" and "this was an open, which has no realised
+  P&L", so the refusal was unobservable.
+* `execution_service._close` called `close_position` directly, which places the
+  order and settles the book and does NOTHING ELSE. The closed-trade row, the
+  watch-row deletion, the resting stop/TP cancels and POSITION_CLOSED — which
+  drives reflection, the learning ledger and the Telegram alert — all live in
+  `PositionMonitorAgent._close`. A graph-driven exit therefore left a STALE row
+  in `monitored_positions`, and that row is not inert: `may_open_new_position`
+  counts it, so the slot the exit was taken to free stayed occupied, and the
+  trade produced no lesson. It routes through `close_tracked` now, and the
+  direct call REMAINS as the fallback — a position the monitor is not tracking
+  still has to be closable (invariant 4).
+* `_handle`'s idempotency check and its `_submitted[basis] = ...` were separated
+  by three awaits, and every await is a yield point. Two tasks carrying the same
+  plan both passed the duplicate test before either recorded it: one plan, two
+  TAR submissions, one position opened twice at full size. The basis is claimed
+  before the first await now. **A close is deliberately exempt** — `_close`
+  withholds its basis on a wiring failure precisely so the exit stays retryable.
+* `POST /live-trading/enable` checked `exchange_client`, the older Binance-only
+  client, and named `BINANCE_API_KEY` in the refusal. The order path is
+  `services/venue`, whose credentials are PER VENUE. Both directions were wrong
+  and one is dangerous: a fully configured Bybit deployment was refused for the
+  absence of Binance keys, and leftover Binance keys would have PASSED the check
+  on a Bybit deployment with no Bybit keys at all.
+* `ReflectionCompletedEvent` carried no symbol, so `HypothesisAgent._symbol_from`
+  returned `"unknown"` — and every hypothesis this system has ever saved is a
+  research record about a trade with the field naming its market missing. The
+  event DECLARES `symbol` now (declares, because Pydantic v2 silently drops an
+  undeclared kwarg — the `TarApprovedEvent` lesson), and a missing value is still
+  `"unknown"` rather than anything plausible.
+* The Settings panel said **"Connected to Bybit testnet"** directly above
+  **"Verification failed."** The setting deliberately STAYS ON when verification
+  fails — reverting it would hide a fixable problem behind a switch that
+  silently refused to move — but an unverified mirror falls back to simulated
+  fills, and the whole point of the toggle is to trust that paper fills are
+  real. It reads "Enabled but NOT verified" now.
+
+**AND THE CYCLE COUNTER WAS MEASURING THE WRONG THING, WHICH COST TWO DAYS.**
+`session.cycles_run` increments at the top of every 12s poll — before the pause
+check, the equity read, the target/floor checks, the open-position check, the
+daily-target lock and the decision interval. The audit reproduced 10,001 cycles,
+0 analysis calls and 0 trades on a PAUSED system. "9,000 cycles and no trade"
+reads as nine thousand rejected decisions and may be zero attempted ones, and it
+is what sent the search to the decision logic rather than to the gate that was
+actually refusing. `analyses_run` now counts graph runs and the panel shows the
+funnel — polls, decisions, approved plans, fills — because any one of those read
+alone is misleading. `trades_opened` also moved: it counted a PUBLISHED PLAN,
+which is two gates and a fill early (the CRO was rejecting every one of them on
+GLOBAL_VAR_LIMIT), and now counts the flat -> holding transition, which is the
+only fill this loop can observe. `plans_approved` keeps the old meaning under an
+honest name.
+
+WHAT THE AUDIT GOT WRONG, for the record, because checking mattered: it reported
+the zero/partial-fill defect as applying to execution generally. The OPEN path
+already treated a missing or zero `filled` as a non-fill and had a comment
+saying why; only the CLOSE path was affected.
 
 ### The fixed profit target was reversed, and both decisions were right
 

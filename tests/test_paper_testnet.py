@@ -124,23 +124,43 @@ def test_it_reads_the_testnet_key_variable_only():
 # Property 1: unreachable while live trading is on
 # ---------------------------------------------------------------------------
 
-def test_the_execution_agent_consults_it_only_in_the_simulation_branch():
+def test_the_execution_agent_gates_the_mirror_on_live_trading_being_off():
     """`simulation_mode` is false whenever LIVE_TRADING is on, so live trading and
-    the mirror cannot both be routing an order. Asserted structurally because the
-    guarantee IS the code's shape."""
+    the mirror cannot both be routing an order.
+
+    THIS USED TO BE A TEST OF THE BRANCH'S SHAPE — that `paper_testnet` appeared
+    somewhere after `if self.simulation_mode:` — and that was the weaker test in
+    exactly the way that mattered. The branch is now chosen by the position's TAB
+    (`routes_to_venue`), because deciding the venue from a process-wide flag sent
+    a paper position's close to MAINNET the moment the operator enabled live
+    trading. A guarantee that holds only as long as nobody restructures the
+    branch is not a guarantee, so the condition is now spelled out in the code
+    and asserted as a condition here.
+    """
     from backend.agents.execution_agent import ExecutionAgent
 
-    for method in ("_execute_trade", "close_position"):
+    found = 0
+    for method in ("_execute_tar", "close_position"):
         fn = getattr(ExecutionAgent, method, None)
         if fn is None:
             continue
         src = inspect.getsource(fn)
-        if "paper_testnet" not in src:
+        if "paper_testnet.active()" not in src:
             continue
-        sim_at = src.index("if self.simulation_mode:")
-        assert src.index("paper_testnet") > sim_at, (
-            f"{method} reaches the mirror outside its simulation branch"
-        )
+        found += 1
+        for line in src.splitlines():
+            if "paper_testnet.active()" in line and line.strip().startswith("if "):
+                assert "self.simulation_mode" in line, (
+                    f"{method} reaches the mirror without checking that live trading "
+                    f"is off: {line.strip()}"
+                )
+                assert 'paper"' in line or "paper'" in line, (
+                    f"{method} reaches the mirror without checking the tab: {line.strip()}"
+                )
+                break
+        else:  # pragma: no cover - the guard is on one line by construction
+            raise AssertionError(f"{method} calls active() outside an `if`")
+    assert found == 2, "both the open and the close paths must gate the mirror"
 
 
 def test_status_reports_that_live_trading_suppresses_it(monkeypatch):

@@ -165,9 +165,20 @@ export function TestnetPanel() {
       >
         {busy
           ? 'Checking…'
-          : status.enabled
-            ? 'Connected to Bybit testnet — click to disconnect'
-            : 'Connect to Bybit testnet'}
+          : !status.enabled
+            ? 'Connect to Bybit testnet'
+            : /* ENABLED IS NOT CONNECTED, and the label used to say it was.
+                 The setting deliberately STAYS ON when verification fails —
+                 reverting it would hide a fixable problem (a revoked key, a
+                 mainnet key in the testnet slot) behind a switch that silently
+                 refused to move. But the operator was then shown "Connected to
+                 Bybit testnet" directly above "Verification failed", and the
+                 whole reason to turn this on is to trust that paper fills are
+                 real. An unverified mirror falls back to simulated fills, so
+                 the label has to say so. */
+              check && !check.ok
+                ? 'Enabled but NOT verified — click to disconnect'
+                : 'Connected to Bybit testnet — click to disconnect'}
       </button>
 
       {/* The verification result. An unchecked connection is not a working one. */}

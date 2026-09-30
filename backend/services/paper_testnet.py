@@ -41,10 +41,21 @@ THE FOUR SAFETY PROPERTIES, EACH ENFORCED RATHER THAN DOCUMENTED
    key: the fill falls back to the simulated one and the trade still books. The
    alternative is a paper account that stops working because a test venue is
    down, which is a worse failure than a less faithful fill.
-4. THE FALLBACK IS VISIBLE, NEVER SILENT. `trades.exchange_order_id` is already
-   the discriminator the rest of this system uses — NULL means no venue order
-   stood behind this row. A mirrored fill carries the testnet order id; a
-   fallback carries None, and the log says which and why.
+4. THE FALLBACK IS VISIBLE, NEVER SILENT. `trades.exchange_order_id` is the
+   discriminator the rest of this system uses — NULL means no venue order stood
+   behind this row. A mirrored fill carries the testnet order id; a fallback
+   carries None, and the log says which and why.
+
+   THIS WAS NOT TRUE WHEN IT WAS FIRST WRITTEN, AND SAYING SO IS THE POINT.
+   `execution_agent` mints a `uuid.uuid4()` as `order_id` at the top of
+   `_execute_tar` and only REPLACES it when a venue returns its own — so the
+   column was non-NULL on every row, simulated or not, while this docstring,
+   CLAUDE.md and the Settings panel all told the operator it discriminated. It
+   is the field you reach for to answer "was this paper result real?", so a
+   documented discriminator that does not discriminate is worse than an
+   undocumented one. `_execute_tar` now tracks `venue_backed` and writes the
+   column only when a venue order genuinely stood behind the fill;
+   `tests/test_audit_findings.py` pins it.
 
 READ AT CALL TIME, like every other operator toggle here. A module-level
 `os.getenv` would be the `simulation_mode` bug again: the operator flips the
@@ -290,14 +301,45 @@ async def place(
             )
             return None
 
+        # AN UNFILLED ORDER IS NOT A FILL, AND `filled or qty` SAID IT WAS.
+        #
+        # `float(filled) if filled else float(qty)` treats 0.0 and None as
+        # falsy and substitutes the REQUESTED quantity — so a testnet order that
+        # was accepted and filled nothing came back as a complete fill of
+        # everything asked for. That is precisely the flattering execution this
+        # whole module exists to remove: the operator turns the mirror on to see
+        # real slippage, partial fills and refused sizes, and the one case that
+        # is neither a fill nor a refusal was rounded up into a perfect fill.
+        #
+        # Both cases fall back to the simulated fill instead, because a fallback
+        # is honest and recoverable while a fabricated quantity is neither. The
+        # paper book then holds a modelled position rather than a claimed real
+        # one, and the log says which.
+        if filled is None:
+            logger.warning(
+                "Testnet mirror accepted %s %s but reported NO filled quantity. Falling back "
+                "to the simulated fill rather than assuming the whole size traded.",
+                side, symbol,
+            )
+            return None
+        filled = float(filled)
+        if filled <= 0:
+            logger.warning(
+                "Testnet mirror accepted %s %s and filled NOTHING (0 of %s). Falling back to "
+                "the simulated fill — an unfilled order is not a fill, and booking one would "
+                "put a position in the paper book that does not exist at the testnet.",
+                side, symbol, qty,
+            )
+            return None
+
         logger.info(
             "Testnet mirror FILLED %s %s %s at %s (order %s).",
-            side, filled or qty, symbol, price, getattr(result, "order_id", None),
+            side, filled, symbol, price, getattr(result, "order_id", None),
         )
         return {
             "order_id": getattr(result, "order_id", None),
             "price": float(price),
-            "filled_qty": float(filled) if filled else float(qty),
+            "filled_qty": filled,
         }
     except Exception as exc:  # noqa: BLE001 — never break a paper trade
         logger.warning(
