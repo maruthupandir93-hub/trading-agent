@@ -122,7 +122,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 PARTIAL_TP_R = _env_float("PARTIAL_TP_R", 1.0)          # profit, in R, to scale out at
-PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank (0 disables)
+PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.0)  # how much to bank (0 disables)
 
 # TRAILING STOP — what turns a trending window into a large win instead of a +2R cap.
 #
@@ -175,7 +175,7 @@ PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.5)  # how much to bank
 # 2% of the margin deployed whatever leverage the session uses — a 2% price move
 # at 1x, 0.667% at 3x, 0.2% at 10x. Set it to 0 to go back to the ATR target plus
 # scale-out.
-PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 2.0)
+PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.0)
 
 # WHAT THE PROFIT TARGET PERCENTAGE IS A PERCENTAGE *OF*.
 #
@@ -350,6 +350,51 @@ class _Tracked:
     def __init__(self, **kw):
         for k in self.__slots__:
             setattr(self, k, kw.get(k))
+
+
+def _venue_backed(pos: "_Tracked") -> bool:
+    """Is there a REAL exchange order standing behind this position?
+
+    This replaced six copies of `pos.tab != "real"`, and the reason it had to is
+    that the answer stopped being "the tab". A paper fill used to have nothing at
+    any venue, so placing a stop, a take-profit or reading a funding rate for one
+    was meaningless — that is what those guards meant.
+
+    With the Bybit testnet mirror on (`services/paper_testnet`), a PAPER entry
+    places a real market order on the testnet and the position genuinely exists
+    there. Leaving the old guard in place would open a real testnet position with
+    NO stop at the venue, which is precisely the gap the resting stop exists to
+    close, and it would make the test unfaithful in the one direction that
+    matters: it would look safer than the real thing.
+
+    Reads the mirror at CALL time, like every other operator toggle here.
+    """
+    if pos.tab == "real":
+        return True
+    try:
+        from backend.services import paper_testnet
+
+        return paper_testnet.active()
+    except Exception:  # noqa: BLE001 - never break the tick loop over a toggle
+        return False
+
+
+def _venue_for(pos: "_Tracked"):
+    """The venue this position's orders belong at.
+
+    A REAL position goes to the configured mainnet venue. A mirrored PAPER
+    position exists on Bybit's testnet and nowhere else, so its stop, its
+    take-profit and its cancels must go there — sending them to the mainnet
+    client would place live orders against a position that does not exist there,
+    which is the single worst thing this file could do.
+    """
+    if pos.tab != "real":
+        from backend.services import paper_testnet
+
+        return paper_testnet.get_venue()
+    from backend.services.venue import get_venue
+
+    return get_venue()
 
 
 class PositionMonitorAgent(BaseAgent):
@@ -616,7 +661,7 @@ class PositionMonitorAgent(BaseAgent):
         with NO stop is recoverable; a duplicate that opens a reversed position is
         not.
         """
-        if pos.tab != "real" or pos.stop_loss is None:
+        if not _venue_backed(pos) or pos.stop_loss is None:
             return
         await self._cancel_resting_stop(pos, "stop tightened")
         await self._place_resting_stop(pos)
@@ -631,7 +676,7 @@ class PositionMonitorAgent(BaseAgent):
         told they have, but never more. A failure is logged at CRITICAL by
         `_place_resting_stop`, so it does not pass silently.
         """
-        if pos.tab != "real":
+        if not _venue_backed(pos):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -920,7 +965,7 @@ class PositionMonitorAgent(BaseAgent):
         """
         if RESTING_STOP_MODE != "on_adverse":
             return
-        if pos.tab != "real" or pos.stop_order_id is not None:
+        if not _venue_backed(pos) or pos.stop_order_id is not None:
             return
         if pos.stop_loss is None:
             return
@@ -957,7 +1002,7 @@ class PositionMonitorAgent(BaseAgent):
         Leaves `funding_rate` as None on any failure rather than substituting a
         number, for the same reason.
         """
-        if pos.tab != "real":
+        if not _venue_backed(pos):
             return
         try:
             from backend.services.venue import get_venue
@@ -994,12 +1039,10 @@ class PositionMonitorAgent(BaseAgent):
         leave it open AND unwatched, which is strictly worse. It is logged at
         CRITICAL because the operator is now relying on this process staying up.
         """
-        if pos.tab != "real" or pos.stop_loss is None:
+        if not _venue_backed(pos) or pos.stop_loss is None:
             return
 
-        from backend.services.venue import get_venue
-
-        venue = get_venue()
+        venue = _venue_for(pos)
         if not venue.has_credentials():
             return
 
@@ -1039,9 +1082,7 @@ class PositionMonitorAgent(BaseAgent):
         if not pos.stop_order_id:
             return
 
-        from backend.services.venue import get_venue
-
-        venue = get_venue()
+        venue = _venue_for(pos)
         ok = await venue.cancel_order(pos.stop_order_id, pos.symbol)
         if ok:
             pos.stop_order_id = None
@@ -1071,12 +1112,10 @@ class PositionMonitorAgent(BaseAgent):
         down — the in-process monitor still takes it the moment the process is
         alive. The stop is the safety-critical leg; this is the profit leg.
         """
-        if pos.tab != "real" or pos.take_profit is None:
+        if not _venue_backed(pos) or pos.take_profit is None:
             return
 
-        from backend.services.venue import get_venue
-
-        venue = get_venue()
+        venue = _venue_for(pos)
         if not venue.has_credentials():
             return
 
@@ -1137,9 +1176,7 @@ class PositionMonitorAgent(BaseAgent):
         if not pos.tp_order_id:
             return
 
-        from backend.services.venue import get_venue
-
-        venue = get_venue()
+        venue = _venue_for(pos)
         ok = await venue.cancel_order(pos.tp_order_id, pos.symbol)
         if ok:
             pos.tp_order_id = None
@@ -1248,6 +1285,81 @@ class PositionMonitorAgent(BaseAgent):
         self._closing.clear()
         logger.warning("Position monitor cleared: %s watched position(s) dropped (%s).", count, reason)
         return await self.persist_watch_list()
+
+    async def close_tracked(
+        self, symbol: str, reason: str, price: Optional[float] = None
+    ) -> Optional[float]:
+        """Close a WATCHED position through the full close sequence. For the
+        execution service's thesis-invalidated exits.
+
+        WHY THIS EXISTS: `execution_service._close` called
+        `ExecutionAgent.close_position` directly. That places the order and
+        settles the paper book, and it does NOTHING ELSE — every other step of a
+        close lives in `_close` here:
+
+            the closed-trade row (the ONLY row that carries a realized pnl)
+            the watch row's deletion
+            cancelling the resting stop and take-profit at the venue
+            POSITION_CLOSED, which is what drives reflection and learning
+            the Telegram close alert, which subscribes to that same event
+
+        So a graph-driven exit left a stale row in `monitored_positions` for a
+        position that no longer existed. Reproduced: a closed paper book position
+        with one stale monitored position and zero POSITION_CLOSED events. The
+        stale row is not inert — `may_open_new_position` counts it, so the exit
+        the graph took to free the slot did not free it, and the trade produced
+        no lesson because nothing told the reflection agent it had ended.
+
+        Returns the fill price, or None if the position is not watched here or
+        the close did not complete. **None means NOT CLOSED** and the caller must
+        treat it as retryable — `_close` deliberately keeps a position under
+        watch when its fill fails.
+
+        `price` is the price the caller decided against, passed through to
+        `_close` as the simulated fill (see `close_position`'s `observed_price`).
+        It falls back to `market_data.get_price`, and refuses rather than
+        inventing one.
+        """
+        base = str(symbol).split(":")[0].upper()
+        pos = next(
+            (p for p in self._open.values()
+             if str(p.symbol).split(":")[0].upper() == base),
+            None,
+        )
+        if pos is None:
+            return None
+
+        trigger = float(price) if (price or 0) > 0 else 0.0
+        if trigger <= 0:
+            # `market_data.get_price` reads all three caches (agent socket,
+            # dashboard socket, polled ccxt) and refuses a stale tick rather than
+            # handing back a minutes-old price.
+            from backend.services.market_data import get_price
+
+            try:
+                trigger = float(get_price(pos.symbol) or 0.0)
+            except Exception:  # noqa: BLE001 - a price lookup must not raise here
+                trigger = 0.0
+        if not trigger or trigger <= 0:
+            # Invariant 6. A close needs a price to book a realized P&L against,
+            # and a fabricated one would be recorded as the trade's result.
+            logger.error(
+                "Cannot close %s (%s): no observed price. The position remains open and "
+                "under watch.",
+                pos.symbol, reason,
+            )
+            return None
+
+        before = pos.tar_id in self._open
+        await self._close(pos, float(trigger), reason)
+        # `_close` keeps the position tracked when the fill fails, so its
+        # departure from `_open` is the signal that the close completed. Reading
+        # a return value would be nicer; `_close` returns None either way and is
+        # called from the tick loop, where a return nobody reads is the honest
+        # signature.
+        if before and pos.tar_id not in self._open:
+            return float(trigger)
+        return None
 
     def snapshot_open(self) -> List[Dict[str, Any]]:
         """Plain-dict view of every watched position.

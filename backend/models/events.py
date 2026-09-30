@@ -389,6 +389,24 @@ class ReflectionCompletedEvent(BaseEvent):
     pnl: float
     lesson_learned: str
     confidence_calibration_delta: float
+    # DECLARED, because `HypothesisAgent` needs it and there was nowhere to get
+    # it from. Every hypothesis this system has ever saved carries
+    # `symbol: "unknown"` — a research record about a trade, with the one field
+    # that says which market it was about missing. `_symbol_from` returned
+    # "unknown" deliberately and said so, because inventing one would have
+    # repeated the Reflection agent's old hardcoded "BTC/USDT". The right fix is
+    # to carry it, not to guess it.
+    #
+    # Optional, and a MISSING value stays "unknown" rather than being defaulted
+    # to anything plausible (invariant 6): a hypothesis attributed to the wrong
+    # market is worse than one that admits it does not know.
+    #
+    # Pydantic v2 IGNORES unknown keyword arguments, so a field passed by the
+    # publisher and not declared here is silently dropped — which is exactly how
+    # `TarApprovedEvent` lost `run_id`, `strategy` and `entry_context` and
+    # disabled the whole learning loop. That is why this is a DECLARATION and
+    # not just a constructor change.
+    symbol: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

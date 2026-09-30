@@ -2158,6 +2158,352 @@ which reads as the agent being broken rather than as the instrument being
 impossible. **BTC STAYS AND IS STILL NOT TRADEABLE**, for the reason the
 tradeable-universe section above gives: it is the benchmark every alt decision
 reads, and "what needs prices?" is a different question from "what may we open?".
+### Paper trades with REAL fills — the Bybit testnet mirror
+
+A simulated fill books at the last observed price, instantly, in full. That is
+honest bookkeeping and also the most flattering possible execution: no spread
+crossed, no slippage, no partial fill, no minimum size, no leverage rejection, no
+rate limit, no venue outage. Every one of those is a real cost that appears on
+day one of real money and on none of the paper days before it.
+
+`services/paper_testnet` + Settings -> "Connect to Bybit testnet". With it on, a
+PAPER entry places a real market order on Bybit's TESTNET and the paper book is
+credited with the price the exchange returned. Same book, same P&L, same panels —
+the fill simply stops being a model. Closes are mirrored too, reduce-only,
+because a mirrored entry that closes only locally leaves a real position open on
+the testnet account which then drifts from the paper book.
+
+FOUR PROPERTIES, EACH ENFORCED RATHER THAN DOCUMENTED:
+
+1. **Unreachable while `LIVE_TRADING` is on.** The execution agent consults it
+   inside `if self.simulation_mode:`, which is false whenever live trading is on.
+   Asserted structurally, because the guarantee IS the code's shape.
+2. **It can never touch mainnet.** `bybit` and `testnet=True` are HARDCODED, not
+   read from `EXCHANGE_ID` — a mirror a config typo could point at mainnet is not
+   a testing aid. Binance is not an option anyway: ccxt dropped its futures
+   testnet, which is why this project's Binance order path is still unverified.
+3. **It never blocks a paper trade.** Any failure — outage, refused size, expired
+   key — falls back to the simulated fill. A paper account that stops working
+   because a sandbox is down is the worse failure.
+4. **The fallback is visible.** `trades.exchange_order_id` is this system's
+   discriminator: set means a venue order stood behind the row, NULL means it
+   did not. **THAT WAS ASSERTED IN FOUR PLACES AND TRUE IN NONE UNTIL
+   2026-09-30.** `order_id` is a `uuid.uuid4()` minted at the top of
+   `_execute_tar` and only REPLACED when a venue returns its own id, so it was
+   non-NULL on every row — simulated, mirrored or live alike. This file, the
+   `paper_testnet` docstring and the Settings panel's footer all told the
+   operator otherwise, and it is the field you reach for to answer "was this
+   paper result real?". `_execute_tar` now tracks `venue_backed` and writes the
+   column only when one was. The uuid is still the CORRELATION id on the bus and
+   in `execution_quality` — a simulated fill needs one to be traceable — it just
+   stops being written into the column that means "the venue acknowledged
+   this".
+
+THE TOGGLE VERIFIES WITH A REAL AUTHENTICATED CALL rather than checking that a
+key exists. A key can be revoked, lack trade permission, or be a MAINNET key
+pasted into the testnet slot, and all three look identical until an order is
+refused. Enabling without credentials is REFUSED — a switch that reports success
+while every order it routes is rejected is the `simulation_mode` failure again.
+
+**`pos.tab != "real"` STOPPED BEING THE RIGHT QUESTION.** Six copies of it
+guarded the venue calls in `position_monitor`, and they all meant "is there a
+real order behind this position?". With the mirror on, a paper position genuinely
+exists at the testnet, so `_venue_backed()` replaces them and `_venue_for()`
+routes each position's orders to ITS venue. Leaving the old guard would open a
+real testnet position with NO stop at the venue — the exact gap the resting stop
+exists to close — and would make the test unfaithful in the one direction that
+matters: it would look safer than the real thing. Sending a mirrored position's
+stop to the MAINNET client would be worse still: live orders against a position
+that does not exist there.
+
+One deliberate asymmetry with the live path: a leverage refusal does NOT abort a
+mirrored order. On mainnet, filling at a leverage we know is wrong is trading on
+a false number and the trade aborts. On testnet the position is play money and a
+less-faithful mirror still beats no mirror.
+
+`tests/test_paper_testnet.py` pins all four properties and the routing.
+
+### The scorer knew nothing it had already measured
+
+`services/strategy_performance` closes the learning loop correctly and had
+never produced a number: it needs `MIN_SAMPLE` (20) real closed trades per
+strategy and `trades` holds zero. So all eleven profiles carried
+`historical_success_rate=None`, the 0.2 track-record weight returned the neutral
+0.5 for every strategy on every run, and selection was decided entirely by
+conditions-fit. Read from the operator's live session on 2026-09-30:
+
+    "DO NOT TRADE: the Grid setup is LONG but the specialist panel reads
+     NEUTRAL at 0.05."
+
+In a Range regime the conditions-fit scorer keeps choosing Grid, Range and
+MeanReversion — the three worst strategies in this project's OWN stored backtest
+(Grid -0.206R, Range -0.184R, MeanReversion -0.103R) — and the specialist panel
+then correctly refuses to act on them. Nothing was broken. The agent simply had
+no way, at SELECTION time, to use what it already knew from `backtests/`.
+
+`services/strategy_priors` carries it there. `opportunity._rate` asks
+`strategy_performance` first and falls back to the prior.
+
+**WHY THIS IS NOT AN INVARIANT-5 VIOLATION**, and it is the same argument
+`strategy_performance` makes: deterministic arithmetic over a committed file,
+no model consulted (asserted against the module's source), and it cannot invent,
+edit, disable or author a strategy — it supplies one field Section 11.3 already
+lists as required. A human ran `scripts/run_backtests.py` and committed the
+result; nothing here generates the evidence it reads.
+
+CLAUDE.md already said "a backtest INFORMS; it does not deploy", and the module
+is built around that sentence:
+
+* **A LIVE MEASUREMENT ALWAYS WINS.** The prior is consulted only when
+  `strategy_performance` has nothing usable for that strategy, so `MIN_SAMPLE`
+  still governs promotion exactly as before. Pinned by asserting the ORDER of
+  the two lookups in the source.
+* **IT IS SHRUNK HALFWAY TOWARD NEUTRAL.** The backtest is in-sample, gross of
+  fees, and was measured over a mostly trending window — `run_backtests.py` says
+  so in its own output. `effective_n` is capped at the same 20-trade floor, so a
+  1,000-candle run buys no more influence than the minimum live sample would:
+  more backtested trades is more of the same window, not more independent
+  evidence.
+* **NO BACKTEST MEANS NEUTRAL, NEVER ZERO.** Same rule as a missing live record.
+
+**THE SHRINKAGE TARGET IS DERIVED FROM THE SCORER'S SCALE, AND THE FIRST VERSION
+GOT IT WRONG IN AN INSTRUCTIVE WAY.** It anchored on break-even (33.3%), which
+is BELOW the win rate `_track_record_score` maps to 0.5 (37.5%, being
+`TRACK_RECORD_FLOOR_WIN_RATE + 0.5 * TRACK_RECORD_SPAN`). So every strategy —
+including the profitable ones — scored lower than an unmeasured one, the whole
+field drifted toward `MIN_SCORE_TO_SELECT`, and the agent would have traded LESS
+rather than better. Those two constants are now NAMED and imported rather than
+restated, because two numbers that must agree in two files is exactly how
+`lib/riskManager.ts` and `core/risk_manager.py` drifted apart on the ATR
+multipliers.
+
+**THE MEASURED EFFECT, STATED HONESTLY BECAUSE IT IS SMALLER THAN IT SOUNDS.**
+Against the committed 2026-09-06 backtest:
+
+    Scalping   38.7% raw -> 38.1% shrunk -> +0.003 on the final score
+    Momentum   37.5%     -> 37.5%        ->  0.000
+    Grid       26.5%     -> 32.0%        -> -0.031
+    VWAP       22.4%     -> 30.0%        -> -0.043
+
+It is ASYMMETRIC, and that is the conservative direction: the neutral-equivalent
+rate (37.5%) sits above the backtest's best performer, so the prior mostly
+DEMOTES strategies the backtest says lose rather than promoting ones it says
+win. Best-to-worst spread on the final score is 0.046 — a tie-breaker between
+two strategies that both see a setup, and enough to push a marginal proposal
+below `MIN_SCORE_TO_SELECT` (0.35). It is NOT an override, by construction:
+conditions still carry 0.8. **It will not stop Grid being proposed in a market
+where Grid is the only thing seeing a setup.** It stops Grid being preferred to
+Breakout when both do.
+
+`HISTORICAL_UNAVAILABLE` gained a sibling for the same
+do-not-state-something-false reason the note was made conditional in the first
+place: its text claims "scores reflect current-conditions fit only", which is a
+false statement about a run that used a prior. `HISTORICAL_FROM_BACKTEST` says
+which evidence was actually used, and a test asserts the two never both appear.
+
+`GET /api/graphs/strategy-performance` returns the prior under `backtestPrior`,
+ALONGSIDE the realised numbers and never merged into them, carrying the caveats
+`run_backtests.py` prints and a JSON file does not preserve on its own. "38%
+backtested" is a claim about a 1,000-candle window in September; "38% realised"
+is a claim about this account's money, and a reader who cannot tell them apart
+will trust the wrong one.
+
+`tests/test_strategy_priors.py` pins all four properties.
+
+### An external audit found eleven real defects, and they share one shape
+
+A third-party audit (2026-09-30) ran the whole suite green — 2,059 backend, 469
+frontend, tsc, build — and then found eleven confirmed defects with its own
+scenarios. Every one was verified against the source before anything was
+changed, and they are worth reading together because they are the SAME BUG
+ELEVEN TIMES:
+
+> a value is carried all the way to the decision point, and then not used.
+
+    close_position(tab=...)     branched on a process-wide flag
+    specialist_portfolio        hardcoded tab = "paper"
+    load_portfolio              read `side` from a SELECT that never asked for it
+    supervisor's exit branch    read direction from the SIGN of a quantity
+    paper_testnet.place         substituted the requested qty for the filled one
+    _execute_tar                ignored the paper book's refusal
+    close_position (live)       checked the price and not the filled quantity
+
+In each case the code LOOKS like it is using the right input. That is why a
+green suite could sit on top of them, and why the tests added for them
+(`tests/test_audit_findings.py`) assert against the INPUT REACHING THE DECISION
+rather than against a happy path.
+
+**THE TWO THAT COULD MOVE REAL MONEY.**
+
+*Execution routed by the global live/paper setting, not by the position.* Every
+routing decision in `execution_agent` was `if self.simulation_mode:` while `tab`
+was carried on the very same call. So:
+
+    a PAPER position is opened while LIVE_TRADING is off
+    the operator turns LIVE_TRADING on
+    the monitor's stop fires on that paper position
+    -> the close takes the LIVE branch, because the flag flipped
+    -> a reduce-only market order is sent to MAINNET
+
+`reduceOnly` bounds it — it cannot OPEN anything — but it is not harmless: if
+the operator holds a real position in the same symbol, that order closes part of
+the REAL one to satisfy a paper stop, and the paper book books its own simulated
+close on top. Both books move on one event and neither is right.
+`routes_to_venue(tab)` is now the single predicate and needs BOTH terms:
+`tab == "real"` stops a paper order reaching a venue, and `not simulation_mode`
+stops the backtest engine reaching one however a position is labelled.
+
+One consequence: the testnet mirror's property 1 (unreachable while LIVE_TRADING
+is on) was a consequence of the branch's SHAPE and is now an EXPLICIT term in
+the condition. A guarantee that holds only until someone restructures the branch
+is not a guarantee, and `tests/test_paper_testnet.py` asserts the condition
+rather than the ordering of two substrings.
+
+*A price is not a close.* The live close checked `result.ok` and
+`average_price` and returned the fill — but never `filled_qty`. The caller reads
+a non-None return as "the position is flat", so a reduce-only close that filled
+0, or 30 of 100, deleted the watch row, cancelled the resting stop AND
+take-profit, published POSITION_CLOSED and booked a realised P&L against a
+quantity that never traded, **while the residual stayed open at the exchange
+with nothing enforcing its stop**. That is the precise failure the resting stop
+and the monitor both exist to prevent, reached by reporting success. A shortfall
+now returns None, which is the retryable answer: the monitor keeps watching and
+closes again next tick, and `reduce_only=True` is what makes the retry safe —
+it can only ever shrink what is actually there. The tolerance is RELATIVE
+(0.999) because a venue's step size legitimately trims the last fraction.
+
+**THE REST, EACH WITH THE CONSEQUENCE THAT MADE IT WORTH FIXING.**
+
+* `specialist_portfolio` hardcoded `tab = "paper"` and is the ONLY writer of
+  `portfolio_state`, which the Supervisor (Phase 27) and the Risk Gateway (Phase
+  28) both read. Every real-money decision was made against the paper book's
+  cash, exposure and positions. Its equity was also still `cash + notional` —
+  the 1x-only formula removed from `book_equity` and from the TS side, which
+  survived here and is the number the gateway sizes a fraction of. It is
+  `cash + locked margin` now, with the absent unrealized term NAMED in the
+  evidence rather than zero-marked, because this node has no per-symbol marks
+  and fetching them would be a second market-data path inside one run.
+* `load_portfolio`'s SELECT omitted `side`. The row builder reads it
+  defensively (`if "side" in r.keys()`), so it took the "buy" default on every
+  row and **every stored short came back from a restart as a long**. Same shape
+  as the `TarApprovedEvent` fields that were passed but never declared: a
+  defensive read of a value that does not arrive is indistinguishable from a
+  legitimate absence.
+* The graph Supervisor's exit branch read `qty > 0` as LONG. The book stores a
+  POSITIVE quantity plus an explicit `side` — added because it could not
+  represent a short at all otherwise — so every short read as a long and the
+  confident LONG verdict that should close a short was discarded. One-sided and
+  therefore invisible from the winning side: longs exited on an opposing view
+  exactly as designed, shorts never did.
+* `paper_testnet.place` did `float(filled) if filled else float(qty)`, so an
+  order the testnet accepted and filled NOTHING came back as a complete fill of
+  everything asked for. That is exactly the flattering execution the mirror
+  exists to remove.
+* `_execute_tar` ignored `apply_paper_fill`'s refusal and published ORDER_FILLED
+  anyway, so an unfundable open left the trade log, the monitor and the book
+  disagreeing — with the component holding the MONEY as the one saying no. It
+  now stops, and removes its own trade row, when nothing happened anywhere; when
+  a REAL order stands behind it (mirrored) it publishes and logs CRITICAL,
+  because an unwatched real position is worse than a book that disagrees.
+  `_apply_paper_fill` had to change its return type for this: `Optional[float]`
+  meant `None` for both "refused" and "this was an open, which has no realised
+  P&L", so the refusal was unobservable.
+* `execution_service._close` called `close_position` directly, which places the
+  order and settles the book and does NOTHING ELSE. The closed-trade row, the
+  watch-row deletion, the resting stop/TP cancels and POSITION_CLOSED — which
+  drives reflection, the learning ledger and the Telegram alert — all live in
+  `PositionMonitorAgent._close`. A graph-driven exit therefore left a STALE row
+  in `monitored_positions`, and that row is not inert: `may_open_new_position`
+  counts it, so the slot the exit was taken to free stayed occupied, and the
+  trade produced no lesson. It routes through `close_tracked` now, and the
+  direct call REMAINS as the fallback — a position the monitor is not tracking
+  still has to be closable (invariant 4).
+* `_handle`'s idempotency check and its `_submitted[basis] = ...` were separated
+  by three awaits, and every await is a yield point. Two tasks carrying the same
+  plan both passed the duplicate test before either recorded it: one plan, two
+  TAR submissions, one position opened twice at full size. The basis is claimed
+  before the first await now. **A close is deliberately exempt** — `_close`
+  withholds its basis on a wiring failure precisely so the exit stays retryable.
+* `POST /live-trading/enable` checked `exchange_client`, the older Binance-only
+  client, and named `BINANCE_API_KEY` in the refusal. The order path is
+  `services/venue`, whose credentials are PER VENUE. Both directions were wrong
+  and one is dangerous: a fully configured Bybit deployment was refused for the
+  absence of Binance keys, and leftover Binance keys would have PASSED the check
+  on a Bybit deployment with no Bybit keys at all.
+* `ReflectionCompletedEvent` carried no symbol, so `HypothesisAgent._symbol_from`
+  returned `"unknown"` — and every hypothesis this system has ever saved is a
+  research record about a trade with the field naming its market missing. The
+  event DECLARES `symbol` now (declares, because Pydantic v2 silently drops an
+  undeclared kwarg — the `TarApprovedEvent` lesson), and a missing value is still
+  `"unknown"` rather than anything plausible.
+* The Settings panel said **"Connected to Bybit testnet"** directly above
+  **"Verification failed."** The setting deliberately STAYS ON when verification
+  fails — reverting it would hide a fixable problem behind a switch that
+  silently refused to move — but an unverified mirror falls back to simulated
+  fills, and the whole point of the toggle is to trust that paper fills are
+  real. It reads "Enabled but NOT verified" now.
+
+**AND THE CYCLE COUNTER WAS MEASURING THE WRONG THING, WHICH COST TWO DAYS.**
+`session.cycles_run` increments at the top of every 12s poll — before the pause
+check, the equity read, the target/floor checks, the open-position check, the
+daily-target lock and the decision interval. The audit reproduced 10,001 cycles,
+0 analysis calls and 0 trades on a PAUSED system. "9,000 cycles and no trade"
+reads as nine thousand rejected decisions and may be zero attempted ones, and it
+is what sent the search to the decision logic rather than to the gate that was
+actually refusing. `analyses_run` now counts graph runs and the panel shows the
+funnel — polls, decisions, approved plans, fills — because any one of those read
+alone is misleading. `trades_opened` also moved: it counted a PUBLISHED PLAN,
+which is two gates and a fill early (the CRO was rejecting every one of them on
+GLOBAL_VAR_LIMIT), and now counts the flat -> holding transition, which is the
+only fill this loop can observe. `plans_approved` keeps the old meaning under an
+honest name.
+
+WHAT THE AUDIT GOT WRONG, for the record, because checking mattered: it reported
+the zero/partial-fill defect as applying to execution generally. The OPEN path
+already treated a missing or zero `filled` as a non-fill and had a comment
+saying why; only the CLOSE path was affected.
+
+### The fixed profit target was reversed, and both decisions were right
+
+`PROFIT_TARGET_PCT` shipped OFF, was defaulted to 2.0, and is now 0 again. That
+is not churn — each step corrected the one before, and the arithmetic for the
+last one is worth keeping because it is not obvious.
+
+It was defaulted ON because 53.4% of trades were closing at ~0.00: the scale-out
+banked half at +1R, moved the runner's stop to break-even, and the runner
+scratched. A fixed target closes the WHOLE position and removes that.
+
+The cost nobody had computed: the target is a percentage of MARGIN, so the PRICE
+move it needs is `PROFIT_TARGET_PCT / leverage` — while the stop stays at 2.5x
+ATR and does NOT shrink. They collide as leverage rises. Measured on a live
+XRP/USDT session (ATR 0.504%, stop 1.26%):
+
+    2.0% at 10x  ->  0.20% target vs 1.26% stop  ->  93.2% break-even
+    2.0% at  3x  ->  0.67% target vs 1.26% stop  ->  70.6% break-even
+    0 (ATR pair) ->  2.52% target vs 1.26% stop  ->  36.0% break-even
+
+Measured live win rate at the time: 54.5% (6 of 11). A 93% break-even is losing
+by construction.
+
+**0 DOES NOT MEAN "NO TARGET", and the Settings help text now says so.** Every
+position always carries an ATR stop (2.5x) and an ATR target (5.0x), checked on
+every tick by `_check_price`. This setting only ever added a NEARER exit that
+overrode the target. Turning it off hands the exit back to the ATR pair, which is
+2:1 BY CONSTRUCTION at every leverage and adapts to each instrument's own
+volatility — the property a fixed percentage cannot have. To keep 2:1 with a
+fixed target it has to be about `3.6 x leverage`.
+
+**`PARTIAL_TP_FRACTION` HAD TO MOVE WITH IT (0.5 -> 0).** The scale-out is gated
+on `PROFIT_TARGET_PCT <= 0`, so it was dormant only BECAUSE the target was on.
+Turning the target off alone would have woken it and restored the exact failure
+the target was introduced to remove.
+
+A TESTING LESSON FROM THE SAME CHANGE: `tests/test_partial_tp.py` pinned the
+profit target off in its fixture but INHERITED `PARTIAL_TP_FRACTION` from the
+default. When that default moved to 0 the scale-out stopped firing and four tests
+failed — a file testing the scale-out mechanism had been relying on it being the
+default. A test that reads its own enablement from a default is really a test of
+the default, and it breaks the moment an operator changes their mind.
 
 ## Safety invariants — never break these
 
@@ -2268,7 +2614,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2023 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2059 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

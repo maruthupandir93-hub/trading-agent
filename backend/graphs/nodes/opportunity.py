@@ -92,9 +92,37 @@ HISTORICAL_UNAVAILABLE = (
     "current-conditions fit only"
 )
 
+# THE SAME ABSENCE, BUT A BACKTESTED PRIOR IS STANDING IN FOR IT.
+#
+# `HISTORICAL_UNAVAILABLE` says scores reflect "current-conditions fit only",
+# and with a prior in play that is no longer true — it would be a false
+# statement about which evidence moved a selection, on the one line an operator
+# reads to find out. The distinction matters in both directions: a prior is not
+# a track record, and a score that used one is not conditions-only.
+HISTORICAL_FROM_BACKTEST = (
+    "strategy scoring is using BACKTESTED priors, not realised results: no "
+    "strategy has closed enough trades on this account yet. The prior is shrunk "
+    "halfway toward neutral and is superseded per strategy the moment that "
+    "strategy has enough real closed trades"
+)
 
-def _track_record_score(win_rate: Optional[float]) -> Tuple[float, str]:
-    """Map a realised win rate to a 0-1 score.
+
+# THE SCALE'S TWO ENDS, NAMED so one other module can derive from them.
+#
+# `services/strategy_priors` shrinks a backtested win rate toward the rate that
+# scores exactly NEUTRAL here, and it has to be THIS scale's neutral point or
+# turning priors on would move every strategy in one direction at once. Two
+# numbers that must agree, in two files, is how `lib/riskManager.ts` and
+# `core/risk_manager.py` drifted apart on the ATR multipliers — so the second
+# file imports these rather than restating them.
+TRACK_RECORD_FLOOR_WIN_RATE = 0.20   # scores 0.0
+TRACK_RECORD_SPAN = 0.35             # +0.35 above the floor scores 1.0
+
+
+def _track_record_score(
+    win_rate: Optional[float], source: str = "realised",
+) -> Tuple[float, str]:
+    """Map a win rate to a 0-1 score.
 
     NEUTRAL (0.5) WHEN THERE IS NO USABLE RECORD, not zero. Scoring an unmeasured
     strategy as a failure would permanently freeze out every strategy that has
@@ -104,12 +132,24 @@ def _track_record_score(win_rate: Optional[float]) -> Tuple[float, str]:
     Anchored on 0.5 as break-even for a 2:1 payoff system rather than on 50% being
     "good": at 2:1, a third of trades winning is roughly break-even, so 33% maps
     near the middle and the scale rewards genuine improvement on that.
+
+    `source` NAMES WHERE THE NUMBER CAME FROM and never changes the arithmetic.
+    A backtested prior and a realised rate score identically for the same value —
+    the discounting happens in `strategy_priors`, before the number arrives here,
+    because that is where the reasons for discounting live. What the label buys
+    is an evidence string that cannot be misread: "38% backtested (prior)" and
+    "38% realised win rate" are very different claims about an account, and this
+    node's output is read by an operator deciding whether to trust a selection.
     """
     if win_rate is None:
         return 0.5, "track record: not enough closed trades (neutral)"
-    # 0.20 -> 0.0, 0.55 -> 1.0, clamped. Linear between.
-    score = (win_rate - 0.20) / 0.35
+    score = (win_rate - TRACK_RECORD_FLOOR_WIN_RATE) / TRACK_RECORD_SPAN
     score = max(0.0, min(1.0, score))
+    if source == "backtest":
+        return score, (
+            f"track record: {win_rate:.0%} BACKTESTED prior (shrunk; no live "
+            f"trades yet, superseded once there are)"
+        )
     return score, f"track record: {win_rate:.0%} realised win rate"
 
 # A strategy scoring below this is not worth proposing. Not a tuned number — it is
@@ -211,12 +251,39 @@ async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
 
     perf = await strategy_performance.performance()
     any_usable = bool(perf) and any(s["usable"] for s in perf.values())
+    # Whether ANY candidate ended up scored from a prior, so the note below can
+    # name the evidence that was actually used rather than the one that was not.
+    used_prior = False
 
-    def _rate(name: str) -> Optional[float]:
-        if not perf:
-            return None
-        entry = perf.get(name)
-        return float(entry["winRate"]) if entry and entry["usable"] else None
+    from backend.services import strategy_priors
+
+    def _rate(name: str) -> Tuple[Optional[float], str]:
+        """This strategy's win rate, and where it came from.
+
+        THE LIVE MEASUREMENT ALWAYS WINS. `strategy_performance` is asked first
+        and the backtest is consulted only when it has nothing usable, so
+        `MIN_SAMPLE` still governs promotion exactly as it did — the prior fills
+        the gap before a strategy has traded and is superseded the moment it has.
+
+        WHY THE GAP NEEDED FILLING: every profile carries
+        `historical_success_rate=None` and this account's `trades` table is
+        empty, so this component returned the neutral 0.5 for all eleven
+        strategies on every run. Selection was therefore decided entirely by
+        conditions-fit, which in a Range regime keeps choosing Grid, Range and
+        MeanReversion — the three worst strategies in this project's own stored
+        backtest — and the specialist panel then refuses to act on them. The
+        evidence existed in `backtests/`; nothing carried it to the choice.
+        """
+        if perf:
+            entry = perf.get(name)
+            if entry and entry["usable"]:
+                return float(entry["winRate"]), "realised"
+        try:
+            prior = strategy_priors.prior_win_rate(name)
+        except Exception as exc:  # noqa: BLE001 - a missing prior is neutral, not fatal
+            logger.warning("Backtest prior unavailable for %s: %s", name, exc)
+            prior = None
+        return (prior, "backtest") if prior is not None else (None, "none")
 
     scored: List[StrategyCandidate] = []
     for candidate in candidates:
@@ -225,8 +292,10 @@ async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
             scored.append(candidate)
             continue
 
+        rate, rate_source = _rate(candidate.name)
+        used_prior = used_prior or rate_source == "backtest"
         score, detail = _score_one(
-            candidate.name, bars, mtf_trend, volatility, _rate(candidate.name)
+            candidate.name, bars, mtf_trend, volatility, rate, rate_source
         )
         scored.append(
             StrategyCandidate(
@@ -250,7 +319,11 @@ async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
         # unconditional, which was correct when every profile carried
         # `historical_success_rate=None` — and would now be a false statement
         # about a system that HAS started learning from its own results.
-        "unavailable": [] if any_usable else [HISTORICAL_UNAVAILABLE],
+        "unavailable": (
+            []
+            if any_usable
+            else [HISTORICAL_FROM_BACKTEST if used_prior else HISTORICAL_UNAVAILABLE]
+        ),
     }
 
     if not ranked:
@@ -285,6 +358,9 @@ def _score_one(
     mtf_trend: Optional[str],
     volatility: Optional[str],
     win_rate: Optional[float] = None,
+    # Defaulted so every existing caller and test keeps working unchanged; it
+    # only ever alters the EVIDENCE STRING, never the arithmetic.
+    rate_source: str = "realised",
 ) -> Tuple[Optional[float], str]:
     """Score one strategy. Returns (score, explanation).
 
@@ -371,7 +447,7 @@ def _score_one(
     vol_score, vol_detail = _volatility_fit(name, volatility)
     parts.append(vol_detail)
 
-    record_score, record_detail = _track_record_score(win_rate)
+    record_score, record_detail = _track_record_score(win_rate, rate_source)
     parts.append(record_detail)
 
     score = (

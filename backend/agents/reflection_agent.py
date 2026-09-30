@@ -311,6 +311,10 @@ class ReflectionAgent(BaseAgent):
         await self.publish(
             ReflectionCompletedEvent(
                 trade_id=event.trade_id,
+                # Carried so `HypothesisAgent` can attribute the hypothesis to a
+                # market. It saved every one of them as "unknown" because this
+                # event did not have the field.
+                symbol=getattr(event, "symbol", None),
                 pnl=event.realized_pnl,
                 lesson_learned=note,
                 confidence_calibration_delta=delta,

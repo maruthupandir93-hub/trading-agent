@@ -152,8 +152,24 @@ class TradingSession:
     finished_at: Optional[float] = None
     stop_reason: Optional[str] = None
 
+    # POLLS, NOT DECISIONS — and the two were being read as one number.
+    #
+    # This increments at the top of every `SESSION_POLL_S` tick, BEFORE the pause
+    # check, the equity read, the target/floor checks, the open-position check,
+    # the daily-target lock and the decision interval. So a paused or fully
+    # occupied session accumulates cycles indefinitely without ever calling the
+    # analysis graph. Reproduced on a paused system: 10,001 cycles, 0 analysis
+    # calls, 0 trades — and "9,000 cycles and no trade" reads as 9,000 failed
+    # decisions when it may be zero attempted ones.
+    #
+    # `analyses_run` is the number that answers "did the agent actually think
+    # about a trade?", and the two are now reported separately.
     cycles_run: int = 0
+    analyses_run: int = 0
     trades_opened: int = 0
+    # Plans the Risk Gateway approved. NOT the same as filled positions — the
+    # CRO can still reject, and a fill can fail. See `trades_opened`.
+    plans_approved: int = 0
     last_cycle_at: Optional[float] = None
     last_decision: Optional[str] = None
     last_rationale: Optional[str] = None
@@ -514,6 +530,16 @@ async def _run_session(session_id: str) -> None:
 
             # -- do not stack positions --------------------------------------
             if await _has_open_position(session.symbol, tab):
+                if not was_holding:
+                    # THE FLAT -> HOLDING TRANSITION IS THE FILL, and it is the
+                    # only place this loop can observe one. `trades_opened` used
+                    # to be incremented when the graph PUBLISHED a plan, which
+                    # is two gates and a fill earlier: the CRO can still reject
+                    # (and rejected every plan for two days on GLOBAL_VAR_LIMIT),
+                    # and the fill itself can fail. So the session reported
+                    # trades it had never taken, and `MAX_TRADES_PER_SESSION`
+                    # expired sessions on that count.
+                    session.trades_opened += 1
                 was_holding = True
                 _note(session, f"already holding {session.symbol}; the monitor owns the exit. Waiting.")
                 continue
@@ -528,6 +554,9 @@ async def _run_session(session_id: str) -> None:
 
             last_decided_at = time.time()
             # -- one full decision cycle -------------------------------------
+            # Counted HERE and not with `cycles_run`, because this is the only
+            # point the 24-node graph is actually reached. See `analyses_run`.
+            session.analyses_run += 1
             await _decide_once(session)
 
     except asyncio.CancelledError:
@@ -655,9 +684,16 @@ async def _decide_once(session: TradingSession) -> None:
     session.last_rationale = rationale
 
     if result.get("executionPlan"):
-        # The gateway approved and a plan was published. The fill is asynchronous
-        # — counted here because this is the cycle that authorised it.
-        session.trades_opened += 1
+        # THE GATEWAY APPROVED A PLAN. THAT IS NOT A TRADE, and calling it one
+        # overstated the session's activity in the field the operator reads and
+        # in `MAX_TRADES_PER_SESSION`, which then expired sessions over trades
+        # that never executed.
+        #
+        # A published plan still has to pass the CRO — which rejects, and was
+        # rejecting every plan on GLOBAL_VAR_LIMIT for two days — and then fill.
+        # `plans_approved` counts the authorisation; `trades_opened` counts the
+        # fill, recorded where the fill happens.
+        session.plans_approved += 1
 
     _note(
         session,

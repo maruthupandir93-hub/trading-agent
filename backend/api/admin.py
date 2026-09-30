@@ -509,19 +509,32 @@ async def enable_live_trading(body: Dict[str, Any] = {}) -> Dict[str, Any]:
 
     # Check credentials before enabling — live mode without keys means every
     # order attempt fails at the exchange, which is worse than staying in paper.
+    #
+    # IT ASKS THE VENUE LAYER, WHICH IS WHAT PLACES THE ORDERS. It used to ask
+    # `exchange_client`, the older Binance-only client, and name
+    # BINANCE_API_KEY / BINANCE_SECRET in the refusal. The agent's real order
+    # path is `services/venue`, whose credentials are PER VENUE — a Bybit
+    # deployment with a full set of BYBIT_* keys was refused for the absence of
+    # Binance ones, and the message sent the operator to set a variable that
+    # nothing on their configured venue would ever read. The mirror of that is
+    # the dangerous direction: leftover Binance keys would have PASSED the check
+    # on a Bybit deployment with no Bybit keys at all.
     try:
-        from backend.services.exchange_client import get_exchange_client
-        client = get_exchange_client()
-        if not client.has_credentials():
+        from backend.services.venue import get_venue
+
+        venue = get_venue()
+        if not venue.has_credentials():
             return {
                 "status": "error",
                 "message": (
-                    "Cannot enable live trading: no exchange credentials configured "
-                    "(BINANCE_API_KEY / BINANCE_SECRET are empty). Set them in .env first."
+                    f"Cannot enable live trading: no credentials for the configured venue "
+                    f"'{venue.id}'. Set {venue.key_variable} and {venue.secret_variable} in "
+                    f".env first — credentials are per venue, because Binance and Bybit are "
+                    f"different accounts holding different money."
                 ),
             }
     except Exception as e:
-        logger.warning("Could not check exchange credentials: %s", e)
+        logger.warning("Could not check venue credentials: %s", e)
 
     settings.set_live_trading(True)
     logger.critical(
@@ -571,16 +584,39 @@ async def disable_live_trading() -> Dict[str, Any]:
 # `simulation_mode` note in CLAUDE.md for what a frozen setting costs.
 
 _EXIT_RULES: Dict[str, Dict[str, Any]] = {
+    # DEFAULT CHANGED 2.0 -> 0.0 ON 2026-09-28, at the operator's instruction and
+    # on measured arithmetic. A fixed percentage target does not scale with
+    # leverage the way the ATR stop does, so the two collide: the target is
+    # `PROFIT_TARGET_PCT / leverage` as a PRICE move, while the stop stays at
+    # 2.5x ATR. On the operator's live XRP/USDT session (ATR 0.504%, stop 1.26%):
+    #
+    #     setting            target    stop     win/marg  loss/marg  break-even
+    #     2.0% at 10x         0.20%   1.26%        +1.0%     -13.6%      93.2%
+    #     2.0% at  3x         0.67%   1.26%        +1.7%      -4.1%      70.6%
+    #     0 (ATR target)      2.52%   1.26%       +24.2%     -13.6%      36.0%
+    #
+    # Measured live win rate at the time: 54.5% (6 of 11). A 93% break-even is
+    # losing by construction; the ATR target is 2:1 BY CONSTRUCTION
+    # (ATR_TARGET_MULTIPLIER 5.0 / ATR_STOP_MULTIPLIER 2.5) at every leverage.
+    #
+    # 0 DOES NOT MEAN 'NO TARGET' and the help text now says so. `_check_price`
+    # tests `pos.take_profit` on every tick regardless; this setting only adds a
+    # NEARER exit that overrides it. Turning it off hands the exit back to the
+    # per-trade ATR level, which adapts to each instrument's own volatility.
     "PROFIT_TARGET_PCT": {
         "label": "Take profit at",
-        "unit": "%",
-        "default": "2.0",
+        "unit": "% of margin",
+        "default": "0",
         "min": 0.0,
         "max": 50.0,
         "help": (
-            "Close the WHOLE position at this favourable price move. 0 disables it "
-            "and restores the ATR target plus scale-out. With leverage this is "
-            "amplified against margin: at 3x a 2% move is ~6% of the margin used."
+            "An EXTRA exit, nearer than the ATR target, that closes the whole "
+            "position. 0 does NOT mean no target — every position always has an "
+            "ATR target (5x ATR) and stop (2.5x ATR), checked on every tick, and 0 "
+            "simply lets that 2:1 pair decide. Set above 0 and the price move "
+            "needed is this / leverage, while the stop does NOT shrink: at 10x, 2% "
+            "is a 0.20% move against a 1.26% stop, which needs a 93% win rate to "
+            "break even. To keep 2:1 with a fixed target, use ~3.6 x leverage."
         ),
     },
     "TRAILING_STOP_R": {
@@ -602,16 +638,24 @@ _EXIT_RULES: Dict[str, Dict[str, Any]] = {
         "max": 10.0,
         "help": "Profit, in R, before the trail starts following. Below this the original stop holds.",
     },
+    # DEFAULT CHANGED 0.5 -> 0.0 ON 2026-09-28, AND IT HAD TO MOVE WITH THE ONE
+    # ABOVE. The scale-out is gated on `PROFIT_TARGET_PCT <= 0`, so it was dormant
+    # only BECAUSE the profit target was on. Setting that to 0 without this would
+    # have woken it up and reintroduced exactly the failure the profit target was
+    # added to remove: bank half at +1R, move the runner's stop to break-even,
+    # price drifts back, the runner scratches. Measured before: of 4,003 closed
+    # trades, 2,136 (53.4%) realised less than 0.001.
     "PARTIAL_TP_FRACTION": {
         "label": "Scale out fraction",
         "unit": "",
-        "default": "0.5",
+        "default": "0",
         "min": 0.0,
         "max": 1.0,
         "help": (
-            "How much to bank at the scale-out point. 0 disables it. IGNORED while "
-            "a profit target is set — the two together reintroduce the break-even "
-            "runner that produced trades closing at 0.00."
+            "Bank this fraction at +1R and run the rest from break-even. 0 disables "
+            "it, giving one clean exit per trade: +2R at the ATR target or -1R at "
+            "the stop. IGNORED while a profit target is set. Turning BOTH on is "
+            "what produced trades closing at 0.00."
         ),
     },
     "PROFIT_TARGET_BASIS": {
@@ -737,3 +781,90 @@ async def set_exit_rules(req: ExitRulesRequest) -> Dict[str, Any]:
 
     logger.warning("EXIT RULES CHANGED BY THE OPERATOR: %s", changed)
     return {"ok": True, "changed": changed, "appliesFrom": "the next price tick"}
+
+
+# ---------------------------------------------------------------------------
+# BYBIT TESTNET MIRROR — make a paper fill a real fill
+# ---------------------------------------------------------------------------
+#
+# The operator's ask: a switch that routes PAPER trades through Bybit's testnet
+# so the fill is the exchange's rather than a model of one, before any real money
+# is involved. `services/paper_testnet` holds the safety argument; these two
+# routes are the control surface.
+#
+# The GET is deliberately cheap — it reads configuration and the LAST check, and
+# does not hit the venue. The Settings page polls it, and a panel that
+# authenticated against an exchange on every poll would spend the key's rate
+# budget rendering a form nobody had submitted. That is the same reasoning behind
+# `operator_trade`'s 30s balance cache.
+class TestnetRequest(BaseModel):
+    enabled: bool
+    # Verifying makes a REAL authenticated call, so it is opt-in per request
+    # rather than implied by enabling. Defaults on, because enabling without
+    # checking is how an operator ends up believing orders are being mirrored
+    # when every one of them is being refused.
+    verify: bool = True
+
+
+@router.get("/testnet")
+async def get_testnet() -> Dict[str, Any]:
+    """Current mirror configuration. Never returns a key or a secret."""
+    from backend.services import paper_testnet
+
+    return paper_testnet.status()
+
+
+@router.post("/testnet", dependencies=[Depends(require_write_auth)])
+async def set_testnet(req: TestnetRequest) -> Dict[str, Any]:
+    """Turn the testnet mirror on or off, and prove the credentials work.
+
+    ENABLING WITHOUT CREDENTIALS IS REFUSED rather than accepted-and-broken. The
+    alternative is a switch that reports success while every order it routes is
+    rejected, which is the class of failure `simulation_mode` already taught this
+    project: a control that reports success while doing nothing is worse than no
+    control.
+
+    Turning it OFF is never refused and never verified — an operator switching a
+    test venue off must not be blocked by that venue being unreachable.
+    """
+    from backend.services import paper_testnet
+
+    if req.enabled and not paper_testnet.credentials_present():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Bybit testnet credentials. Set BYBIT_TESTNET_API_KEY and "
+                "BYBIT_TESTNET_SECRET in .env and restart, then enable this. They are "
+                "SEPARATE from the mainnet pair on purpose: verifying on testnet must "
+                "never require pasting a testnet key over a live one, because putting "
+                "the live one back is where a real key ends up in play by accident."
+            ),
+        )
+
+    text = "true" if req.enabled else "false"
+    os.environ[paper_testnet.ENV_VAR] = text
+    settings._persist_env(paper_testnet.ENV_VAR, text)
+    # Drop the cached client so a credential change made alongside this is picked
+    # up without a restart.
+    paper_testnet.reset()
+
+    check = None
+    if req.enabled and req.verify:
+        check = await paper_testnet.verify()
+        if not check.get("ok"):
+            # The setting STAYS ON and the failure is reported. Reverting it here
+            # would hide a real, fixable problem (a revoked key, a mainnet key in
+            # the testnet slot) behind a switch that silently refused to move —
+            # and the mirror already falls back to a simulated fill, so an
+            # unusable testnet costs faithfulness, never a trade.
+            logger.warning(
+                "Testnet mirror enabled but verification FAILED: %s", check.get("reason")
+            )
+
+    logger.warning(
+        "BYBIT TESTNET MIRROR %s BY THE OPERATOR. Paper fills %s.",
+        "ENABLED" if req.enabled else "DISABLED",
+        "now come from the testnet exchange" if req.enabled else "are simulated again",
+    )
+    return {"ok": True, "enabled": req.enabled, "verification": check,
+            "status": paper_testnet.status()}

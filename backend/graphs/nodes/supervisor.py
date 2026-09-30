@@ -390,12 +390,37 @@ def _consider_exit(
     if not held:
         return None
 
+    # SIGNED BY THE STORED `side`, NOT BY THE SIGN OF `qty`.
+    #
+    # This summed raw quantities and read `qty > 0` as LONG. The paper book does
+    # not encode direction in the sign: `portfolio_store` stores a POSITIVE
+    # quantity plus an explicit `side` field, added precisely because "the book
+    # cannot represent a short at all" without it. So every short read as a long,
+    # `opposing` came out as SHORT, and a confident LONG verdict — the one that
+    # should close a short — was discarded by the `verdict.direction != opposing`
+    # test below.
+    #
+    # The effect was one-sided and therefore invisible from the winning side:
+    # longs exited on an opposing view exactly as designed, and shorts never
+    # exited on one at all. They could still be closed by their stop or target;
+    # they simply stopped being closable by the analysis changing its mind, which
+    # is the whole point of this branch.
+    #
+    # A MISSING `side` falls back to the sign, which is what a row written before
+    # the column existed genuinely meant.
     qty = 0.0
     for pos in held:
         try:
-            qty += float(pos["qty"])
+            size = float(pos["qty"])
         except (KeyError, TypeError, ValueError):
             continue
+        side = str(pos.get("side") or "").strip().lower()
+        if side in ("sell", "short"):
+            qty -= abs(size)
+        elif side in ("buy", "long"):
+            qty += abs(size)
+        else:
+            qty += size
 
     if qty == 0.0:
         return None

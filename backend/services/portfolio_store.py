@@ -169,7 +169,23 @@ async def load_portfolio() -> bool:
                 "SELECT cash FROM agent_paper_account WHERE id = 'default'"
             )
             position_rows = await conn.fetch(
-                "SELECT tab, symbol, qty, avg_cost, margin_locked FROM agent_positions ORDER BY symbol"
+                # `side` HAD TO BE NAMED HERE, and its absence was silent.
+                #
+                # The row-building code below reads it defensively —
+                # `r["side"] if "side" in r.keys() else "buy"` — so a SELECT that
+                # never asked for the column simply took the default on every
+                # row. Every stored SHORT was restored as a LONG after a restart:
+                # the book then marks it with the sign inverted, so unrealized
+                # P&L moves the wrong way, equity is wrong by twice the move, and
+                # the monitor's own exit arithmetic disagrees with the book about
+                # which direction is profit.
+                #
+                # This is the same shape as the `TarApprovedEvent` field that was
+                # passed but never declared: a defensive read of a field that
+                # does not arrive is indistinguishable from a legitimate absence,
+                # so nothing anywhere reported a problem.
+                "SELECT tab, symbol, qty, avg_cost, side, margin_locked "
+                "FROM agent_positions ORDER BY symbol"
             )
     except Exception as e:
         logger.error(

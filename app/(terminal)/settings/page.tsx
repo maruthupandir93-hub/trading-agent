@@ -21,6 +21,7 @@ import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/pri
 import { ResetPaperBookPanel } from '@/components/operator/ResetPaperBookPanel';
 import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
 import { ExitRulesPanel } from '@/components/operator/ExitRulesPanel';
+import { TestnetPanel } from '@/components/operator/TestnetPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
@@ -258,6 +259,12 @@ export default function SettingsPage() {
           adjusts while watching the agent trade, and every one of them applies
           on the next tick with no restart. */}
       <ExitRulesPanel />
+
+      {/* Directly under the exit rules and above the venue switch: this decides
+          whether a PAPER fill is simulated or comes from a real exchange, which
+          is the same class of decision as which venue the agent trades on and
+          belongs beside it rather than buried further down. */}
+      <TestnetPanel />
 
       <VenueSwitchPanel />
 

@@ -120,6 +120,23 @@ from backend.services.trading_session import (
 # days with none of these checks. A limit that only one of two execution paths
 # respects is not a limit, so the definition moved to a place both can import.
 from backend.services.fees import taker_rate
+# THE SAME TWO FUNCTIONS THE CRO USES, imported rather than reimplemented.
+#
+# The CRO remains the authority on VaR — this node sizes to fit its limit so it
+# is not handed a trade it must refuse, and two copies of that arithmetic would
+# drift into exactly the disagreement this import exists to end.
+from backend.agents.cro_agent import (
+    _adverse_move_fraction as cro_adverse_move,
+    max_portfolio_var_fraction,
+)
+
+# How much of the VaR budget the gateway actually spends when it caps a position.
+#
+# MODULE SCOPE ON PURPOSE: this is a number the CRO's verdict depends on, so it
+# has to be readable by the tests and by anyone diagnosing a refusal, not buried
+# in a function body. See the comment at the cap itself for why sizing to exactly
+# 1.0 does not work.
+VAR_HEADROOM = 0.995
 from backend.services.trade_scope import (
     max_concurrent_positions,
     normalise_symbol as _norm_symbol,
@@ -703,6 +720,85 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         # position — that is what "use 100% of my balance" means. Notional is that
         # margin times leverage; quantity follows from the entry price.
         notional = per_trade_margin * leverage
+
+        # ---- SIZE TO THE VaR LIMIT RATHER THAN BE REFUSED BY IT --------------
+        #
+        # THIS IS WHY THE AGENT WENT TWO DAYS WITHOUT A TRADE.
+        #
+        # The CRO enforces spec Section 18's "99% 24h VaR must never exceed 5% of
+        # equity". This node sized the full allocation and the CRO then refused
+        # it — two gates disagreeing over one quantity, and the loser was every
+        # trade. Read from the live system on 2026-09-28, a session on XRP/USDT
+        # at 100% allocation and 10x:
+        #
+        #     9,926 cycles, 0 trades
+        #     75 risk_events, ALL `GLOBAL_VAR_LIMIT`, verbatim:
+        #       "a 1.89% adverse move (stop 1.26% away x1.5 slippage allowance)
+        #        on $249812.48 notional is $4709.69, above the 5.0% of $25000.00
+        #        equity limit ($1250.00). The largest notional that fits is
+        #        $66302.81 (2.65x equity)"
+        #
+        # The VaR limit is a SIZE limit, and the correct response to a size limit
+        # is a smaller size. That is categorically different from the refusals
+        # above it — the tradeable-instrument gate, session scope, the HTF
+        # alignment check — which are properties of the INSTRUMENT or the SESSION
+        # and must never be reachable by proposing a smaller trade. This one is
+        # reachable by exactly that, and refusing instead of shrinking turned a
+        # risk limit into an outage.
+        #
+        # THE POLICY IS UNCHANGED AND STILL BINDING. The position is capped at
+        # precisely what 5% of equity buys at this stop distance; it is not
+        # loosened, it is applied earlier and constructively. The CRO still
+        # re-checks independently — it is the authority, and this is not a
+        # substitute for its veto. What changes is that the gateway no longer
+        # hands it something it is guaranteed to reject.
+        #
+        # AND IT IS REPORTED, not silent. `position_size_detail` already exists
+        # because "a size that ignores the risk setting is visible instead of
+        # silent" — the same reasoning applies twice over here, since the
+        # operator explicitly chose an allocation this then reduces.
+        var_note = ""
+        adverse_move, move_basis = cro_adverse_move(
+            thesis.entry_price, thesis.stop_loss
+        )
+        var_budget = account_capital * max_portfolio_var_fraction()
+        # HEADROOM, AND IT IS NOT SUPERSTITION — the first version of this cap
+        # sized to EXACTLY the budget and the CRO rejected it anyway:
+        #
+        #   on $66137.57 notional is $1250.00, above the ... limit ($1250.00)
+        #
+        # Two reasons, and neither is avoidable by being more careful with
+        # floats. The CRO never receives a notional: it receives a SIZE and
+        # re-derives `size * entry`, so the value it judges has been through
+        # `notional -> size -> notional` and differs in the last bits. And
+        # `Venue.check_size` quantises to the instrument's step, which can round
+        # UP. Sizing to a boundary another component recomputes and compares with
+        # a strict `>` is a coin flip on the last bit; 0.5% of the budget buys
+        # certainty for a cost nobody can measure.
+        max_notional = (
+            var_budget * VAR_HEADROOM / adverse_move if adverse_move > 0 else notional
+        )
+        if notional > max_notional > 0:
+            capped_margin = max_notional / leverage
+            var_note = (
+                f" VaR-CAPPED: the {fraction * 100:.0f}% allocation at {leverage}x asks for "
+                f"{notional:,.2f} notional, but a {adverse_move * 100:.2f}% adverse move "
+                f"({move_basis}) on that is {notional * adverse_move:,.2f} — above the "
+                f"{max_portfolio_var_fraction() * 100:.1f}% of {account_capital:,.2f} equity "
+                f"limit ({var_budget:,.2f}). Sized down to {max_notional:,.2f} notional "
+                f"({capped_margin:,.2f} margin, {capped_margin / account_capital * 100:.1f}% of "
+                f"the account). Lower the leverage or raise MAX_PORTFOLIO_VAR_FRACTION to "
+                f"deploy the full allocation."
+            )
+            logger.warning(
+                "Risk Gateway VaR-capped %s: %.2f -> %.2f notional (%.2f%% adverse move, "
+                "%.1f%% equity budget).",
+                symbol, notional, max_notional, adverse_move * 100,
+                max_portfolio_var_fraction() * 100,
+            )
+            per_trade_margin = capped_margin
+            notional = max_notional
+
         size = notional / thesis.entry_price
         sizing = {
             "rule": "broker-style",
@@ -710,7 +806,7 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             "detail": (
                 f"{fraction * 100:.0f}% of {account_capital:,.2f} = {per_trade_margin:,.2f} "
                 f"margin at {leverage}x = {notional:,.2f} notional (broker-style; a +2% move "
-                f"is +{2 * leverage:.0f}% of this pool)"
+                f"is +{2 * leverage:.0f}% of this pool)." + var_note
             ),
         }
     else:
