@@ -6,6 +6,28 @@ Postgres, Vercel for the frontend.
 
 ---
 
+## IF YOU ARE ONLY UPDATING THE CODE, YOU DO NOT NEED MOST OF THIS
+
+Steps 1, 2 and the local-state cleanup exist for a **reset**. A code update is
+five commands and does not stop being safe because the database is left alone:
+
+```bash
+ssh <you>@68.233.106.208 && cd ~/trading-agent
+git checkout main && git pull            # NOT the feature branch - see STEP 4
+nano .env                                # only the lines in STEP 3 that have moved
+docker compose up -d --build
+docker compose logs -f trading-os
+```
+
+Then STEP 6. **Check `LIVE_TRADING` before you rebuild**: a restart is a window
+in which nothing is watching an open position, because the only thing enforcing
+a stop while this process is alive is this process. `PositionMonitorAgent.restore()`
+reads `monitored_positions` back on boot so the window is the length of the
+restart rather than forever, and a REAL position also has a resting stop and
+take-profit at the venue. A PAPER position has neither. Prefer to rebuild flat.
+
+---
+
 ## THE ORDER IS THE WHOLE POINT
 
 **Stop the backend BEFORE touching the database.** This is not caution, it is the
@@ -28,13 +50,30 @@ stop  ->  wipe  ->  configure  ->  deploy  ->  start  ->  verify
 
 ---
 
-## STEP 0 — push the branch (from the dev machine)
+## STEP 0 — push (from the dev machine)
 
-The work is committed to `fix/single-trade-originator-and-parity`.
+The work is merged to `main`. It used to live on
+`fix/single-trade-originator-and-parity` and that branch is now behind — deploy
+`main`.
 
 ```bash
-git push -u origin fix/single-trade-originator-and-parity
+git push origin main
 ```
+
+What is in it, and why each one matters on the server rather than only in a diff:
+
+| commit | what it changes on a running agent |
+|---|---|
+| `e6d06c2` | **the one that makes it trade at all.** The gateway sizes to fit the VaR limit instead of being refused by it |
+| `238b16e` | `PROFIT_TARGET_PCT` default 2.0 -> 0, and the Bybit testnet mirror |
+| `09e2f60` | eleven defects an external audit found — including two that could move real money |
+| `2b284c0` | backtested priors, so the scorer stops preferring Grid in a range |
+
+**Do not skip `e6d06c2` by deploying only the later ones.** Measured on the live
+database on 2026-09-30, four days after it was written: 138 `GLOBAL_VAR_LIMIT`
+rejections, 0 rows in `trades`, and a session reporting 136 "trades opened" that
+were published PLANS the CRO then refused. Every plan the gateway produced was
+rejected for asking 6x equity when the 5% VaR policy allowed 2.2x.
 
 `.env` is gitignored and is **not** part of this. It is edited on the server in
 step 3, and that is deliberate — the file holds live API keys and the database
@@ -154,12 +193,35 @@ GRAPH_EXECUTION_ENABLED=true    # the 24-node graph is the only originator of en
 SESSION_ONLY_TRADING=true       # no entry without an operator session
 MAX_CONCURRENT_POSITIONS=1      # one trade at a time
 UNTRADEABLE_SYMBOLS=BTC/USDT    # BTC stays a SIGNAL and a benchmark, never a position
-PROFIT_TARGET_PCT=2.0           # per trade, of margin — also editable on the Settings page
+PROFIT_TARGET_PCT=0             # OFF. Hands the exit back to the ATR pair — see below
+PARTIAL_TP_FRACTION=0           # must move WITH the line above
 PROFIT_TARGET_BASIS=account
 ```
 
-Read the per-trade target against the payoff table in the notes below before
-leaving it at 2.0.
+**`PROFIT_TARGET_PCT` MUST BE SET EXPLICITLY, AND 0 IS NOT A NO-OP HERE.** The
+code default moved from 2.0 to 0 in `238b16e`, but `.env` OVERRIDES the default
+and a server whose `.env` still says `2.0` keeps the old behaviour after the
+rebuild. Confirmed live on 2026-09-30: `GET /api/admin/exit-rules` on the
+deployed backend returned `"value": "2.0"` with `"isDefault": false`.
+
+The arithmetic, on the operator's own XRP/USDT session (stop 1.49%, fees
+included):
+
+    2.0% at 10x  ->  0.20% target vs 1.49% stop  ->  94.7% break-even win rate
+    0 (ATR pair) ->  2.98% target vs 1.49% stop  ->  35.8% break-even win rate
+
+Measured win rate at the time: 54.5%. The target is a percentage of MARGIN, so
+the PRICE move it needs is `PROFIT_TARGET_PCT / leverage` while the stop stays at
+2.5x ATR and does not shrink — they collide as leverage rises.
+
+**0 DOES NOT MEAN "NO TARGET".** Every position still carries an ATR stop (2.5x)
+and an ATR target (5.0x), computed per trade from that instrument's own measured
+volatility and checked on every tick. 0 only removes the NEARER fixed exit that
+was overriding the ATR one.
+
+`PARTIAL_TP_FRACTION` has to move with it: the scale-out is gated on
+`PROFIT_TARGET_PCT <= 0`, so turning the target off alone WAKES the scale-out
+and restores the break-even runner the target was introduced to remove.
 
 ---
 
@@ -167,10 +229,13 @@ leaving it at 2.0.
 
 ```bash
 git fetch origin
-git checkout fix/single-trade-originator-and-parity
+git checkout main
 git pull
-git log --oneline -1     # expect: Make the 24-node graph the only originator...
+git log --oneline -1     # expect: Merge: VaR sizing, profit target off, ...
 ```
+
+**`main`, not the feature branch.** The branch is merged and behind; checking it
+out deploys code that is missing the audit fixes and the priors.
 
 If `git checkout` complains about local changes, they are almost certainly build
 artifacts (`__pycache__`, `db/knowledge_graph.db`). `git stash` them; do **not**
@@ -217,6 +282,33 @@ python scripts/verify_schema.py
 
 # the two books agree
 python scripts/repair_paper_book.py                # expect: IN STEP. Nothing to repair.
+```
+
+### Verify the four things this deploy was FOR
+
+A green startup log proves the process booted, not that the change took. Each of
+these failed silently before and is one curl:
+
+```bash
+# 1. the profit target is actually off  (this is the .env override, not the default)
+curl -s localhost:8000/api/admin/exit-rules | grep -o '"PROFIT_TARGET_PCT":{[^}]*}'
+#    expect "value":"0"   -- if it says 2.0, .env was not edited
+
+# 2. the testnet endpoint exists at all  (it 404s on any build before 238b16e)
+curl -s localhost:8000/api/admin/testnet
+#    expect a JSON status object, NOT {"detail":"Not Found"}
+
+# 3. the backtest priors are loaded
+curl -s localhost:8000/api/graphs/strategy-performance | grep -o '"backtestPrior".\{0,80\}'
+#    expect a source path; an empty "strategies" means backtests/ did not ship
+
+# 4. THE ONE THAT MATTERS. Start a session and watch risk_events.
+#    Before this deploy every entry was rejected on GLOBAL_VAR_LIMIT. After it,
+#    the gateway sizes down to fit and the rationale carries "VaR-CAPPED".
+curl -s localhost:8000/api/session | grep -o '"analyses_run":[0-9]*'
+#    `analyses_run` is new and counts GRAPH RUNS. `cycles_run` counts 12s POLLS
+#    and increments before every gate, so 10,000 cycles can mean zero decisions —
+#    which is exactly what sent two days of debugging to the wrong file.
 ```
 
 Then start a session from the dashboard and watch one full cycle. A run should
