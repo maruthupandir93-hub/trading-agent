@@ -289,7 +289,16 @@ async def _instrument_rules(client: httpx.AsyncClient, symbol: str) -> Dict[str,
                 entry["minQty"] = float(f.get("minQty") or 0)
             elif f.get("filterType") == "MIN_NOTIONAL":
                 entry["minNotional"] = float(f.get("notional") or 0)
+            elif f.get("filterType") == "PRICE_FILTER":
+                # THE TICK, WHICH A TRIGGER PRICE MUST SIT ON.
+                # Found by probing BTCUSDT: tick is 0.10 and an unrounded
+                # 82554.57 is not a valid price. The conditional order was
+                # refused for an unrelated reason (-4120) so the violation was
+                # INVISIBLE — a bug that only surfaces on a venue that accepts
+                # the order type, which is the one place it would cost a stop.
+                entry["tick"] = float(f.get("tickSize") or 0)
         entry["quantityPrecision"] = m.get("quantityPrecision")
+        entry["pricePrecision"] = m.get("pricePrecision")
         rules[m.get("symbol")] = entry
     _rules_cache, _rules_at = rules, time.time()
     return rules.get(to_binance_symbol(symbol), {})
@@ -319,6 +328,24 @@ def _quantise(qty: float, rules: Dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # orders
 # ---------------------------------------------------------------------------
+
+def _quantise_price(price: float, rules: Dict[str, Any]) -> str:
+    """Snap a trigger price to the venue's tick.
+
+    Binance rejects a price that is not a multiple of `tickSize`. Unlike a
+    QUANTITY, rounding a trigger to the nearest tick is correct rather than
+    dangerous: it moves the stop by at most half a tick, and refusing a stop
+    over a rounding question would leave the position unprotected — which is
+    the worse failure. Quantity truncates DOWN because staking more than was
+    approved is the hazard there; a trigger has no such asymmetry.
+    """
+    tick = float(rules.get("tick") or 0.0)
+    p = float(price)
+    if tick > 0:
+        p = round(p / tick) * tick
+    precision = rules.get("pricePrecision")
+    return f"{p:.{int(precision)}f}" if isinstance(precision, int) else repr(p)
+
 
 async def ensure_leverage(symbol: str, leverage: int) -> bool:
     """Best effort. A refusal does NOT abort a mirrored order.
@@ -484,12 +511,29 @@ def reset() -> None:
 #     {"code":-4120,"msg":"Order type not supported for this endpoint.
 #                          Please use the Algo Order API endpoints instead."}
 #
-# Six parameter shapes were tried (quantity+reduceOnly, with and without
-# workingType, closePosition=true, quantity alone, STOP as a limit with
-# price+stopPrice, TRAILING_STOP_MARKET) and the response was byte-identical,
-# so it is the ENDPOINT, not the parameters. A LIMIT control on the same
-# endpoint returned `-2022 ReduceOnly Order is rejected` — the correct answer
-# for a flat account — which proves non-conditional orders arrive fine.
+# PROVEN BY BINANCE'S OWN VALIDATOR, which is as close to authoritative as this
+# gets. `/fapi/v1/order/test` validates an order WITHOUT placing it:
+#
+#     MARKET              ACCEPTED
+#     LIMIT               -4024 "Limit price can't be lower than 1.4245"  <- a
+#                         real business validation, so the endpoint works
+#     STOP_MARKET         -4120
+#     TAKE_PROFIT_MARKET  -4120
+#
+# Everything else was ruled out first, and each rules out a different cause:
+#   * SIX parameter shapes — quantity+reduceOnly with and without workingType,
+#     closePosition=true, quantity alone, STOP as a limit with price+stopPrice,
+#     TRAILING_STOP_MARKET — all byte-identical, so it is not the parameters.
+#   * THREE symbols (XRPUSDT, BTCUSDT, ETHUSDT) with tick-correct prices, so it
+#     is not one instrument.
+#   * FOUR alternative paths — /fapi/v1/conditional/order, /fapi/v1/algo/order,
+#     /fapi/v2/order all answer `-5000 Path ... is invalid`, and /papi + /sapi
+#     are mainnet hosts this module will not dial — so there is no other route.
+#   * The account is one-way (`dualSidePosition: false`), so positionSide and
+#     reduceOnly were correct, and `apiTradingStatus.indicators` is EMPTY, so
+#     the key carries no restriction.
+#   * A LIMIT order placed, returned NEW, and cancelled cleanly, so the
+#     endpoint and the credentials are fine.
 #
 # A CAPABILITY LIST THAT SAYS YES WHILE THE ENDPOINT SAYS NO is the same shape
 # as this project's other "advertised but dead" findings (gpt-oss-20b still in
@@ -535,7 +579,7 @@ async def _conditional(
             "side": "BUY" if side.lower() == "buy" else "SELL",
             "type": order_type,
             "quantity": quantity,
-            "stopPrice": trigger,
+            "stopPrice": _quantise_price(trigger, rules),
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
         }

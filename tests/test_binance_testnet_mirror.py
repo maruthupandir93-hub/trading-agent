@@ -170,6 +170,37 @@ def test_the_refusal_names_the_minimum_and_the_step(monkeypatch):
     assert "rounded up" in out.error
 
 
+def test_a_trigger_price_is_snapped_to_the_venue_tick():
+    """FOUND BY PROBING BTCUSDT, AND IT WAS INVISIBLE.
+
+    BTC's tick is 0.10, so an unrounded 82554.57 is not a valid price. The
+    conditional order carrying it was refused for an UNRELATED reason (-4120,
+    the venue not accepting the type at all), so the filter violation never
+    surfaced — a bug that only appears on a venue that accepts the order type,
+    which is precisely the one place it would cost a stop.
+
+    ROUNDING IS CORRECT HERE AND TRUNCATION IS NOT, which is the opposite of
+    the quantity rule one function above. A trigger moves by at most half a
+    tick; refusing a stop over a rounding question would leave the position
+    unprotected, and that is the worse failure. A quantity truncates DOWN
+    because staking more than was approved is the hazard there.
+    """
+    btc = {"tick": 0.10, "pricePrecision": 2}
+    assert bt._quantise_price(82554.57, btc) == "82554.60"
+    assert bt._quantise_price(82554.54, btc) == "82554.50"
+
+    xrp = {"tick": 0.0001, "pricePrecision": 4}
+    assert bt._quantise_price(1.46271, xrp) == "1.4627"
+
+    # No filter known: pass it through rather than invent a tick.
+    assert float(bt._quantise_price(1.23456, {})) == pytest.approx(1.23456)
+
+
+def test_the_conditional_order_sends_a_quantised_trigger():
+    src = inspect.getsource(bt._conditional)
+    assert '"stopPrice": _quantise_price(trigger, rules)' in src
+
+
 # ---------------------------------------------------------------------------
 # The clock, which looks exactly like a bad key
 # ---------------------------------------------------------------------------
