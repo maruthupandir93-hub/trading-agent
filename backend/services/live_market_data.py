@@ -143,8 +143,28 @@ async def _symbols_needing_ticks() -> Set[str]:
         from backend.services.trading_session import active_session
 
         session = active_session()
-        if session is not None and getattr(session, "symbol", None):
-            wanted.add(session.symbol)
+        if session is not None:
+            # EVERY SYMBOL THE SESSION MAY OPEN IN, not just its primary one.
+            #
+            # THIS IS SAFETY-CRITICAL, AND THE REASON IS ALREADY IN CLAUDE.md.
+            # `PositionMonitorAgent` enforces every stop by reacting to
+            # TICK_RECEIVED, and this module is the ONLY publisher of that
+            # event. A position in an unsubscribed instrument receives no ticks,
+            # `_check_price` never runs for it, and ITS STOP CAN NEVER FIRE —
+            # while the monitor still lists it as watched and the dashboard
+            # still shows its stop, so nothing anywhere reports a problem. That
+            # exact bug is why this set is derived rather than hardcoded.
+            #
+            # A rotating session can open in ANY coin on its list, so
+            # subscribing only `session.symbol` would reintroduce it for four
+            # instruments out of five.
+            try:
+                for sym in session.scan_list():
+                    wanted.add(sym)
+            except AttributeError:
+                # A session restored from before `scan_list` existed.
+                if getattr(session, "symbol", None):
+                    wanted.add(session.symbol)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not read the active session for tick subscription: %s", exc)
 

@@ -132,6 +132,16 @@ export function AutonomousSessionPanel() {
   const [busy, setBusy] = useState(false);
 
   const [symbol, setSymbol] = useState<string>('BTC/USDT');
+  // EXTRA COINS THE SESSION ROTATES OVER WHILE FLAT.
+  //
+  // One coin ranges most of the time. Measured on a live XRP/USDT session:
+  // 2,397 graph runs, 3 trades, and the book flat for 65% of 35.5 hours with
+  // an 11.5-hour gap between fills. The refusals were not close — the panel
+  // read 0.00-0.12 against a 0.60 floor. More instruments is the only way to
+  // get more trades without lowering the bar that made the good ones good.
+  //
+  // Empty = the old single-coin behaviour, exactly.
+  const [alsoScan, setAlsoScan] = useState<string[]>([]);
   const [leverage, setLeverage] = useState(2);
   const [startAmount, setStartAmount] = useState('');
   const [target, setTarget] = useState('');
@@ -232,6 +242,9 @@ export function AutonomousSessionPanel() {
           // The fraction of the account this session may deploy. 100% preserves
           // the old behaviour exactly.
           capitalFraction: capitalPct / 100,
+          // Only sent when at least one extra coin is ticked, so the request is
+          // byte-identical to the old one for a single-coin session.
+          ...(alsoScan.length > 0 ? { symbols: alsoScan } : {}),
           // Only sent when the operator actually chose one, and never on the real
           // book — the backend rejects it there rather than trusting this check
           // alone.
@@ -460,7 +473,13 @@ export function AutonomousSessionPanel() {
                 className="w-full mono text-[12px] px-2 py-1.5 rounded"
                 style={inputStyle}
                 value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
+                onChange={(e) => {
+                  setSymbol(e.target.value);
+                  // Drop it from the extras if it was ticked there — the
+                  // backend de-duplicates anyway, but a box that stays ticked
+                  // for the primary coin reads as "scanned twice".
+                  setAlsoScan((prev) => prev.filter((x) => x !== e.target.value));
+                }}
               >
                 {SYMBOLS.map((s) => (
                   <option key={s} value={s}>{s}</option>
@@ -479,6 +498,44 @@ export function AutonomousSessionPanel() {
                 className="w-full"
               />
             </Field>
+          </div>
+
+          {/* ALSO SCAN — the lever for trade COUNT, and the only honest one.
+              Lowering the confidence threshold would buy entries in exactly the
+              regime the backtest says the range strategies lose money in. */}
+          <div className="mb-3">
+            <div className="text-[10.5px] mb-1" style={{ color: 'var(--text-muted)' }}>
+              Also scan while flat — one position at a time, checked in turn
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {SYMBOLS.filter((s) => s !== symbol).map((s) => {
+                const on = alsoScan.includes(s);
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() =>
+                      setAlsoScan((prev) =>
+                        prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s],
+                      )
+                    }
+                    className="mono text-[11px] px-2 py-1 rounded"
+                    style={{
+                      background: on ? 'var(--accent)' : 'var(--bg-surface-2)',
+                      color: on ? 'var(--bg-base)' : 'var(--text-secondary)',
+                      border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
+                    }}
+                  >
+                    {s.replace('/USDT', '')}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              {alsoScan.length === 0
+                ? `Scanning ${symbol.replace('/USDT', '')} only. A single coin is flat most of the time.`
+                : `Rotating over ${alsoScan.length + 1} coins — one graph run per interval, pointed at each in turn, so this costs no more than one coin. Still one position at a time.`}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2 mb-1">

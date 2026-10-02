@@ -28,7 +28,7 @@ and a session that sized up to catch up would be a martingale.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -64,6 +64,16 @@ class StartSessionRequest(BaseModel):
     # account, the pre-feature behaviour. Bounded (0, 1]; `start_session` clamps
     # anything else back to 1.0. Applies to both paper and real.
     capitalFraction: float = Field(1.0, gt=0, le=1.0)
+    # EXTRA INSTRUMENTS TO ROTATE OVER while the session is flat. Optional, and
+    # an empty list is exactly the old single-coin behaviour.
+    #
+    # Capped at 9 extras (10 with the primary) because the rotation is
+    # COST-NEUTRAL by construction — it runs the graph as often as before and
+    # points it at a different coin each time — so the real bound is staleness,
+    # not spend: at a 30s decision interval, ten coins means each is re-checked
+    # every ~5 minutes, which is still well inside the time a breakout takes to
+    # develop. Thirty coins would be half an hour between looks.
+    symbols: Optional[List[str]] = Field(None, max_length=9)
     # Optional daily profit target as a FRACTION (0.02 = +2%). Once the day is up
     # this much vs. its start, the session stops opening new positions until the
     # next UTC day, then resumes — "take 2% a day over many trades". None = off.
@@ -152,6 +162,7 @@ async def start(req: StartSessionRequest) -> Dict[str, Any]:
     try:
         session = await sessions.start_session(
             symbol=req.symbol,
+            symbols=req.symbols,
             leverage=req.leverage,
             target_equity=req.targetEquity,
             floor_equity=req.floorEquity,

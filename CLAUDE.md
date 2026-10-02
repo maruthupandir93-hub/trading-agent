@@ -2505,6 +2505,109 @@ failed — a file testing the scale-out mechanism had been relying on it being t
 default. A test that reads its own enablement from a default is really a test of
 the default, and it breaks the moment an operator changes their mind.
 
+### A session scans SEVERAL coins now, because one coin is flat most of the time
+
+The operator asked for more trades in the dead time. Measured on their live
+XRP/USDT session over 35.5 hours, before changing anything:
+
+    6,806 polls -> 2,397 graph runs -> 3 approved plans -> 3 trades  (1 in 799)
+    in a position   8.8h (35%)      gaps between fills: 11.5h, 4.5h
+    flat, hunting  15.9h (65%)      total +769.72 on 10,000 (+7.7%)
+
+**THE REFUSALS WERE NOT CLOSE CALLS, AND THAT IS WHY THE FIX IS NOT A LOWER
+BAR.** Panel confidence on 46 of the last 50 decision cycles ran 0.00-0.12
+against a 0.60 floor — five times below the *easiest* regime threshold, and XRP
+needs 0.75 in a Range. The selected strategy was Range or Grid on 43 of those
+46. All three fills were **Breakout**: the three times XRP actually broke out.
+
+So the system was working. Lowering the threshold buys entries in precisely the
+regime this project's own backtest says the range strategies lose money in
+(Grid -0.206R, Range -0.184R, MeanReversion -0.103R), and the three selective
+trades returned +7.7% in a day. The lever for trade COUNT is more instruments.
+
+`TradingSession.watch_symbols` + `scan_list()`. While FLAT, the loop rotates:
+one graph run per decision interval, pointed at the next coin in turn.
+
+**THE ROTATION IS COST-NEUTRAL, AND THAT IS THE WHOLE DESIGN.** It runs the
+graph exactly as often as before. Five coins cost the same LLM budget and the
+same share of the 40/min rate limit as one — the alternative, analysing all five
+per interval, is 5x the spend for no extra edge, because a breakout takes
+minutes to develop and checking each coin every ~4 minutes instead of every ~50
+seconds misses nothing. `tests/test_session_symbol_rotation.py` asserts the
+decision is NOT inside a loop over the scan list, and that `analyses_run` still
+increments exactly once per decision.
+
+**THE SAFETY-CRITICAL PART IS THE TICK SUBSCRIPTION, AND IT IS THE SAME BUG THIS
+FILE ALREADY RECORDS.** `PositionMonitorAgent` enforces every stop by reacting
+to `TICK_RECEIVED`, and `live_market_data` is the ONLY publisher of that event.
+A position in an unsubscribed instrument receives no ticks, `_check_price` never
+runs for it, and **its stop can never fire** — while the monitor still lists it
+as watched and the dashboard still shows its stop, so nothing anywhere reports a
+problem. That happened once already with a hardcoded three-symbol list. A
+rotating session can open in ANY coin on its list, so `live_market_data` now
+adds `session.scan_list()` rather than `session.symbol`, with an `AttributeError`
+fallback for a session restored from before the field existed.
+
+Three smaller properties, each with a reason:
+
+* **One position at a time, checked across EVERY scanned symbol.**
+  `_any_open_position` wraps `_has_open_position` over the whole list, because
+  with a rotation the open position may be in a different coin from the one
+  about to be analysed. Checking only `session.symbol` would reach the Risk
+  Gateway with a second entry — which it refuses, but only after a full 24-node
+  run has been spent to arrive at a no. It fails CLOSED, inheriting
+  `_has_open_position`'s "True when it cannot tell".
+* **An untradeable extra is REFUSED, never dropped.** Dropping it would tell the
+  operator the session covers five coins while it scanned four. BTC is the live
+  example — the benchmark every alt decision reads, deliberately untradeable, and
+  55 doomed BTC graph runs were measured before `start_session` began refusing.
+* **Every decision line names its coin** (`[SOL/USDT] DO_NOT_TRADE: ...`). With
+  a rotation the log interleaves instruments, and "the Grid setup is LONG but
+  the panel reads NEUTRAL at 0.05" is unreadable when the reader cannot tell
+  which coin it was about. It was omitted before because a session had one.
+
+**EMPTY IS EXACTLY THE OLD BEHAVIOUR**, for every existing session, every
+caller, and every row restored from before the field existed.
+
+A TESTING LESSON FROM THE SAME CHANGE, twice over. The untradeable-extra test
+first passed for the wrong reason — `tests/conftest.py` CLEARS
+`UNTRADEABLE_SYMBOLS` so the many tests using BTC as a generic symbol are not
+refused, so the refusal that fired was the unrelated *target-below-equity* check
+against a 25,000 paper book. The test now sets the blocklist itself and asserts
+the message names BTC *and* the rotation. And `StartSessionRequest.symbols` was
+typed `Optional[List[str]]` without importing `List`: Pydantic left it an
+unresolved `ForwardRef` and the route would have 500'd on the first request —
+while `model_fields` still reported the field as present, so the obvious check
+passed. **A field is only wired when a value round-trips through it.**
+
+### What raises PROFIT, as distinct from trade count
+
+The same operator asked for both in one sentence, and they are different levers
+with different risks. Trade count is the rotation above. Size is
+`MAX_PORTFOLIO_VAR_FRACTION`, and it is NOT exposed in the UI — it is a
+deliberate `.env` decision, because raising it raises the loss on every stop-out
+by the same multiple.
+
+Measured on the three real trades: the gateway sizes the FULL balance
+(`$10,259 margin x 10x = $102,590 notional`) and the 5% VaR policy then caps it
+at 2.2-4.2x equity — 22-42% of the balance as margin. On two of three it bound
+at 99.5% of the budget, which is `e6d06c2` working as written. A second
+reduction follows it: `volatility.RISK_MULTIPLIER` (`HIGH: 0.6`) multiplies the
+SIZE afterwards, which is why trade 2 used only 60% of its VaR budget while the
+others used 99.5% — a reader checking only the VaR arithmetic cannot reproduce
+that trade.
+
+    MAX_PORTFOLIO_VAR_FRACTION   deployed            a stop-out costs
+                0.05 (default)   42% / 18% / 40%     3.3% / 2.0% / 3.3%
+                0.10             84% / 36% / 80%     6.6% / 4.0% / 6.6%
+                0.12            100% / 43% / 96%     7.9% / 4.8% / 8.0%
+                0.17            100% / 60% / 100%    7.9% / 6.7% / 8.3%
+
+**0.12 IS WHERE FULL DEPLOYMENT IS REACHED. Above it only the high-volatility
+trade improves, and only to 60%**, because the volatility multiplier is not a
+risk budget and does not read this variable. The same three trades return +8.7%
+at 0.05 and about +19% at 0.12 — and the one loss grows from -137 to about -340.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

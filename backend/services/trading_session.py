@@ -137,6 +137,28 @@ class TradingSession:
     # trade, so 100% means "use the whole account as margin", not "use more
     # leverage".
     capital_fraction: float = 1.0
+    # EVERY INSTRUMENT THIS SESSION MAY OPEN A POSITION IN, scanned in turn.
+    #
+    # WHY THIS EXISTS. A session watched exactly ONE coin, and a single coin
+    # spends most of its life doing nothing worth trading. Measured on the
+    # operator's live XRP/USDT session over 35.5 hours: 2,397 graph runs, 3
+    # trades, and the book FLAT for 65% of the window with gaps of 11.5 and 4.5
+    # hours between fills. The refusals were not close calls — the specialist
+    # panel read 0.00-0.12 against a 0.60 floor on 46 of the last 50 cycles.
+    # Nothing was wrong; XRP was simply ranging, and all three fills were
+    # Breakout, the three times it actually broke out.
+    #
+    # So the way to get more trades is MORE INSTRUMENTS, not a lower bar. The
+    # bar is what made those three trades worth taking (+7.7% on two wins of
+    # three), and lowering it buys entries precisely in the regime this
+    # project's own backtest says the range strategies lose money in.
+    #
+    # EMPTY MEANS "JUST `symbol`", so every existing session and every caller
+    # that does not set it behaves exactly as before.
+    watch_symbols: List[str] = field(default_factory=list)
+    # Where the rotation is up to. Persisted with the session so a restart does
+    # not restart the sweep from the same coin every time.
+    scan_index: int = 0
     # DAILY PROFIT TARGET (optional). When set (e.g. 0.02 = +2%), the session banks
     # the day: once equity is up this fraction versus the day's starting equity, it
     # stops OPENING new positions until the next UTC day, then resumes. It does NOT
@@ -176,6 +198,20 @@ class TradingSession:
     # Every decision the session made, newest last. Bounded — this is a live
     # status object, not the audit trail; `decisions` in Postgres is that.
     log: List[Dict[str, Any]] = field(default_factory=list)
+
+    def scan_list(self) -> List[str]:
+        """The instruments to rotate over. Never empty, always starts with `symbol`.
+
+        `symbol` stays FIRST and stays the session's identity: it is what the
+        panel shows, what `start_session` refuses on, and what a reader means by
+        "the session's coin". The rotation adds instruments to look at; it does
+        not replace the one the operator chose.
+        """
+        out = [self.symbol]
+        for sym in self.watch_symbols:
+            if sym and sym not in out:
+                out.append(sym)
+        return out
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -529,7 +565,13 @@ async def _run_session(session_id: str) -> None:
                 continue
 
             # -- do not stack positions --------------------------------------
-            if await _has_open_position(session.symbol, tab):
+            # ACROSS EVERY SCANNED SYMBOL, not just the session's own. With a
+            # rotation the position may be open in a DIFFERENT coin from the one
+            # about to be analysed, and checking only `session.symbol` would let
+            # the session open a second position while the first was still live —
+            # which is `MAX_CONCURRENT_POSITIONS`' job to refuse, but refusing it
+            # at the Risk Gateway costs a full 24-node run to reach a no.
+            if await _any_open_position(session.scan_list(), tab):
                 if not was_holding:
                     # THE FLAT -> HOLDING TRANSITION IS THE FILL, and it is the
                     # only place this loop can observe one. `trades_opened` used
@@ -541,7 +583,7 @@ async def _run_session(session_id: str) -> None:
                     # expired sessions on that count.
                     session.trades_opened += 1
                 was_holding = True
-                _note(session, f"already holding {session.symbol}; the monitor owns the exit. Waiting.")
+                _note(session, "already holding a position; the monitor owns the exit. Waiting.")
                 continue
 
             # -- decide: on the interval while flat, or AT ONCE after a close -
@@ -553,11 +595,22 @@ async def _run_session(session_id: str) -> None:
                 continue
 
             last_decided_at = time.time()
-            # -- one full decision cycle -------------------------------------
+            # -- one full decision cycle, on ONE symbol -----------------------
+            #
+            # ROTATION IS COST-NEUTRAL, AND THAT IS THE WHOLE DESIGN. It runs the
+            # graph exactly as often as before and simply points it at a
+            # different instrument each time, so five coins cost the same LLM
+            # budget and the same share of the 40/min rate limit as one. Running
+            # all five per interval would be 5x the spend for no extra edge — a
+            # breakout takes minutes to develop, so checking each coin every
+            # ~4 minutes instead of every ~50 seconds misses nothing.
+            scan = session.scan_list()
+            target = scan[session.scan_index % len(scan)]
+            session.scan_index = (session.scan_index + 1) % len(scan)
             # Counted HERE and not with `cycles_run`, because this is the only
             # point the 24-node graph is actually reached. See `analyses_run`.
             session.analyses_run += 1
-            await _decide_once(session)
+            await _decide_once(session, target)
 
     except asyncio.CancelledError:
         # Stopped by the operator. Not an error, and the status was already set
@@ -648,7 +701,20 @@ async def _has_open_position(symbol: str, tab: str) -> bool:
     return False
 
 
-async def _decide_once(session: TradingSession) -> None:
+async def _any_open_position(symbols: List[str], tab: str) -> bool:
+    """True when ANY of these instruments is held or watched.
+
+    Fails CLOSED through `_has_open_position`, which returns True when it cannot
+    tell — so an unreadable book stops a new entry rather than permitting a
+    second one.
+    """
+    for sym in symbols:
+        if await _has_open_position(sym, tab):
+            return True
+    return False
+
+
+async def _decide_once(session: TradingSession, symbol: Optional[str] = None) -> None:
     """Run the full analysis graph once and let the existing chain act on it.
 
     THIS DOES NOT PLACE AN ORDER. It runs the reasoning graph, which — if the
@@ -660,11 +726,15 @@ async def _decide_once(session: TradingSession) -> None:
     from backend.graphs.analysis import run_analysis_graph
     from backend.graphs.state import TriggerReason
 
+    # DEFAULTS TO THE SESSION'S OWN SYMBOL, so every existing caller and test
+    # keeps working unchanged; the loop passes the rotation's current pick.
+    target = symbol or session.symbol
+
     result = await run_analysis_graph(
-        session.symbol,
+        target,
         TriggerReason(
             kind="autonomous_session",
-            symbol=session.symbol,
+            symbol=target,
             detail=(
                 f"session {session.id} working toward {session.target_equity:.2f} "
                 f"(the target is a stop condition and was NOT used to size this trade)"
@@ -695,10 +765,16 @@ async def _decide_once(session: TradingSession) -> None:
         # fill, recorded where the fill happens.
         session.plans_approved += 1
 
+    # THE SYMBOL IS NAMED IN THE LINE, not only in the `symbol` field. With a
+    # rotation the log interleaves several instruments, and "DO NOT TRADE: the
+    # Grid setup is LONG but the panel reads NEUTRAL at 0.05" is unreadable when
+    # the reader cannot tell which coin it was about. It was omitted before
+    # because a session had exactly one.
     _note(
         session,
-        f"{action}: {rationale}"[:400],
+        f"[{target}] {action}: {rationale}"[:400],
         decision=action,
+        symbol=target,
         run_id=result.get("runId"),
     )
 
@@ -770,6 +846,10 @@ async def set_paper_starting_amount(amount: float) -> float:
 async def start_session(
     *,
     symbol: str,
+    # Extra instruments to rotate over while flat. See `TradingSession.watch_symbols`
+    # for why: one coin ranges most of the time, and more instruments is the only
+    # way to get more trades without lowering the bar that made the good ones good.
+    symbols: Optional[List[str]] = None,
     leverage: int,
     target_equity: float,
     floor_equity: Optional[float] = None,
@@ -803,6 +883,27 @@ async def start_session(
             f"cycle and never open a trade. Pick a tradeable instrument (e.g. "
             f"SOL/USDT, ETH/USDT, XRP/USDT)."
         )
+
+    # EVERY ROTATED SYMBOL IS CHECKED THE SAME WAY, for the same reason the
+    # primary one is. An untradeable instrument in the list would take its turn
+    # in the rotation, run the full 24-node graph, and be refused at the Risk
+    # Gateway's tradeable-instrument gate every single time — which is exactly
+    # the waste that refusal was added to stop (55 doomed BTC runs, measured
+    # live). Silently DROPPING it would be worse than refusing: the operator
+    # would be told the session covers five coins while it scanned four.
+    extra: List[str] = []
+    for raw in symbols or []:
+        candidate = (raw or "").strip().upper()
+        if not candidate or candidate == symbol.strip().upper():
+            continue
+        reason = _untradeable_reason(candidate)
+        if reason is not None:
+            raise ValueError(
+                f"{reason} Remove it from the session's symbol list — it would "
+                f"take its turn in the rotation and be refused every time."
+            )
+        if candidate not in extra:
+            extra.append(candidate)
 
     if start_amount is not None:
         if tab == "real":
@@ -878,6 +979,7 @@ async def start_session(
         target_equity=target_equity,
         floor_equity=floor,
         capital_fraction=cf,
+        watch_symbols=extra,
         daily_target_pct=dt_pct,
     )
     _sessions[session.id] = session
