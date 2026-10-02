@@ -1063,6 +1063,24 @@ class PositionMonitorAgent(BaseAgent):
                 "protected even if this process stops.",
                 venue.id, pos.symbol, pos.qty, pos.stop_loss, result.order_id,
             )
+        elif not getattr(venue, "supports_resting_orders", True):
+            # A VENUE THAT CANNOT REST ORDERS AT ALL IS A LIMITATION, NOT A FAULT,
+            # and logging it CRITICAL on every fill is how an alert stops being
+            # read. Binance's futures TESTNET refuses every conditional type on
+            # `/fapi/v1/order` with -4120 "use the Algo Order API endpoints
+            # instead", while `exchangeInfo` advertises them — see
+            # `services/binance_testnet` for the six shapes that were tried.
+            #
+            # IT IS ONLY EVER THE MIRROR THAT LANDS HERE. A real `Venue` has no
+            # such attribute, so `getattr(..., True)` keeps the CRITICAL below
+            # for every real-money position, which is the half that matters.
+            pos.stop_order_id = None
+            logger.info(
+                "%s cannot rest a stop (%s). %s's stop is enforced in-process on every "
+                "tick, exactly as an unmirrored paper position's is — the mirror is no "
+                "less protected than paper, it just cannot add venue-side protection.",
+                venue.id, result.error, pos.symbol,
+            )
         else:
             pos.stop_order_id = None
             logger.critical(

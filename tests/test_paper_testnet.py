@@ -40,6 +40,21 @@ import backend.services.paper_testnet as pt
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     monkeypatch.delenv(pt.ENV_VAR, raising=False)
+    # THE VENUE IS PINNED, NOT INHERITED FROM THE DEFAULT.
+    #
+    # This whole file is about the BYBIT branch — it asserts `VENUE_ID`, the
+    # Bybit key variables and the ccxt `testnet=True` client. The mirror gained
+    # a second sandbox (Binance) and the default moved there, so
+    # `test_enabled_without_credentials_is_not_active` started failing: it
+    # cleared BYBIT's keys and then asked whether the mirror was active, while
+    # the mirror was routing to Binance and reading BINANCE_TESTNET_* out of the
+    # operator's real `.env`.
+    #
+    # That is the `test_partial_tp` lesson a second time: a test that reads its
+    # own enablement from a default is really a test of the default, and it
+    # breaks the moment the default moves. Pinning says which branch is under
+    # test; `tests/test_binance_testnet_mirror.py` covers the other one.
+    monkeypatch.setenv(pt.VENUE_CHOICE_VAR, "bybit")
     pt.reset()
     yield
     pt.reset()
@@ -69,7 +84,12 @@ def test_enabled_without_credentials_is_not_active(monkeypatch, caplog):
 
     assert pt.enabled() is True
     assert pt.active() is False
-    assert any("no Bybit testnet credentials" in r.message for r in caplog.records)
+    # Asserted on the SUBSTANCE, not the old hardcoded sentence. The message is
+    # interpolated per venue now, and a test pinned to one spelling of it would
+    # fail for a wording change while passing for a routing bug.
+    warnings = " ".join(r.message for r in caplog.records)
+    assert "bybit" in warnings.lower(), warnings
+    assert "BYBIT_TESTNET_API_KEY" in warnings, warnings
 
 
 def test_active_when_enabled_and_configured(monkeypatch):

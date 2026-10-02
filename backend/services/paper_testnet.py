@@ -73,10 +73,46 @@ logger = logging.getLogger(__name__)
 
 ENV_VAR = "PAPER_TESTNET_MIRROR"
 
-# Not configurable, and that is the point — see the module docstring. Bybit is
-# the only venue whose testnet ccxt still supports, and `testnet=True` is what
-# keeps a mainnet key unreachable from here.
+# WHICH SANDBOX. Two are supported and the operator picks one; the default is
+# Binance because that is where this account's testnet funds are.
+#
+# PROPERTY 2 ("it can never touch mainnet") STILL HOLDS FOR BOTH, but it is
+# enforced differently in each and the difference is the whole reason
+# `services/binance_testnet` exists as a separate module:
+#
+#   bybit    ccxt `Venue("bybit", testnet=True)`. `_credentials(testnet=True)`
+#            reads BYBIT_TESTNET_* and mainnet never reads them.
+#   binance  NOT ccxt. `set_sandbox_mode` is hard-refused for binanceusdm, and
+#            overriding `urls['api']` by hand LOOKS like it works and silently
+#            sends signed requests to MAINNET — measured: `fetch_balance`
+#            dialled `https://api.binance.com/sapi/v1/capital/config/getall`,
+#            a host no `fapi*` override touches. So that module hardcodes ONE
+#            base url with no mainnet sibling to fall back to.
+#
+# THIS VARIABLE SELECTS A SANDBOX, NEVER A LIVE VENUE. Neither branch can reach
+# mainnet, so an unrecognised value falls back to the default rather than
+# failing closed into nothing — a typo must not silently disable the mirror the
+# operator believes is on.
+VENUE_CHOICE_VAR = "PAPER_TESTNET_VENUE"
+DEFAULT_VENUE = "binance"
+SUPPORTED_VENUES = ("binance", "bybit")
+
+# Kept for the Bybit branch and for every existing test that names it.
 VENUE_ID = "bybit"
+
+
+def venue_choice() -> str:
+    """Which sandbox the mirror routes to. Read at CALL time, like every toggle."""
+    raw = (os.getenv(VENUE_CHOICE_VAR) or "").strip().lower()
+    if raw in SUPPORTED_VENUES:
+        return raw
+    if raw:
+        logger.warning(
+            "%s=%r is not one of %s — falling back to %s. A typo must not quietly "
+            "turn the mirror off while the panel still reports it on.",
+            VENUE_CHOICE_VAR, raw, SUPPORTED_VENUES, DEFAULT_VENUE,
+        )
+    return DEFAULT_VENUE
 
 _venue: Optional[Any] = None
 # The last verification result, so the Settings panel can show something other
@@ -96,6 +132,11 @@ def credentials_present() -> bool:
     explain what is missing, rather than letting it be switched on into a state
     where every order fails.
     """
+    if venue_choice() == "binance":
+        from backend.services import binance_testnet
+
+        return binance_testnet.credentials_present()
+
     from backend.services.venue import key_variable
 
     key = os.getenv(key_variable(VENUE_ID, testnet=True))
@@ -112,6 +153,19 @@ def get_venue():
     """
     global _venue
     if _venue is None:
+        if venue_choice() == "binance":
+            # A FACADE, NOT A ccxt CLIENT. `Venue.__init__` builds one, and ccxt
+            # is precisely what cannot reach Binance futures testnet — see
+            # `services/binance_testnet`'s docstring for the measured reason.
+            from backend.services.binance_testnet import BinanceTestnetVenue
+
+            _venue = BinanceTestnetVenue()
+            logger.info(
+                "Paper-testnet mirror is routing to BINANCE futures testnet "
+                "(direct REST, hardcoded sandbox host — ccxt cannot reach it)."
+            )
+            return _venue
+
         from backend.services.venue import Venue
 
         _venue = Venue(VENUE_ID, testnet=True)
@@ -137,10 +191,11 @@ def active() -> bool:
     if not enabled():
         return False
     if not credentials_present():
+        choice = venue_choice()
         logger.warning(
-            "%s is on but no Bybit testnet credentials are set (%s / %s_TESTNET_SECRET). "
-            "Paper fills stay simulated.",
-            ENV_VAR, "BYBIT_TESTNET_API_KEY", VENUE_ID.upper(),
+            "%s is on but no %s testnet credentials are set (%s_TESTNET_API_KEY / "
+            "%s_TESTNET_SECRET). Paper fills stay simulated.",
+            ENV_VAR, choice, choice.upper(), choice.upper(),
         )
         return False
     return True
@@ -171,6 +226,17 @@ async def verify() -> Dict[str, Any]:
                 "over a live one."
             ),
         }
+        return _last_check
+
+    if venue_choice() == "binance":
+        # Its own verify(), because it has one more thing to report: the
+        # machine's clock offset. A 33-second skew makes every signed request
+        # fail -1021, which reads as a bad key and sends the operator to
+        # regenerate credentials that were never the problem.
+        from backend.services import binance_testnet
+
+        _last_check = {**(await binance_testnet.verify()), "checkedAt": time.time(),
+                       "venue": "binance"}
         return _last_check
 
     try:
@@ -214,9 +280,10 @@ def status() -> Dict[str, Any]:
     return {
         "enabled": enabled(),
         "credentialsPresent": credentials_present(),
-        "venue": VENUE_ID,
-        "keyVariable": "BYBIT_TESTNET_API_KEY",
-        "secretVariable": "BYBIT_TESTNET_SECRET",
+        "venue": venue_choice(),
+        "supportedVenues": list(SUPPORTED_VENUES),
+        "keyVariable": f"{venue_choice().upper()}_TESTNET_API_KEY",
+        "secretVariable": f"{venue_choice().upper()}_TESTNET_SECRET",
         # Surfaced because the mirror is unreachable while live trading is on —
         # the execution agent only consults it inside its simulation branch — and
         # an operator seeing the toggle on while nothing mirrors deserves to know

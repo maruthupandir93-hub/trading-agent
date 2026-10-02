@@ -381,11 +381,54 @@ def test_the_public_client_carries_no_credentials(monkeypatch):
     """
     monkeypatch.setenv("BINANCE_API_KEY", "bn-key")
     monkeypatch.setenv("BINANCE_SECRET", "bn-secret")
+    # THE TESTNET PAIR IS CLEARED, AND THIS TEST IS WHY IT HAS TO BE.
+    #
+    # `venue()` builds `Venue(..., testnet=True)`, and `_credentials` reads the
+    # TESTNET variables first, falling back to the mainnet pair. This assertion
+    # passed for years only because `BINANCE_TESTNET_API_KEY` was EMPTY — so it
+    # was exercising the fallback while claiming to check which client carries
+    # credentials. The moment a real testnet key went into `.env` it resolved
+    # that key and the test failed, which is the same shape as the `LLM_*`
+    # isolation note in CLAUDE.md: a test passing because nothing was
+    # configured has isolated nothing.
+    monkeypatch.delenv("BINANCE_TESTNET_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_TESTNET_SECRET", raising=False)
     v = venue("binance")
 
     assert not v.public.apiKey
     assert not v.public.secret
     assert v.private.apiKey == "bn-key"
+
+
+def test_a_MAINNET_client_never_reads_the_testnet_key(monkeypatch):
+    """THE ONE-DIRECTIONAL FALLBACK, TESTABLE FOR THE FIRST TIME.
+
+    `_credentials` says it plainly: *"Mainnet never reads the testnet variable,
+    so a testnet key can never be reached by a client that is about to spend
+    real money."* That property could not be asserted while the testnet
+    variables were empty — the two branches returned the same thing. With a real
+    Binance testnet key configured they differ, so the guarantee is now
+    checkable, and this is the direction that costs money if it ever breaks.
+    """
+    from backend.services.venue import Venue, _credentials
+
+    monkeypatch.setenv("BINANCE_API_KEY", "mainnet-key")
+    monkeypatch.setenv("BINANCE_SECRET", "mainnet-secret")
+    monkeypatch.setenv("BINANCE_TESTNET_API_KEY", "TESTNET-KEY-MUST-NOT-LEAK")
+    monkeypatch.setenv("BINANCE_TESTNET_SECRET", "TESTNET-SECRET-MUST-NOT-LEAK")
+
+    key, secret = _credentials("binance", testnet=False)
+    assert key == "mainnet-key", "a real-money client must never hold a sandbox key"
+    assert secret == "mainnet-secret"
+
+    live = Venue("binance", testnet=False)
+    assert live.private.apiKey == "mainnet-key"
+    assert "TESTNET" not in (live.private.apiKey or "")
+
+    # And the other direction still prefers the testnet pair, which is what
+    # makes verifying on a sandbox possible without pasting keys over the live
+    # ones — the reason the split exists at all.
+    assert _credentials("binance", testnet=True)[0] == "TESTNET-KEY-MUST-NOT-LEAK"
 
 
 def test_binance_defaults_to_futures_and_bybit_to_linear_swaps():

@@ -2608,6 +2608,136 @@ trade improves, and only to 60%**, because the volatility multiplier is not a
 risk budget and does not read this variable. The same three trades return +8.7%
 at 0.05 and about +19% at 0.12 — and the one loss grows from -137 to about -340.
 
+### The mirror runs on BINANCE testnet now, and ccxt cannot take it there
+
+The operator supplied Binance futures testnet credentials and asked for the
+Settings toggle to route paper fills there. CLAUDE.md already said Binance was
+"not an option anyway: ccxt dropped its futures testnet" — that was an
+INHERITED claim, and the rule in this file is to verify rather than repeat it,
+because the same note once wrongly said `api.binance.com` was unreachable and
+hid a real bug for months.
+
+Verified, and the inherited claim is RIGHT — with a sharper and more dangerous
+reason than it recorded:
+
+**1. `set_sandbox_mode(True)` IS HARD-REFUSED.** ccxt 4.5.75:
+
+    NotSupported: binanceusdm testnet/sandbox mode is not supported for
+    futures anymore ... consider using the demo trading instead
+
+**2. OVERRIDING `urls['api']` LOOKS LIKE IT WORKS AND SILENTLY REACHES
+MAINNET.** This is the one worth knowing. With every `fapi*` entry repointed at
+the testnet, `load_markets()` SUCCEEDED and `fetch_balance()` then returned
+
+    AuthenticationError: binanceusdm {"code":-2008,"msg":"Invalid Api-Key ID."}
+
+The key is valid on the testnet, so that error meant the request had gone
+somewhere else. Intercepting the dial showed where:
+
+    https://api.binance.com/sapi/v1/capital/config/getall
+
+`binanceusdm.fetch_balance` routes through `sapi` — a MAINNET SPOT host that no
+`fapi*` override touches. ccxt's url map holds 22 entries across five hosts, so
+repointing the ones you happen to think of leaves authenticated requests going
+to the live exchange with whatever keys are configured. That is precisely the
+hazard `paper_testnet` property 2 is built around, except it is ccxt's own
+routing doing it rather than a config typo.
+
+So `services/binance_testnet` is a DELIBERATE, NARROW EXCEPTION to "no agent
+talks to an exchange directly, ever": a direct signed-REST client with ONE
+hardcoded host and no mainnet sibling to fall back to. There is nothing to
+override and nothing to get wrong, and
+`tests/test_binance_testnet_mirror.py::test_the_module_contains_exactly_one_host_and_it_is_the_sandbox`
+asserts that against the source — the exception stops being justified the
+moment a second host appears. **That test's first run failed on
+`api.binance.com` appearing in the module's own DOCSTRING**, where the mainnet
+host is recorded as the finding; it strips comments and strings with `tokenize`
+now, because a mention is not a call and the explanation has to keep naming the
+host it warns about.
+
+**THE CLOCK SKEW LOOKS EXACTLY LIKE A BAD KEY.** The first signed probe
+returned `{"code":-1021,"msg":"Timestamp for this request is outside of the
+recvWindow."}` — which reads as a credential problem and is not one. This
+machine's clock is **33.2 seconds behind** Binance's server, and every signed
+request would have failed with perfectly valid keys. `_server_offset()`
+measures it, re-measures on a cadence, and a `-1021` forces one re-measure and
+a single retry. Same class as the `-2008` above: an error whose text sends you
+to the wrong file.
+
+**WHAT IS VERIFIED AGAINST THE REAL SANDBOX**, not a fixture — a full round
+trip, twice:
+
+    open 79.5 XRP @ 1.5099   (order 3513737131)
+    position present at the venue, buy 79.5 @ 1.5099
+    reduce-only close @ 1.509
+    account flat, balance 5,000.00 -> 4,999.83
+
+That -0.17 on a $120 notional is real spread and fees, and it is the whole
+point: a simulated fill reports that cost as zero. The mirror also carried the
+venue's **79.5** when 79.6 was requested — the step-size truncation being
+honest rather than rounding up to what was asked, which is the mistake
+`paper_testnet.place` already made once.
+
+**WHAT DOES NOT WORK, MEASURED AND WRITTEN DOWN SO NOBODY RE-DERIVES IT:**
+this testnet refuses EVERY conditional order type on `/fapi/v1/order`:
+
+    {"code":-4120,"msg":"Order type not supported for this endpoint.
+                         Please use the Algo Order API endpoints instead."}
+
+while `exchangeInfo` ADVERTISES all five for the same symbol
+(`STOP`, `STOP_MARKET`, `TAKE_PROFIT`, `TAKE_PROFIT_MARKET`,
+`TRAILING_STOP_MARKET`). Six parameter shapes were tried — quantity+reduceOnly
+with and without `workingType`, `closePosition=true`, quantity alone, `STOP` as
+a limit with price+stopPrice, and `TRAILING_STOP_MARKET` — and the response was
+byte-identical, so it is the ENDPOINT, not the parameters. A `LIMIT` control on
+the same endpoint returned `-2022 ReduceOnly Order is rejected`, the correct
+answer for a flat account, proving non-conditional orders arrive fine.
+
+A CAPABILITY LIST THAT SAYS YES WHILE THE ENDPOINT SAYS NO is this project's
+recurring shape — `gpt-oss-20b` still in `GET /v1/models`, Binance futures
+sandbox still in ccxt's url map.
+
+CONSEQUENCE, STATED PLAINLY: a MIRRORED paper position has no protective order
+resting at the venue. Its stop is enforced by `PositionMonitorAgent` on every
+tick, exactly as an unmirrored paper position's is — so the mirror is no WORSE
+protected than paper already was, while the entry, the close, the real fill
+price, the step truncation and the real fees are all faithful.
+`BinanceTestnetVenue.supports_resting_orders = False` lets
+`_place_resting_stop` report that ONCE at INFO instead of CRITICAL on every
+fill; a real `Venue` has no such attribute and `getattr(..., True)` keeps the
+CRITICAL for every real-money position, which is the half that matters.
+
+**TWO TESTS WERE PASSING BECAUSE A VARIABLE WAS EMPTY**, and populating
+`BINANCE_TESTNET_*` exposed both — the `LLM_*` isolation lesson again:
+
+* `test_paper_testnet`'s fixture now PINS `PAPER_TESTNET_VENUE=bybit`. That
+  file is entirely about the Bybit branch, and
+  `test_enabled_without_credentials_is_not_active` cleared BYBIT's keys and
+  then asked whether the mirror was active — while the mirror had moved to
+  Binance and was reading real keys out of `.env`. A test that reads its own
+  enablement from a default is really a test of the default.
+* `test_venue`'s `test_the_public_client_carries_no_credentials` builds
+  `Venue(testnet=True)` and asserted `private.apiKey == "bn-key"`. It passed
+  for years only because `BINANCE_TESTNET_API_KEY` was EMPTY, so `_credentials`
+  fell through to the mainnet pair — it was exercising the fallback while
+  claiming to check which client carries credentials. It clears the testnet
+  pair explicitly now.
+
+That second one also made a documented guarantee TESTABLE FOR THE FIRST TIME.
+`_credentials`' fallback is one-directional — *"Mainnet never reads the testnet
+variable, so a testnet key can never be reached by a client that is about to
+spend real money"* — and with both variables empty the two branches returned
+the same thing, so nothing could assert it. `test_a_MAINNET_client_never_reads_the_testnet_key`
+pins it now, and it is the direction that costs money if it ever breaks.
+
+`PAPER_TESTNET_VENUE` selects the sandbox (`binance` default, `bybit` still
+supported), read at call time, with an unrecognised value falling back and
+WARNING rather than silently disabling a mirror the panel reports as on. Both
+branches are sandboxes, so the fallback cannot reach mainnet. The Settings
+panel picks the venue, and `POST /api/admin/testnet` sets it BEFORE checking
+credentials — checking Bybit's variables and then switching to Binance would
+refuse a correctly configured mirror, or accept one with no keys at all.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

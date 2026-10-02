@@ -42,6 +42,7 @@ interface Status {
   enabled: boolean;
   credentialsPresent: boolean;
   venue: string;
+  supportedVenues?: string[];
   keyVariable: string;
   secretVariable: string;
   liveTradingOn: boolean;
@@ -71,7 +72,7 @@ export function TestnetPanel() {
 
   useEffect(() => { void load(); }, [load]);
 
-  const toggle = useCallback(async (next: boolean) => {
+  const toggle = useCallback(async (next: boolean, venue?: string) => {
     setBusy(true);
     setError(null);
     try {
@@ -81,7 +82,9 @@ export function TestnetPanel() {
         // `verify` makes a REAL authenticated call, so it is only worth paying
         // for when switching ON. Turning off must never be blocked by the venue
         // being unreachable.
-        body: JSON.stringify({ enabled: next, verify: next }),
+        // `venue` is only sent when the operator picked one, so toggling the
+        // mirror off and on never silently moves sandbox.
+        body: JSON.stringify({ enabled: next, verify: next, ...(venue ? { venue } : {}) }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.detail ?? `HTTP ${res.status}`);
@@ -149,6 +152,35 @@ export function TestnetPanel() {
           live trading off to go back to testnet-backed paper trading.
         </div>
       )}
+
+      {/* WHICH SANDBOX. Both are testnets and neither can reach mainnet, but
+          they get there differently and the difference is worth surfacing:
+          Bybit goes through ccxt's sandbox client, Binance cannot — ccxt
+          hard-refuses binanceusdm sandbox and a hand-rolled url override
+          silently reaches mainnet — so it uses a direct client with one
+          hardcoded host. Changing venue while the mirror is ON re-verifies. */}
+      <div className="flex gap-1.5 mb-2">
+        {(status.supportedVenues ?? ['binance', 'bybit']).map((v) => {
+          const on = status.venue === v;
+          return (
+            <button
+              key={v}
+              type="button"
+              disabled={busy}
+              onClick={() => void toggle(status.enabled, v)}
+              className="flex-1 py-1.5 rounded text-[11px] mono"
+              style={{
+                background: on ? 'var(--accent)' : 'var(--bg-surface-2)',
+                color: on ? 'var(--bg-base)' : 'var(--text-secondary)',
+                border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
+                cursor: busy ? 'default' : 'pointer',
+              }}
+            >
+              {v}
+            </button>
+          );
+        })}
+      </div>
 
       <button
         type="button"

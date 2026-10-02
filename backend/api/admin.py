@@ -799,6 +799,15 @@ async def set_exit_rules(req: ExitRulesRequest) -> Dict[str, Any]:
 # `operator_trade`'s 30s balance cache.
 class TestnetRequest(BaseModel):
     enabled: bool
+    # WHICH SANDBOX. Optional — omitted leaves the current choice alone, so an
+    # operator toggling the mirror off and on does not silently move venues.
+    #
+    # Both values are SANDBOXES; neither can reach mainnet. Bybit is a ccxt
+    # `Venue(testnet=True)`; Binance is NOT ccxt, because `set_sandbox_mode` is
+    # hard-refused for binanceusdm and a hand-rolled url override silently
+    # reaches mainnet (`fetch_balance` dialled api.binance.com/sapi/v1/...).
+    # See `services/binance_testnet` for the measurement.
+    venue: str | None = Field(None, pattern="^(binance|bybit)$")
     # Verifying makes a REAL authenticated call, so it is opt-in per request
     # rather than implied by enabling. Defaults on, because enabling without
     # checking is how an operator ends up believing orders are being mirrored
@@ -828,6 +837,15 @@ async def set_testnet(req: TestnetRequest) -> Dict[str, Any]:
     test venue off must not be blocked by that venue being unreachable.
     """
     from backend.services import paper_testnet
+
+    # THE VENUE IS SET FIRST, because `credentials_present()` below asks the
+    # CHOSEN venue. Checking Bybit's variables and then switching to Binance
+    # would refuse a perfectly configured Binance mirror, or accept one with no
+    # keys at all.
+    if req.venue:
+        os.environ[paper_testnet.VENUE_CHOICE_VAR] = req.venue
+        settings._persist_env(paper_testnet.VENUE_CHOICE_VAR, req.venue)
+        paper_testnet.reset()
 
     if req.enabled and not paper_testnet.credentials_present():
         raise HTTPException(
