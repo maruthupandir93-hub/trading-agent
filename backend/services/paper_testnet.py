@@ -220,8 +220,8 @@ async def verify() -> Dict[str, Any]:
             "ok": False,
             "checkedAt": time.time(),
             "reason": (
-                "No testnet credentials. Set BYBIT_TESTNET_API_KEY and "
-                "BYBIT_TESTNET_SECRET in .env — they are deliberately SEPARATE from "
+                f"No testnet credentials. Set {venue_choice().upper()}_TESTNET_API_KEY and "
+                f"{venue_choice().upper()}_TESTNET_SECRET in .env — they are deliberately SEPARATE from "
                 "the mainnet pair so verifying never requires pasting a testnet key "
                 "over a live one."
             ),
@@ -292,7 +292,7 @@ def status() -> Dict[str, Any]:
         "reachable": enabled() and credentials_present() and not settings.LIVE_TRADING,
         "lastCheck": dict(_last_check) if _last_check else None,
         "note": (
-            "Paper trades are mirrored onto Bybit's testnet: the order is real, the "
+            f"Paper trades are mirrored onto {venue_choice()} demo/testnet: the order is real, the "
             "fill price is the exchange's, and the P&L is still paper. A testnet "
             "failure falls back to a simulated fill rather than blocking the trade, "
             "and the trade row records which happened — `exchange_order_id` is set "

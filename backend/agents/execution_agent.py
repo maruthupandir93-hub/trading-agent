@@ -364,7 +364,7 @@ class ExecutionAgent(BaseAgent):
                 )
 
             if mirrored:
-                exchange_name = "bybit_testnet"
+                exchange_name = f"{paper_testnet.venue_choice()}_testnet"
                 venue_backed = True
                 order_id = mirrored["order_id"] or order_id
                 fill_price = mirrored["price"]

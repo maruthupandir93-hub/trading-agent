@@ -304,6 +304,7 @@ def test_a_partial_testnet_fill_is_carried_through_at_its_real_size(monkeypatch)
     either. It is one of the real costs the mirror exists to surface."""
     import backend.services.paper_testnet as pt
 
+    monkeypatch.setenv("PAPER_TESTNET_VENUE", "bybit")
     monkeypatch.setenv("BYBIT_TESTNET_API_KEY", "k")
     monkeypatch.setenv("BYBIT_TESTNET_SECRET", "s")
     monkeypatch.setenv(pt.ENV_VAR, "true")

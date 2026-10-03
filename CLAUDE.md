@@ -2678,34 +2678,18 @@ venue's **79.5** when 79.6 was requested — the step-size truncation being
 honest rather than rounding up to what was asked, which is the mistake
 `paper_testnet.place` already made once.
 
-**WHAT DOES NOT WORK, MEASURED AND WRITTEN DOWN SO NOBODY RE-DERIVES IT:**
-this testnet refuses EVERY conditional order type on `/fapi/v1/order`:
+**CORRECTION (2026-10-03): Binance demo supports protective orders.**
+The regular `/fapi/v1/order` endpoint rejects conditional types with -4120;
+the documented route is `/fapi/v1/algoOrder`, not `/fapi/v1/algo/order`.
+The adapter now uses `https://demo-fapi.binance.com`, creates stop/target
+algo orders and cancels them by algoId. Actual long and short demo round trips
+verified both protective legs and ended flat with no open orders.
 
-    {"code":-4120,"msg":"Order type not supported for this endpoint.
-                         Please use the Algo Order API endpoints instead."}
-
-while `exchangeInfo` ADVERTISES all five for the same symbol
-(`STOP`, `STOP_MARKET`, `TAKE_PROFIT`, `TAKE_PROFIT_MARKET`,
-`TRAILING_STOP_MARKET`). Six parameter shapes were tried — quantity+reduceOnly
-with and without `workingType`, `closePosition=true`, quantity alone, `STOP` as
-a limit with price+stopPrice, and `TRAILING_STOP_MARKET` — and the response was
-byte-identical, so it is the ENDPOINT, not the parameters. A `LIMIT` control on
-the same endpoint returned `-2022 ReduceOnly Order is rejected`, the correct
-answer for a flat account, proving non-conditional orders arrive fine.
-
-A CAPABILITY LIST THAT SAYS YES WHILE THE ENDPOINT SAYS NO is this project's
-recurring shape — `gpt-oss-20b` still in `GET /v1/models`, Binance futures
-sandbox still in ccxt's url map.
-
-CONSEQUENCE, STATED PLAINLY: a MIRRORED paper position has no protective order
-resting at the venue. Its stop is enforced by `PositionMonitorAgent` on every
-tick, exactly as an unmirrored paper position's is — so the mirror is no WORSE
-protected than paper already was, while the entry, the close, the real fill
-price, the step truncation and the real fees are all faithful.
-`BinanceTestnetVenue.supports_resting_orders = False` lets
-`_place_resting_stop` report that ONCE at INFO instead of CRITICAL on every
-fill; a real `Venue` has no such attribute and `getattr(..., True)` keeps the
-CRITICAL for every real-money position, which is the half that matters.
+The earlier 79.6 -> 79.5 quantity reduction was a binary-float truncation bug,
+not desirable venue rounding. Decimal arithmetic now preserves valid lots.
+Clock retries are bounded to one, and demo ticks/candles use the demo host.
+See `docs/BINANCE_FUTURES_DEMO.md` and `scripts/binance_demo_verify.py` for
+setup and repeatable verification. The application mirror remains opt-in.
 
 **TWO TESTS WERE PASSING BECAUSE A VARIABLE WAS EMPTY**, and populating
 `BINANCE_TESTNET_*` exposed both — the `LLM_*` isolation lesson again:

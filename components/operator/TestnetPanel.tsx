@@ -100,7 +100,7 @@ export function TestnetPanel() {
   if (!status) {
     return (
       <Card>
-        <SectionTitle>Bybit testnet — real fills for paper trades</SectionTitle>
+        <SectionTitle>Futures demo trading</SectionTitle>
         <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
           {error ?? 'Loading…'}
         </div>
@@ -109,13 +109,14 @@ export function TestnetPanel() {
   }
 
   const blocked = !status.credentialsPresent;
+  const venueLabel = status.venue === "binance" ? "Binance futures demo" : "Bybit testnet";
 
   return (
     <Card>
-      <SectionTitle>Bybit testnet — real fills for paper trades</SectionTitle>
+      <SectionTitle>{venueLabel} — real fills for paper trades</SectionTitle>
 
       <p className="text-[11px] mb-3 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-        Paper trades place a <strong>real market order on Bybit&apos;s testnet</strong> and your
+        Paper trades place a <strong>real market order on {venueLabel}</strong> and your
         book is credited with the price the exchange actually returned — spread, slippage and
         partial fills included. The money stays paper; only the fill becomes real.
       </p>
@@ -198,7 +199,7 @@ export function TestnetPanel() {
         {busy
           ? 'Checking…'
           : !status.enabled
-            ? 'Connect to Bybit testnet'
+            ? `Connect to ${venueLabel}`
             : /* ENABLED IS NOT CONNECTED, and the label used to say it was.
                  The setting deliberately STAYS ON when verification fails —
                  reverting it would hide a fixable problem (a revoked key, a
@@ -210,7 +211,9 @@ export function TestnetPanel() {
                  the label has to say so. */
               check && !check.ok
                 ? 'Enabled but NOT verified — click to disconnect'
-                : 'Connected to Bybit testnet — click to disconnect'}
+                : check?.ok
+                  ? `Connected to ${venueLabel} — click to disconnect`
+                  : 'Enabled, awaiting verification — click to disconnect'}
       </button>
 
       {/* The verification result. An unchecked connection is not a working one. */}

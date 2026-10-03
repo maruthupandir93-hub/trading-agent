@@ -118,6 +118,10 @@ def get_price(symbol: str) -> float:
     Returns 0.0 when nothing has a price — callers test `price <= 0` and report
     the symbol unmeasurable rather than computing against it.
     """
+    from backend.services import binance_testnet
+    if binance_testnet.demo_data_active():
+        return binance_testnet.cached_price(symbol)
+
     # 1. The agent's own websocket feed.
     live_price = get_live_price(symbol)
     if live_price > 0:
@@ -142,6 +146,9 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:
     """
     Fetch historical klines via CCXT with exponential backoff.
     """
+    from backend.services import binance_testnet
+    if binance_testnet.demo_data_active():
+        return await binance_testnet.fetch_klines(symbol, interval, limit)
     client = get_exchange_client()
     max_retries = settings.MAX_RETRIES
     

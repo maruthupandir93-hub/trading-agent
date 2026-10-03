@@ -76,7 +76,10 @@ async def _watch_ticker_loop(exchange, symbol: str, bus) -> None:
     failures = 0
     while True:
         try:
-            ticker = await exchange.watch_ticker(symbol)
+            from backend.services import binance_testnet
+            demo = binance_testnet.demo_data_active()
+            ticker = (await binance_testnet.fetch_ticker(symbol) if demo
+                      else await exchange.watch_ticker(symbol))
             price = ticker.get("last")
             volume = ticker.get("baseVolume", 0.0)
 
@@ -90,9 +93,12 @@ async def _watch_ticker_loop(exchange, symbol: str, bus) -> None:
                         symbol=symbol,
                         price=price,
                         volume=volume,
-                        exchange="binance",
+                        exchange="binance_testnet" if demo else "binance",
                     ),
                 )
+
+            if demo:
+                await asyncio.sleep(2)
 
         except asyncio.CancelledError:
             raise

@@ -66,7 +66,7 @@ def test_the_module_contains_exactly_one_host_and_it_is_the_sandbox():
     hosts = set(re.findall(r"https://([a-zA-Z0-9.\-]+)", code))
     assert hosts == set(), f"no host literal belongs in code: {hosts}"
 
-    assert bt.BASE_URL == "https://testnet.binancefuture.com"
+    assert bt.BASE_URL == "https://demo-fapi.binance.com"
 
     # And it is not assembled from configuration, which is the other way a
     # sandbox url becomes a mainnet one.
@@ -99,7 +99,7 @@ def test_the_base_url_is_assigned_exactly_once():
         if ln.strip().startswith("BASE_URL")
     ]
     assert len(code_lines) == 1, code_lines
-    assert code_lines[0].strip() == 'BASE_URL = "https://testnet.binancefuture.com"'
+    assert code_lines[0].strip() == 'BASE_URL = "https://demo-fapi.binance.com"'
 
 
 def test_the_testnet_key_variables_are_separate_from_mainnet():
@@ -198,7 +198,7 @@ def test_a_trigger_price_is_snapped_to_the_venue_tick():
 
 def test_the_conditional_order_sends_a_quantised_trigger():
     src = inspect.getsource(bt._conditional)
-    assert '"stopPrice": _quantise_price(trigger, rules)' in src
+    assert '"triggerPrice": _quantise_price(trigger, rules)' in src
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +216,8 @@ def test_the_signed_timestamp_is_corrected_by_the_server_offset():
 
 def test_a_stale_clock_is_retried_once_rather_than_surfaced():
     src = inspect.getsource(bt._signed)
-    at = src.index('"code":-1021')
-    assert "force=True" in src[at:at + 400]
+    assert "range(2)" in src
+    assert "force=True" in src
 
 
 # ---------------------------------------------------------------------------
@@ -251,18 +251,8 @@ def test_the_facade_signatures_match_the_real_venue():
         assert real_args == fake_args, f"{name}: {real_args} vs {fake_args}"
 
 
-def test_the_facade_declares_that_it_cannot_rest_orders():
-    """MEASURED, NOT ASSUMED. This testnet refuses every conditional type on
-    `/fapi/v1/order` with -4120 "use the Algo Order API endpoints instead",
-    while `exchangeInfo` ADVERTISES all five. Six parameter shapes produced a
-    byte-identical response, and a LIMIT control on the same endpoint returned
-    `-2022 ReduceOnly rejected` — the right answer for a flat account — proving
-    non-conditional orders arrive fine.
-
-    The flag exists so the monitor reports a limitation it cannot act on ONCE,
-    instead of CRITICAL on every fill. An alert that fires every time is one an
-    operator learns to ignore."""
-    assert bt.BinanceTestnetVenue.supports_resting_orders is False
+def test_the_facade_supports_algo_protective_orders():
+    assert bt.BinanceTestnetVenue.supports_resting_orders is True
 
 
 def test_a_real_venue_still_gets_the_CRITICAL():

@@ -1,70 +1,16 @@
-"""Binance USDⓈ-M FUTURES TESTNET, reached directly — because ccxt cannot.
+"""Binance USD-M demo futures adapter. Virtual funds, live exchange responses.
 
-WHY THIS IS NOT A ccxt VENUE, WHICH IS THE WHOLE REASON THE FILE EXISTS
-======================================================================
-Everything else that places an order in this project goes through
-`services/venue.Venue`, and `ExchangeClient`'s rule is absolute: *"the
-Execution API is a hard chokepoint — no agent talks to an exchange directly,
-ever."* This module is a deliberate, narrow exception, and it is one because
-BOTH ccxt routes to Binance futures testnet are unusable:
-
-1. `set_sandbox_mode(True)` is HARD-REFUSED. Measured on ccxt 4.5.75:
-
-       NotSupported: binanceusdm testnet/sandbox mode is not supported for
-       futures anymore, please check the deprecation announcement ...
-
-2. **Overriding `urls['api']` by hand LOOKS like it works and silently reaches
-   MAINNET.** This is the dangerous one and it is why the exception is worth
-   taking. With every `fapi*` entry repointed at the testnet, `load_markets()`
-   succeeded and `fetch_balance()` then failed with
-
-       AuthenticationError: binanceusdm {"code":-2008,"msg":"Invalid Api-Key ID."}
-
-   The key is valid on the testnet, so that error meant the request had gone
-   somewhere else. Intercepting the dial showed where:
-
-       https://api.binance.com/sapi/v1/capital/config/getall
-
-   `binanceusdm.fetch_balance` routes through `sapi` — a MAINNET SPOT host that
-   no `fapi*` override touches. ccxt's url map has 22 entries across five hosts;
-   repointing the ones you happen to think of leaves authenticated requests
-   going to the live exchange with whatever keys are configured. A mirror that
-   can do that is not a testing aid, which is exactly the reasoning
-   `paper_testnet` property 2 already states for Bybit.
-
-So: ONE base url, a module constant, with NO mainnet host anywhere in this file.
-There is nothing to override and nothing to get wrong. `tests/` asserts the
-absence of any other host as a property of the source.
-
-THE CLOCK SKEW IS NOT A DETAIL — IT LOOKS EXACTLY LIKE A BAD KEY
-================================================================
-The first signed probe from this machine returned
-
-    {"code":-1021,"msg":"Timestamp for this request is outside of the recvWindow."}
-
-which reads as a credential problem and is not one: the machine's clock was
-**33.2 seconds behind** Binance's server. Every signed request would have failed
-with the keys perfectly valid. `_server_offset()` measures the difference once
-and re-measures on a cadence, and every signature uses the corrected timestamp.
-This is the same class as the `-2008` above — an error whose text sends you to
-the wrong file.
-
-WHAT THIS MODULE MAY AND MAY NOT DO
-===================================
-* It places orders ONLY on the testnet, ONLY for the paper book, and ONLY from
-  `paper_testnet.place`, which `ExecutionAgent` consults inside its simulated
-  branch. It never becomes a second path for a real trade.
-* It NEVER raises into a trading path. Every public function returns a result
-  object or None; a testnet outage degrades the mirror to a simulated fill and
-  the paper trade still books (`paper_testnet` property 3).
-* It never invents a price or a fill quantity (invariant 6). An order the venue
-  accepted but did not fill is reported as unfilled, not rounded up to what was
-  asked — the mistake this project already made once in `paper_testnet.place`.
+Only the documented demo host is reachable; mainnet credentials are never read.
+Market orders use /fapi/v1/order; protective orders use /fapi/v1/algoOrder.
+See docs/BINANCE_FUTURES_DEMO.md for setup, limitations and verification.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
+import math
+import uuid
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import hmac
 import logging
@@ -82,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Not read from the environment, not derived from EXCHANGE_ID, and with no
 # mainnet sibling to fall back to. See the module docstring for the measured
 # reason ccxt's configurable routing is not safe here.
-BASE_URL = "https://testnet.binancefuture.com"
+BASE_URL = "https://demo-fapi.binance.com"
 
 KEY_VAR = "BINANCE_TESTNET_API_KEY"
 SECRET_VAR = "BINANCE_TESTNET_SECRET"
@@ -183,36 +129,37 @@ async def _server_offset(client: httpx.AsyncClient, *, force: bool = False) -> i
 async def _signed(
     client: httpx.AsyncClient, method: str, path: str, params: Optional[Dict] = None,
 ) -> tuple[bool, Any]:
-    """One signed request. Returns (ok, payload-or-error-text). Never raises."""
+    """Sign only demo requests. Retry a clock rejection once, never an unknown POST."""
     key, secret = _creds()
     if not key or not secret:
         return False, f"no credentials ({KEY_VAR} / {SECRET_VAR} are empty)"
-
-    p = dict(params or {})
-    p["timestamp"] = int(time.time() * 1000) + await _server_offset(client)
-    p["recvWindow"] = RECV_WINDOW_MS
-    query = urllib.parse.urlencode(p)
-    signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-    url = f"{BASE_URL}{path}?{query}&signature={signature}"
-
-    try:
-        r = await client.request(method, url, headers={"X-MBX-APIKEY": key})
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{type(exc).__name__}: {exc}"
-
-    if r.status_code >= 400:
-        body = r.text[:300]
-        # A stale clock is self-healing and worth retrying ONCE, because the
-        # alternative is an order refused for a reason that has nothing to do
-        # with the order.
-        if '"code":-1021' in body:
+    for attempt in range(2):
+        offset = await _server_offset(client)
+        p = dict(params or {})
+        p["timestamp"] = int(time.time() * 1000) + offset
+        p["recvWindow"] = RECV_WINDOW_MS
+        query = urllib.parse.urlencode(p)
+        signature = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        try:
+            r = await client.request(method, f"{BASE_URL}{path}?{query}&signature={signature}",
+                                     headers={"X-MBX-APIKEY": key})
+        except Exception as exc:
+            # Exception strings may contain the signed URL. Never log/return it.
+            return False, f"transport error ({type(exc).__name__}); execution status unknown"
+        try:
+            body = r.json()
+        except Exception:
+            return False, f"invalid JSON response (HTTP {r.status_code}); execution status unknown"
+        if not isinstance(body, (dict, list)):
+            return False, "unexpected response shape; execution status unknown"
+        code = body.get("code") if isinstance(body, dict) else None
+        if str(code) == "-1021" and attempt == 0:
             await _server_offset(client, force=True)
-            return await _signed(client, method, path, params)
-        return False, body
-    try:
-        return True, r.json()
-    except Exception:  # noqa: BLE001
-        return False, r.text[:300]
+            continue
+        if r.status_code >= 300 or (code is not None and str(code).startswith("-")):
+            return False, json.dumps(body, ensure_ascii=True)[:500]
+        return True, body
+    return False, "clock synchronization failed"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +177,9 @@ async def free_usdt() -> Optional[float]:
     if not ok:
         logger.warning("Binance testnet balance unreadable: %s", body)
         return None
-    for row in body or []:
+    if not isinstance(body, list) or not all(isinstance(row, dict) for row in body):
+        return None
+    for row in body:
         if row.get("asset") == "USDT":
             try:
                 return float(row.get("availableBalance"))
@@ -248,7 +197,9 @@ async def open_position(symbol: str) -> Optional[Dict[str, Any]]:
     if not ok:
         logger.warning("Binance testnet position unreadable for %s: %s", symbol, body)
         return None
-    for row in body or []:
+    if not isinstance(body, list) or not all(isinstance(row, dict) for row in body):
+        return None
+    for row in body:
         try:
             amt = float(row.get("positionAmt") or 0.0)
         except (TypeError, ValueError):
@@ -280,49 +231,58 @@ async def _instrument_rules(client: httpx.AsyncClient, symbol: str) -> Dict[str,
     except Exception as exc:  # noqa: BLE001
         logger.warning("Binance testnet exchangeInfo unavailable (%s).", exc)
         return {}
-    rules: Dict[str, Dict[str, Any]] = {}
-    for m in info.get("symbols") or []:
-        entry: Dict[str, Any] = {}
-        for f in m.get("filters") or []:
-            if f.get("filterType") == "LOT_SIZE":
-                entry["step"] = float(f.get("stepSize") or 0)
-                entry["minQty"] = float(f.get("minQty") or 0)
-            elif f.get("filterType") == "MIN_NOTIONAL":
-                entry["minNotional"] = float(f.get("notional") or 0)
-            elif f.get("filterType") == "PRICE_FILTER":
-                # THE TICK, WHICH A TRIGGER PRICE MUST SIT ON.
-                # Found by probing BTCUSDT: tick is 0.10 and an unrounded
-                # 82554.57 is not a valid price. The conditional order was
-                # refused for an unrelated reason (-4120) so the violation was
-                # INVISIBLE — a bug that only surfaces on a venue that accepts
-                # the order type, which is the one place it would cost a stop.
-                entry["tick"] = float(f.get("tickSize") or 0)
-        entry["quantityPrecision"] = m.get("quantityPrecision")
-        entry["pricePrecision"] = m.get("pricePrecision")
-        rules[m.get("symbol")] = entry
+    if not isinstance(info, dict) or not isinstance(info.get("symbols"), list):
+        return {}
+    try:
+        rules: Dict[str, Dict[str, Any]] = {}
+        for m in info.get("symbols") or []:
+            if not isinstance(m, dict):
+                return {}
+            entry: Dict[str, Any] = {}
+            for f in m.get("filters") or []:
+                if not isinstance(f, dict):
+                    return {}
+                if f.get("filterType") == "LOT_SIZE":
+                    entry["step"] = float(f.get("stepSize") or 0)
+                    entry["minQty"] = float(f.get("minQty") or 0)
+                elif f.get("filterType") == "MIN_NOTIONAL":
+                    entry["minNotional"] = float(f.get("notional") or 0)
+                elif f.get("filterType") == "PRICE_FILTER":
+                    # THE TICK, WHICH A TRIGGER PRICE MUST SIT ON.
+                    # Found by probing BTCUSDT: tick is 0.10 and an unrounded
+                    # 82554.57 is not a valid price. The conditional order was
+                    # refused for an unrelated reason (-4120) so the violation was
+                    # INVISIBLE — a bug that only surfaces on a venue that accepts
+                    # the order type, which is the one place it would cost a stop.
+                    entry["tick"] = float(f.get("tickSize") or 0)
+            entry["quantityPrecision"] = m.get("quantityPrecision")
+            entry["pricePrecision"] = m.get("pricePrecision")
+            rules[m.get("symbol")] = entry
+    except (ValueError, TypeError, ArithmeticError):
+        logger.warning("Malformed demo instrument filters; orders disabled until readable")
+        return {}
     _rules_cache, _rules_at = rules, time.time()
     return rules.get(to_binance_symbol(symbol), {})
 
 
 def _quantise(qty: float, rules: Dict[str, Any]) -> Optional[str]:
-    """Trim to the venue's step. Returns None when the result is below minimum.
-
-    TRUNCATES, never rounds up. `tests/test_venue_live_path.py` learned this the
-    hard way: a fixture that rounded 0.05 to 0.1 cleared the minimum and made a
-    refusal test pass for the wrong reason. A fixture kinder than the venue
-    proves nothing, and a client kinder than the venue places an order larger
-    than was approved.
-    """
-    step = float(rules.get("step") or 0.0)
-    min_qty = float(rules.get("minQty") or 0.0)
-    q = float(qty)
-    if step > 0:
-        q = int(q / step) * step
-    precision = rules.get("quantityPrecision")
-    text = f"{q:.{int(precision)}f}" if isinstance(precision, int) else repr(q)
-    if float(text) <= 0 or (min_qty and float(text) < min_qty):
+    """Use decimal lot arithmetic; binary floats can turn valid 0.3 into 0.2."""
+    try:
+        q = Decimal(str(qty))
+        step = Decimal(str(rules.get("step") or 0))
+        minimum = Decimal(str(rules.get("minQty") or 0))
+        if not q.is_finite() or q <= 0:
+            return None
+        if step > 0:
+            q = (q / step).to_integral_value(rounding=ROUND_DOWN) * step
+        precision = rules.get("quantityPrecision")
+        if isinstance(precision, int):
+            q = q.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_DOWN)
+        if q <= 0 or q < minimum:
+            return None
+        return format(q, "f")
+    except (ValueError, ArithmeticError, TypeError):
         return None
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -330,21 +290,14 @@ def _quantise(qty: float, rules: Dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _quantise_price(price: float, rules: Dict[str, Any]) -> str:
-    """Snap a trigger price to the venue's tick.
-
-    Binance rejects a price that is not a multiple of `tickSize`. Unlike a
-    QUANTITY, rounding a trigger to the nearest tick is correct rather than
-    dangerous: it moves the stop by at most half a tick, and refusing a stop
-    over a rounding question would leave the position unprotected — which is
-    the worse failure. Quantity truncates DOWN because staking more than was
-    approved is the hazard there; a trigger has no such asymmetry.
-    """
-    tick = float(rules.get("tick") or 0.0)
-    p = float(price)
+    p = Decimal(str(price))
+    tick = Decimal(str(rules.get("tick") or 0))
+    if not p.is_finite() or p <= 0:
+        raise ValueError("trigger price must be positive and finite")
     if tick > 0:
-        p = round(p / tick) * tick
+        p = (p / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
     precision = rules.get("pricePrecision")
-    return f"{p:.{int(precision)}f}" if isinstance(precision, int) else repr(p)
+    return f"{p:.{precision}f}" if isinstance(precision, int) else format(p, "f")
 
 
 async def ensure_leverage(symbol: str, leverage: int) -> bool:
@@ -380,9 +333,13 @@ async def market_order(
     an opposite-side market order, and any surplus over the live size OPENS a
     position the other way — the same reason `venue.market_order` sets it.
     """
+    if side.lower() not in ("buy", "sell"):
+        return TestnetOrder(ok=False, error="side must be buy or sell")
     bsym = to_binance_symbol(symbol)
     async with httpx.AsyncClient(timeout=30.0) as client:
         rules = await _instrument_rules(client, symbol)
+        if not rules:
+            return TestnetOrder(ok=False, error="instrument filters unavailable; order not sent")
         quantity = _quantise(qty, rules)
         if quantity is None:
             return TestnetOrder(
@@ -398,17 +355,28 @@ async def market_order(
             "symbol": bsym,
             "side": "BUY" if side.lower() == "buy" else "SELL",
             "type": "MARKET",
+            "newOrderRespType": "RESULT",
             "quantity": quantity,
         }
         if reduce_only:
             params["reduceOnly"] = "true"
+        client_order_id = client_order_id or f"demo_{uuid.uuid4().hex[:28]}"
         if client_order_id:
             # Binance allows [A-Za-z0-9_-] up to 36.
             params["newClientOrderId"] = client_order_id[:36]
 
         ok, body = await _signed(client, "POST", "/fapi/v1/order", params)
         if not ok:
-            return TestnetOrder(ok=False, error=str(body))
+            # A timeout/5xx may have executed. Query the SAME client id, never resend.
+            if "unknown" in str(body).lower() or "transport" in str(body).lower():
+                ok, recovered = await _signed(client, "GET", "/fapi/v1/order",
+                    {"symbol": bsym, "origClientOrderId": params["newClientOrderId"]})
+                if ok:
+                    body = recovered
+            if not ok:
+                return TestnetOrder(ok=False, error=str(body))
+        if not isinstance(body, dict):
+            return TestnetOrder(ok=False, error="unexpected order response")
 
         # A MARKET order's ack may not carry the fill. Ask for the order back,
         # because `avgPrice` is the only honest source of what it cost and
@@ -421,7 +389,7 @@ async def market_order(
             ok2, back = await _signed(
                 client, "GET", "/fapi/v1/order", {"symbol": bsym, "orderId": order_id},
             )
-            if ok2:
+            if ok2 and isinstance(back, dict):
                 body = back
                 filled = _f(back.get("executedQty"))
                 avg = _f(back.get("avgPrice"))
@@ -434,6 +402,8 @@ async def market_order(
 def _f(v: Any) -> Optional[float]:
     try:
         out = float(v)
+        if not math.isfinite(out):
+            return None
     except (TypeError, ValueError):
         return None
     return out
@@ -460,6 +430,8 @@ async def verify() -> Dict[str, Any]:
         ok, body = await _signed(client, "GET", "/fapi/v2/account")
     if not ok:
         return {"ok": False, "reason": str(body), "clockOffsetMs": offset}
+    if not isinstance(body, dict):
+        return {"ok": False, "reason": "unexpected account response"}
     try:
         balance = float(body.get("availableBalance") or body.get("totalWalletBalance") or 0.0)
     except (TypeError, ValueError):
@@ -502,53 +474,7 @@ def reset() -> None:
 # `_venue_for(pos)` returns one or the other and the caller must not care.
 
 
-# MEASURED 2026-10-03: THIS TESTNET REFUSES EVERY CONDITIONAL ORDER TYPE.
-#
-# `exchangeInfo` ADVERTISES them for XRPUSDT —
-#     ['LIMIT','MARKET','STOP','STOP_MARKET','TAKE_PROFIT',
-#      'TAKE_PROFIT_MARKET','TRAILING_STOP_MARKET']
-# — and `/fapi/v1/order` then refuses all five conditional ones identically:
-#     {"code":-4120,"msg":"Order type not supported for this endpoint.
-#                          Please use the Algo Order API endpoints instead."}
-#
-# PROVEN BY BINANCE'S OWN VALIDATOR, which is as close to authoritative as this
-# gets. `/fapi/v1/order/test` validates an order WITHOUT placing it:
-#
-#     MARKET              ACCEPTED
-#     LIMIT               -4024 "Limit price can't be lower than 1.4245"  <- a
-#                         real business validation, so the endpoint works
-#     STOP_MARKET         -4120
-#     TAKE_PROFIT_MARKET  -4120
-#
-# Everything else was ruled out first, and each rules out a different cause:
-#   * SIX parameter shapes — quantity+reduceOnly with and without workingType,
-#     closePosition=true, quantity alone, STOP as a limit with price+stopPrice,
-#     TRAILING_STOP_MARKET — all byte-identical, so it is not the parameters.
-#   * THREE symbols (XRPUSDT, BTCUSDT, ETHUSDT) with tick-correct prices, so it
-#     is not one instrument.
-#   * FOUR alternative paths — /fapi/v1/conditional/order, /fapi/v1/algo/order,
-#     /fapi/v2/order all answer `-5000 Path ... is invalid`, and /papi + /sapi
-#     are mainnet hosts this module will not dial — so there is no other route.
-#   * The account is one-way (`dualSidePosition: false`), so positionSide and
-#     reduceOnly were correct, and `apiTradingStatus.indicators` is EMPTY, so
-#     the key carries no restriction.
-#   * A LIMIT order placed, returned NEW, and cancelled cleanly, so the
-#     endpoint and the credentials are fine.
-#
-# A CAPABILITY LIST THAT SAYS YES WHILE THE ENDPOINT SAYS NO is the same shape
-# as this project's other "advertised but dead" findings (gpt-oss-20b still in
-# `GET /v1/models`, Binance futures sandbox still in ccxt's url map). The
-# reason it is written down here is so the next reader does not spend an hour
-# on parameters.
-#
-# CONSEQUENCE, STATED PLAINLY: a MIRRORED paper position has no protective
-# order resting at the venue. Its stop is enforced by `PositionMonitorAgent`
-# on every tick, exactly as it is for an unmirrored paper position — so the
-# mirror is no WORSE protected than paper already was, and the entry, the
-# close, the real fill price, the step truncation and the real fees are all
-# still faithful. `supports_resting_orders = False` on the facade lets the
-# monitor report this as a known limitation instead of a CRITICAL fault on
-# every single fill.
+# Conditional orders have their own Algo Order API, including cancellation.
 
 
 async def _conditional(
@@ -567,9 +493,15 @@ async def _conditional(
     size OPENS a position the other way — on a flat account, that is an order
     to open a reversed position the next time price touches the trigger.
     """
+    if side.lower() not in ("buy", "sell"):
+        return TestnetOrder(ok=False, error="side must be buy or sell")
+    if not _f(trigger) or float(trigger) <= 0:
+        return TestnetOrder(ok=False, error="trigger must be positive and finite")
     bsym = to_binance_symbol(symbol)
     async with httpx.AsyncClient(timeout=30.0) as client:
         rules = await _instrument_rules(client, symbol)
+        if not rules:
+            return TestnetOrder(ok=False, error="instrument filters unavailable; order not sent")
         quantity = _quantise(qty, rules)
         if quantity is None:
             return TestnetOrder(ok=False, error=f"quantity {qty} below {bsym} minimum")
@@ -579,17 +511,20 @@ async def _conditional(
             "side": "BUY" if side.lower() == "buy" else "SELL",
             "type": order_type,
             "quantity": quantity,
-            "stopPrice": _quantise_price(trigger, rules),
+            "algoType": "CONDITIONAL",
+            "triggerPrice": _quantise_price(trigger, rules),
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
         }
         if client_order_id:
-            params["newClientOrderId"] = client_order_id[:36]
-        ok, body = await _signed(client, "POST", "/fapi/v1/order", params)
+            params["clientAlgoId"] = client_order_id[:36]
+        ok, body = await _signed(client, "POST", "/fapi/v1/algoOrder", params)
 
     if not ok:
         return TestnetOrder(ok=False, error=str(body))
-    return TestnetOrder(ok=True, order_id=str(body.get("orderId") or "") or None, raw=body or {})
+    if not isinstance(body, dict) or not body.get("algoId"):
+        return TestnetOrder(ok=False, error="missing algo order id")
+    return TestnetOrder(ok=True, order_id="algo:" + str(body["algoId"]), raw=body)
 
 
 async def place_stop_loss(
@@ -636,13 +571,18 @@ async def cancel_order(order_id: str, symbol: str) -> bool:
     monitor hold an id forever for an order that does not exist.
     """
     async with httpx.AsyncClient(timeout=20.0) as client:
-        ok, body = await _signed(
-            client, "DELETE", "/fapi/v1/order",
-            {"symbol": to_binance_symbol(symbol), "orderId": str(order_id)},
-        )
+        is_algo = str(order_id).startswith("algo:")
+        path = "/fapi/v1/algoOrder" if is_algo else "/fapi/v1/order"
+        params = {"algoId": str(order_id)[5:]} if is_algo else {
+            "symbol": to_binance_symbol(symbol), "orderId": str(order_id)}
+        ok, body = await _signed(client, "DELETE", path, params)
     if ok:
         return True
-    if '"code":-2011' in str(body):
+    try:
+        already_gone = json.loads(str(body)).get("code") == -2011
+    except (ValueError, AttributeError):
+        already_gone = False
+    if already_gone:
         logger.info("Binance testnet order %s was already gone (%s).", order_id, symbol)
         return True
     logger.warning("Binance testnet could NOT cancel %s on %s: %s", order_id, symbol, body)
@@ -666,11 +606,8 @@ class BinanceTestnetVenue:
     id = "binance_testnet"
     testnet = True
     key_variable = KEY_VAR
-    # READ BY `position_monitor` so a refusal it cannot do anything about is
-    # logged once as a limitation rather than CRITICAL on every fill. A real
-    # `Venue` has no such attribute and `getattr(..., True)` is the default, so
-    # the live path's CRITICAL is untouched — which is the half that matters.
-    supports_resting_orders = False
+    # Algo orders provide venue-side protection, including when the app stops.
+    supports_resting_orders = True
 
     @staticmethod
     def has_credentials() -> bool:
@@ -683,3 +620,45 @@ class BinanceTestnetVenue:
     place_take_profit = staticmethod(place_take_profit)
     cancel_order = staticmethod(cancel_order)
     open_positions = staticmethod(open_position)
+
+
+_demo_prices: Dict[str, tuple[float, float]] = {}
+
+
+def demo_data_active() -> bool:
+    """Use demo market data only for an explicitly connected paper mirror."""
+    from backend.core.config import settings
+    from backend.services import paper_testnet
+    return (not settings.LIVE_TRADING and paper_testnet.venue_choice() == "binance"
+            and paper_testnet.active())
+
+
+def cached_price(symbol: str) -> float:
+    price, observed = _demo_prices.get(to_binance_symbol(symbol), (0.0, 0.0))
+    return price if time.monotonic() - observed <= 15 else 0.0
+
+
+async def fetch_ticker(symbol: str) -> Dict[str, Any]:
+    """Actual demo futures quote; failures propagate to the feed's retry loop."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        row = await _get_json(client, "/fapi/v1/ticker/24hr", {"symbol": to_binance_symbol(symbol)})
+    price = _f(row.get("lastPrice")) if isinstance(row, dict) else None
+    if not price or price <= 0:
+        raise ValueError("demo futures ticker has no usable price")
+    _demo_prices[to_binance_symbol(symbol)] = (price, time.monotonic())
+    return {"last": price, "baseVolume": _f(row.get("volume")) or 0.0}
+
+
+async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:
+    """Live demo futures candles, with exchange close timestamps."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rows = await _get_json(client, "/fapi/v1/klines", {
+                "symbol": to_binance_symbol(symbol), "interval": interval,
+                "limit": min(max(int(limit), 1), 1500)})
+        return [{"openTime": r[0], "open": float(r[1]), "high": float(r[2]),
+                 "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]),
+                 "closeTime": r[6]} for r in rows]
+    except Exception as exc:
+        logger.warning("Demo candles unavailable for %s (%s)", symbol, type(exc).__name__)
+        return []
