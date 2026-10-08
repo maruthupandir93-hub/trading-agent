@@ -1,0 +1,233 @@
+[
+  {
+    "strategy": "Trend",
+    "full": {
+      "trades": 222,
+      "wins": 65,
+      "total_r": -43.5047,
+      "mean_net_r": -0.196
+    },
+    "early": {
+      "trades": 101,
+      "wins": 37,
+      "total_r": 3.3181,
+      "mean_net_r": 0.0329
+    },
+    "late": {
+      "trades": 125,
+      "wins": 32,
+      "total_r": -39.6546,
+      "mean_net_r": -0.3172
+    }
+  },
+  {
+    "strategy": "MeanReversion",
+    "full": {
+      "trades": 160,
+      "wins": 68,
+      "total_r": 30.4469,
+      "mean_net_r": 0.1903
+    },
+    "early": {
+      "trades": 90,
+      "wins": 33,
+      "total_r": 1.4569,
+      "mean_net_r": 0.0162
+    },
+    "late": {
+      "trades": 82,
+      "wins": 39,
+      "total_r": 28.2685,
+      "mean_net_r": 0.3447
+    }
+  },
+  {
+    "strategy": "Momentum",
+    "full": {
+      "trades": 164,
+      "wins": 48,
+      "total_r": -33.9766,
+      "mean_net_r": -0.2072
+    },
+    "early": {
+      "trades": 90,
+      "wins": 34,
+      "total_r": 5.9066,
+      "mean_net_r": 0.0656
+    },
+    "late": {
+      "trades": 107,
+      "wins": 23,
+      "total_r": -47.6892,
+      "mean_net_r": -0.4457
+    }
+  },
+  {
+    "strategy": "Scalping",
+    "full": {
+      "trades": 136,
+      "wins": 38,
+      "total_r": -33.7142,
+      "mean_net_r": -0.2479
+    },
+    "early": {
+      "trades": 84,
+      "wins": 23,
+      "total_r": -21.6052,
+      "mean_net_r": -0.2572
+    },
+    "late": {
+      "trades": 73,
+      "wins": 25,
+      "total_r": -4.37,
+      "mean_net_r": -0.0599
+    }
+  },
+  {
+    "strategy": "Swing",
+    "full": {
+      "trades": 213,
+      "wins": 59,
+      "total_r": -50.4494,
+      "mean_net_r": -0.2369
+    },
+    "early": {
+      "trades": 111,
+      "wins": 35,
+      "total_r": -12.938,
+      "mean_net_r": -0.1166
+    },
+    "late": {
+      "trades": 102,
+      "wins": 24,
+      "total_r": -38.0338,
+      "mean_net_r": -0.3729
+    }
+  },
+  {
+    "strategy": "Breakout",
+    "full": {
+      "trades": 176,
+      "wins": 48,
+      "total_r": -50.0342,
+      "mean_net_r": -0.2843
+    },
+    "early": {
+      "trades": 80,
+      "wins": 27,
+      "total_r": -4.9129,
+      "mean_net_r": -0.0614
+    },
+    "late": {
+      "trades": 106,
+      "wins": 27,
+      "total_r": -37.5548,
+      "mean_net_r": -0.3543
+    }
+  },
+  {
+    "strategy": "Range",
+    "full": {
+      "trades": 169,
+      "wins": 60,
+      "total_r": -2.199,
+      "mean_net_r": -0.013
+    },
+    "early": {
+      "trades": 101,
+      "wins": 29,
+      "total_r": -21.5249,
+      "mean_net_r": -0.2131
+    },
+    "late": {
+      "trades": 88,
+      "wins": 42,
+      "total_r": 30.7013,
+      "mean_net_r": 0.3489
+    }
+  },
+  {
+    "strategy": "Grid",
+    "full": {
+      "trades": 164,
+      "wins": 62,
+      "total_r": 9.1437,
+      "mean_net_r": 0.0558
+    },
+    "early": {
+      "trades": 107,
+      "wins": 31,
+      "total_r": -21.8599,
+      "mean_net_r": -0.2043
+    },
+    "late": {
+      "trades": 81,
+      "wins": 43,
+      "total_r": 41.2718,
+      "mean_net_r": 0.5095
+    }
+  },
+  {
+    "strategy": "Arbitrage",
+    "full": {
+      "trades": 110,
+      "wins": 41,
+      "total_r": 5.6055,
+      "mean_net_r": 0.051
+    },
+    "early": {
+      "trades": 74,
+      "wins": 21,
+      "total_r": -15.9796,
+      "mean_net_r": -0.2159
+    },
+    "late": {
+      "trades": 61,
+      "wins": 32,
+      "total_r": 31.3205,
+      "mean_net_r": 0.5135
+    }
+  },
+  {
+    "strategy": "VWAP",
+    "full": {
+      "trades": 80,
+      "wins": 26,
+      "total_r": -6.2062,
+      "mean_net_r": -0.0776
+    },
+    "early": {
+      "trades": 54,
+      "wins": 12,
+      "total_r": -20.8173,
+      "mean_net_r": -0.3855
+    },
+    "late": {
+      "trades": 50,
+      "wins": 23,
+      "total_r": 16.4975,
+      "mean_net_r": 0.3299
+    }
+  },
+  {
+    "strategy": "VolatilityBreakout",
+    "full": {
+      "trades": 65,
+      "wins": 18,
+      "total_r": -18.5846,
+      "mean_net_r": -0.2859
+    },
+    "early": {
+      "trades": 31,
+      "wins": 8,
+      "total_r": -10.3488,
+      "mean_net_r": -0.3338
+    },
+    "late": {
+      "trades": 31,
+      "wins": 10,
+      "total_r": -4.9855,
+      "mean_net_r": -0.1608
+    }
+  }
+]

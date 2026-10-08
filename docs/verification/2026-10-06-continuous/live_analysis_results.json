@@ -1,0 +1,1163 @@
+[
+  {
+    "cycle": 1,
+    "symbol": "XRP/USDT",
+    "elapsed_seconds": 19.349,
+    "result": {
+      "ok": true,
+      "runId": "ca3d8de7e48e44da9e5d8c3d7540d045",
+      "threadId": "trade_analysis:XRP/USDT-manual-ca3d8de7",
+      "symbol": "XRP/USDT",
+      "regime": "Range",
+      "volatility": "LOW",
+      "liquidity": "MEDIUM",
+      "trend_strength": 0.121,
+      "confidence": 1.0,
+      "trend": "Bullish",
+      "multiTimeframeTrend": "Bullish",
+      "atr": 0.005426295519919904,
+      "rsi": 63.25459317585317,
+      "support": 1.5069,
+      "resistance": null,
+      "riskLevel": "normal",
+      "price": 1.5152,
+      "candlesUsed": 118,
+      "nodesVisited": [
+        "memory_loader",
+        "data_validation",
+        "feature_generation",
+        "market_analysis",
+        "regime_detection",
+        "volatility_analysis",
+        "market_state",
+        "strategy_candidates",
+        "strategy_scoring",
+        "opportunity_detection",
+        "specialist_funding",
+        "specialist_liquidity",
+        "specialist_market",
+        "specialist_news",
+        "specialist_orderflow",
+        "specialist_portfolio",
+        "specialist_risk",
+        "debate",
+        "supervisor",
+        "risk_gateway",
+        "external_consultation",
+        "trade_thesis_narrative"
+      ],
+      "unavailable": [
+        "memory store risk_events: risk_events could not be read (no database pool, or the query failed) \u2014 this is NOT the same as there being no risk events",
+        "strategy scoring is using BACKTESTED priors, not realised results: no strategy has closed enough trades on this account yet. The prior is shrunk halfway toward neutral and is superseded per strategy the moment that strategy has enough real closed trades",
+        "decision probability (only 16 resolved trade(s), need 20 to measure accuracy \u2014 a probability would be a prior, not a measurement, and panel agreement is not a hit rate)"
+      ],
+      "errors": [],
+      "confidenceMeaning": "fraction of regime fields that could be computed, not a forecast",
+      "liquidityMeaning": "volume-based proxy \u2014 NOT order-book depth (no depth feed subscribed)",
+      "candidates": [
+        {
+          "name": "Trend",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Choppy, range-bound price action \u2014 crossovers whipsaw and every one is a loss."
+        },
+        {
+          "name": "MeanReversion",
+          "score": 0.228,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Momentum",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Low-volatility drift, where MACD crossovers are noise."
+        },
+        {
+          "name": "Scalping",
+          "score": 0.253,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Swing",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Tight consolidation with no swing amplitude."
+        },
+        {
+          "name": "Breakout",
+          "score": 0.25,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Range",
+          "score": 0.621,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Grid",
+          "score": 0.619,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Arbitrage",
+          "score": 0.218,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VWAP",
+          "score": 0.207,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VolatilityBreakout",
+          "score": 0.234,
+          "eligible": true,
+          "gatedOutReason": null
+        }
+      ],
+      "selectedStrategy": "Range",
+      "selectedScore": 0.621,
+      "thesis": {
+        "direction": "SHORT",
+        "strategy": "Range",
+        "entryPrice": 1.5152,
+        "stopLoss": 1.5287657387998,
+        "takeProfit": 1.4880685224004007,
+        "supportingEvidence": [
+          "RSI 63.3 is not at an extreme against this side",
+          "regime is Range, in which Range is eligible"
+        ],
+        "contradictingEvidence": [
+          "15m trend is Bullish",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.12"
+        ],
+        "narrative": "The supervisor decided DO_NOT_TRADE because the specialist panel returned a NEUTRAL verdict (0.04 confidence) that disagrees with the SHORT thesis. Contradicting evidence includes a bullish 15\u2011minute trend, a bullish multi\u2011timeframe trend, and a low trend strength of 0.12, which outweigh the supporting points (RSI 63.3 not extreme and range regime). The Risk Gateway subsequently REJECTED the setup, noting that nothing could be validated after the supervisor\u2019s DO_NOT_TRADE decision, so no approved size exists. Consequently the trade will not be placed; the direction\u2019s probability is NOT MEASURABLE, and risk\u2011event data, strategy scoring and decision probability remain unknown for this account."
+      },
+      "hasOpportunity": true,
+      "llmCallsMade": 1,
+      "llmTokensUsed": 1813,
+      "narrativeMeaning": "prose only \u2014 written by a model from the computed figures above, and structurally unable to alter them",
+      "specialists": [
+        {
+          "name": "liquidity",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.06600877916762203,
+          "evidence": [
+            "spread 0.66 bps at mid 1.51495",
+            "resting size over the 74.92 bps the feed returned (50+50 levels): bid 124,175,639 vs ask 81,431,574 (quote ccy)",
+            "resting-size imbalance +0.21 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "spread concern 0.07 (0.66 bps against a 5 bps threshold)",
+            "no intended size supplied, so depth was not scored against one \u2014 guessing an order size would invent the number the concern is derived from",
+            "cross-check: the traded-VOLUME proxy in market_regime.liquidity reads 'MEDIUM'. It is NOT order-book depth and cannot bound slippage or fillable size \u2014 the spread and depth above are what do"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "portfolio",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "0 open position(s) on the paper book",
+            "position notional is measured at ENTRY cost, not marked to market",
+            "equity is free cash + locked margin; unrealized P&L is not measured in this node (no per-symbol marks are fetched here)",
+            "correlated-cluster analysis not run here \u2014 owned by the CIO agent",
+            "drawdown from high-water mark not available here \u2014 owned by the CEO agent"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "risk",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "no governance block active (not paused, stopped or observing)",
+            "ATR 0.0054262955 is available, so a stop can be computed",
+            "leverage ceiling is 10x on real money and 10x on paper, and is not overridable by any setting, agent or confidence level"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "funding",
+          "role": "directional",
+          "available": true,
+          "stance": "neutral",
+          "confidence": 0.0,
+          "concern": null,
+          "evidence": [
+            "funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way",
+            "Fear & Greed 73 (Greed) is mid-range \u2014 no positioning signal"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "market",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_long",
+          "confidence": 0.3662451429000738,
+          "concern": null,
+          "evidence": [
+            "Structure (+3.00) BOS at 1.5145 continuing the UP trend",
+            "Momentum (+1.33) RSI 63.3 neutral band, leaning up",
+            "Trend (+0.64) price 1.5213, SMA20 1.51218, SMA50 1.50866 (fast/slow separation +0.23% of price)",
+            "Volume (+0.35) RVOL 0.77x (latest vs 20-bar avg), baseline 1.23x, on a +0.01% candle, confirming a +0.22% 5-candle move"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "news",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.45,
+          "concern": null,
+          "evidence": [
+            "21 of 40 headline(s) in the last 24h mention XRP or the wider market",
+            "lexicon score: bullish 0.3 vs bearish 2.4 -> net -0.77",
+            "confidence 0.45 = |net| x volume 1.00, capped at 0.45 \u2014 this is keyword matching, not comprehension",
+            "event risk 0.06 from scheduled/announced-risk terms",
+            "headline: Binance BTC outflows hit highest since mid-2023 as whales deposit stablecoins [-0.6]",
+            "headline: Rain seeks US trust bank charter days after OCC sued over crypto charters [-0.5]",
+            "headline: Modern Treasury seeks US trust bank charter for digital asset custody [+0.3]",
+            "headline: CFTC joins SEC in proposing crypto framework after failed CLARITY vote [+0.0]",
+            "headline: Ethereum bears keep selling but ETH price stays near $2,700 as US spot ETFs record $206M in outflows [-0.6]",
+            "source(s) unavailable this run: CoinDesk: CoinDesk RSS: connection failed (ConnectError: [Errno 11001] getaddrinfo failed)"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "orderflow",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.4769916338798865,
+          "concern": null,
+          "evidence": [
+            "taker flow over the last 200 trade(s): buy 9,745,851 vs sell 116,639,029 (quote ccy)",
+            "aggressor imbalance -0.85 -> sellers (neutral band |0.15|)",
+            "a 200-trade window is seconds to minutes on a liquid pair \u2014 this is very short-horizon evidence and does not describe the session",
+            "spread 0.66 bps at mid 1.51495",
+            "resting size over the 74.92 bps the feed returned (50+50 levels): bid 124,175,639 vs ask 81,431,574 (quote ccy)",
+            "resting-size imbalance +0.21 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "combined flow -0.48 (tape 0.65, book 0.35) at 100% leg coverage -> supports_short @ 0.48 (ceiling 0.7: a seconds-long window cannot support full conviction about an hours-long position)"
+          ],
+          "reasonUnavailable": null
+        }
+      ],
+      "panelSize": 7,
+      "panelAvailable": 7,
+      "debate": {
+        "direction": "NEUTRAL",
+        "confidence": 0.03892768961711541,
+        "participants": [
+          "funding",
+          "liquidity",
+          "market",
+          "news",
+          "orderflow",
+          "portfolio",
+          "risk"
+        ],
+        "absent": [],
+        "supporting": [],
+        "contradicting": [
+          "liquidity (constraint, concern 0.07)"
+        ],
+        "rationale": "NEUTRAL at 0.04 confidence from a net directional score of -0.04 (neutral band +/-0.15). Against: liquidity (constraint, concern 0.07). Confidence scaled to 100% directional coverage (7.0 of 7.0 panel weight). Then reduced a further 7% by the binding constraint (liquidity).",
+        "coverage": 1.0,
+        "constraintApplied": 0.06600877916762203,
+        "bindingConstraint": "liquidity",
+        "directionalConfidence": 0.04167886030280118
+      },
+      "decision": {
+        "action": "DO_NOT_TRADE",
+        "direction": null,
+        "size": null,
+        "leverage": null,
+        "rationale": "DO NOT TRADE: the Range setup is SHORT but the specialist panel reads NEUTRAL at 0.04. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "whatHappened": "manual: Read-only continuous audit; isolated 2 USDT paper book; execution disconnected",
+        "whatIsHappening": "XRP/USDT is in a 'Range' regime with LOW volatility and trend strength 0.121. Market-state confidence 1.00 is DATA COVERAGE, not a forecast",
+        "why": "funding (neutral): funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way; market (supports_long): Structure (+3.00) BOS at 1.5145 continuing the UP trend; news (supports_short): 21 of 40 headline(s) in the last 24h mention XRP or the wider market; orderflow (supports_short): taker flow over the last 200 trade(s): buy 9,745,851 vs sell 116,639,029 (quote ccy); liquidity (constraint, 0.07): spread 0.66 bps at mid 1.51495; portfolio (constraint, 0.00): 0 open position(s) on the paper book; risk (constraint, 0.00): no governance block active (not paused, stopped or observing)",
+        "whatCouldHappenNext": "this trade resolves at one of two computed levels: target 1.4880685 (-1.79%) or stop 1.5287657 (+0.90%). Risk/reward is 1:2.0 by construction (2.5x ATR stop, 5.0x ATR target). Neither level is a prediction \u2014 no probability is attached to either outcome here",
+        "evidenceFor": [
+          "RSI 63.3 is not at an extreme against this side",
+          "regime is Range, in which Range is eligible"
+        ],
+        "evidenceAgainst": [
+          "15m trend is Bullish",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.12",
+          "panel: liquidity (constraint, concern 0.07)"
+        ],
+        "probability": null,
+        "downside": "the stop is 0.90% from entry, so the loss on a stop-out is 0.90% of notional before fees and slippage (stop derived from ATR 0.0054262955). The DOLLAR downside cannot be stated here because position size is set by the Risk Gateway, not by this node; a figure computed against an assumed size would be fiction. Slippage beyond the stop is not bounded either: the stop is enforced by the position monitor while the process runs, not by a resting exchange order",
+        "portfolioImpact": "the paper book holds 0 open position(s); equity $2.00; none in XRP, so this would be a new exposure; correlation clustering was not run this run (owned by the CIO agent) and drawdown from high-water mark is not available here (owned by the CEO agent), so neither is reflected in this assessment; the change in exposure cannot be quantified until the Risk Gateway sets a size",
+        "tradeWaitOrExit": "DO NOT TRADE \u2014 panel says NEUTRAL, setup says SHORT."
+      },
+      "risk": {
+        "approved": false,
+        "rejectionReasons": [
+          "nothing to validate: the Supervisor decided DO_NOT_TRADE, not TRADE or EXIT"
+        ],
+        "cautionNotes": [],
+        "checks": {
+          "NotApplicable": {
+            "status": "pass",
+            "detail": "DO_NOT_TRADE requires no risk validation and no execution plan."
+          }
+        },
+        "stopLoss": null,
+        "takeProfit": null
+      },
+      "executionPlan": null,
+      "coverageMeaning": "fraction of the panel's weight that could be measured. Three of seven specialists (orderflow, liquidity, news) have no data feed in this system, so directional coverage is capped at market+funding = 4.0 of 7.0 panel weight today. Confidence is scaled by this, so it can never reach 1.0 while those feeds are missing. With POLYMARKET_ENABLED the SUPPLEMENTARY prediction specialist widens the denominator to 8.0 only when it has a signal or failed trying \u2014 when no market resolves to the symbol it leaves the denominator at 7.0, so an inapplicable source costs nothing",
+      "constraintMeaning": "a further reduction applied by the single BINDING constraint (liquidity, portfolio or risk), not a product of all three. Low confidence from coverage means 'we could not see enough'; low confidence from a constraint means 'we saw plenty and it says do not'",
+      "debateMeaning": "deterministic weighted aggregation of the specialist findings, not a model call \u2014 identical findings always produce an identical verdict, which is what makes a past decision auditable and this graph backtestable",
+      "directionalMeaning": "two confidence numbers, because two different questions read them. `confidence` is constraint-dampened and gates OPENING a position. `directionalConfidence` is coverage-scaled only and gates CLOSING one, because a constraint against taking on new risk must never suppress a signal to shed risk \u2014 an emergency stop drives `confidence` to 0.0, and gating an exit on that made closing impossible exactly when it mattered most (CLAUDE.md invariant 4)",
+      "probabilityMeaning": "P(direction correct), populated ONLY when this system has at least 20 resolved trades to measure its own hit rate from. null means unmeasurable, not zero. Panel confidence is NOT a probability \u2014 it measures how much of the panel agreed, not how often such agreement has been right, and reporting it here would be the most persuasive fabrication available to this system",
+      "sizingMeaning": "`decision.size` and `decision.leverage` are always null: the Supervisor decides, it does not size. Size lives on `executionPlan`, set by the Risk Gateway, which is the only place in the reasoning layer that sizes \u2014 so there is exactly one answer to who decided how big this was",
+      "riskMeaning": "spec Section 11's nine deterministic checks. Nothing here consults a model: an LLM can recommend, code enforces. A check reporting 'unavailable' did NOT pass \u2014 it could not run, and inside the graph that rejects (strict mode), because the graph has every input so a missing one is a bug rather than a limitation",
+      "exitMeaning": "an EXIT decision is approved WITHOUT any risk check (the `CloseBypass` check records this). CLAUDE.md invariant 4: a close is never blocked \u2014 not by pause, emergency stop, a breached limit or a veto \u2014 and it is most important not to block one precisely when a limit has already been breached, which is when a gateway would otherwise refuse",
+      "executionMeaning": "the execution plan is INERT: a dataclass, not an event and not a call. Producing one is not placing an order \u2014 a separate deterministic service converts an approved plan into a TAR, and components/Supervisor.tsx's reviewAndExecute() remains the single execution path for every AI-originated trade. No module under graphs/ can import an order call at all",
+      "traceOutcome": "completed"
+    }
+  },
+  {
+    "cycle": 2,
+    "symbol": "SOL/USDT",
+    "elapsed_seconds": 16.093,
+    "result": {
+      "ok": true,
+      "runId": "c18d0fab2e574a75811e64e24ddb6055",
+      "threadId": "trade_analysis:SOL/USDT-manual-c18d0fab",
+      "symbol": "SOL/USDT",
+      "regime": "Range",
+      "volatility": "LOW",
+      "liquidity": "LOW",
+      "trend_strength": 0.163,
+      "confidence": 1.0,
+      "trend": "Bullish",
+      "multiTimeframeTrend": "Bullish",
+      "atr": 0.3786918351700379,
+      "rsi": 68.66197183098541,
+      "support": 120.58,
+      "resistance": null,
+      "riskLevel": "normal",
+      "price": 121.32,
+      "candlesUsed": 119,
+      "nodesVisited": [
+        "memory_loader",
+        "data_validation",
+        "feature_generation",
+        "market_analysis",
+        "regime_detection",
+        "volatility_analysis",
+        "market_state",
+        "strategy_candidates",
+        "strategy_scoring",
+        "opportunity_detection",
+        "specialist_funding",
+        "specialist_liquidity",
+        "specialist_market",
+        "specialist_news",
+        "specialist_orderflow",
+        "specialist_portfolio",
+        "specialist_risk",
+        "debate",
+        "supervisor",
+        "risk_gateway",
+        "external_consultation",
+        "trade_thesis_narrative"
+      ],
+      "unavailable": [
+        "memory store risk_events: risk_events could not be read (no database pool, or the query failed) \u2014 this is NOT the same as there being no risk events",
+        "strategy scoring is using BACKTESTED priors, not realised results: no strategy has closed enough trades on this account yet. The prior is shrunk halfway toward neutral and is superseded per strategy the moment that strategy has enough real closed trades",
+        "decision probability (only 16 resolved trade(s), need 20 to measure accuracy \u2014 a probability would be a prior, not a measurement, and panel agreement is not a hit rate)"
+      ],
+      "errors": [],
+      "confidenceMeaning": "fraction of regime fields that could be computed, not a forecast",
+      "liquidityMeaning": "volume-based proxy \u2014 NOT order-book depth (no depth feed subscribed)",
+      "candidates": [
+        {
+          "name": "Trend",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Choppy, range-bound price action \u2014 crossovers whipsaw and every one is a loss."
+        },
+        {
+          "name": "MeanReversion",
+          "score": 0.228,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Momentum",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Low-volatility drift, where MACD crossovers are noise."
+        },
+        {
+          "name": "Scalping",
+          "score": 0.253,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Swing",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Tight consolidation with no swing amplitude."
+        },
+        {
+          "name": "Breakout",
+          "score": 0.25,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Range",
+          "score": 0.221,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Grid",
+          "score": 0.619,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Arbitrage",
+          "score": 0.218,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VWAP",
+          "score": 0.207,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VolatilityBreakout",
+          "score": 0.234,
+          "eligible": true,
+          "gatedOutReason": null
+        }
+      ],
+      "selectedStrategy": "Grid",
+      "selectedScore": 0.619,
+      "thesis": {
+        "direction": "SHORT",
+        "strategy": "Grid",
+        "entryPrice": 121.32,
+        "stopLoss": 122.26672958792508,
+        "takeProfit": 119.42654082414981,
+        "supportingEvidence": [
+          "RSI 68.7 is not at an extreme against this side",
+          "regime is Range, in which Grid is eligible"
+        ],
+        "contradictingEvidence": [
+          "15m trend is Bullish",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.16"
+        ],
+        "narrative": "The supervisor decided DO_NOT_TRADE because the specialist panel returned a NEUTRAL verdict with low confidence, directly opposing the SHORT grid thesis. Contradicting evidence includes a bullish 15\u2011minute trend, a bullish multi\u2011timeframe trend, and a low trend strength of 0.16, which outweigh the supporting range regime and RSI reading. The risk gateway subsequently REJECTED the setup, noting that no trade was approved by the supervisor, so no position size or leverage is assigned. Consequently, the trade will not be placed; the direction\u2019s correctness probability remains not measurable, and risk\u2011event data and strategy scoring are unavailable for this account."
+      },
+      "hasOpportunity": true,
+      "llmCallsMade": 1,
+      "llmTokensUsed": 1759,
+      "narrativeMeaning": "prose only \u2014 written by a model from the computed figures above, and structurally unable to alter them",
+      "specialists": [
+        {
+          "name": "liquidity",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.08242324335466819,
+          "evidence": [
+            "spread 0.82 bps at mid 121.325",
+            "resting size over the 47.39 bps the feed returned (50+50 levels): bid 2,992,879 vs ask 2,724,914 (quote ccy)",
+            "resting-size imbalance +0.05 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "spread concern 0.08 (0.82 bps against a 5 bps threshold)",
+            "no intended size supplied, so depth was not scored against one \u2014 guessing an order size would invent the number the concern is derived from",
+            "cross-check: the traded-VOLUME proxy in market_regime.liquidity reads 'LOW'. It is NOT order-book depth and cannot bound slippage or fillable size \u2014 the spread and depth above are what do"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "portfolio",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "0 open position(s) on the paper book",
+            "position notional is measured at ENTRY cost, not marked to market",
+            "equity is free cash + locked margin; unrealized P&L is not measured in this node (no per-symbol marks are fetched here)",
+            "correlated-cluster analysis not run here \u2014 owned by the CIO agent",
+            "drawdown from high-water mark not available here \u2014 owned by the CEO agent"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "risk",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "no governance block active (not paused, stopped or observing)",
+            "ATR 0.37869184 is available, so a stop can be computed",
+            "leverage ceiling is 10x on real money and 10x on paper, and is not overridable by any setting, agent or confidence level"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "funding",
+          "role": "directional",
+          "available": true,
+          "stance": "neutral",
+          "confidence": 0.0,
+          "concern": null,
+          "evidence": [
+            "funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way",
+            "Fear & Greed 73 (Greed) is mid-range \u2014 no positioning signal"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "market",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_long",
+          "confidence": 0.3885216760689414,
+          "concern": null,
+          "evidence": [
+            "Structure (+3.00) BOS at 120.48 continuing the UP trend",
+            "Momentum (+1.87) RSI 68.7 neutral band, leaning up",
+            "Trend (+0.77) price 121.35, SMA20 120.648, SMA50 120.223 (fast/slow separation +0.35% of price)"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "news",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.45,
+          "concern": null,
+          "evidence": [
+            "21 of 40 headline(s) in the last 24h mention SOL or the wider market",
+            "lexicon score: bullish 0.8 vs bearish 2.4 -> net -0.49",
+            "confidence 0.45 = |net| x volume 1.00, capped at 0.45 \u2014 this is keyword matching, not comprehension",
+            "event risk 0.06 from scheduled/announced-risk terms",
+            "headline: Binance BTC outflows hit highest since mid-2023 as whales deposit stablecoins [-0.6]",
+            "headline: Solana Foundation targets settlement in seconds with DvP launch [+0.5]",
+            "headline: Rain seeks US trust bank charter days after OCC sued over crypto charters [-0.5]",
+            "headline: Modern Treasury seeks US trust bank charter for digital asset custody [+0.3]",
+            "headline: CFTC joins SEC in proposing crypto framework after failed CLARITY vote [+0.0]",
+            "source(s) unavailable this run: CoinDesk: CoinDesk RSS: connection failed (ConnectError: [Errno 11001] getaddrinfo failed)"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "orderflow",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.5755549327093957,
+          "concern": null,
+          "evidence": [
+            "taker flow over the last 200 trade(s): buy 44,097 vs sell 943,554 (quote ccy)",
+            "aggressor imbalance -0.91 -> sellers (neutral band |0.15|)",
+            "a 200-trade window is seconds to minutes on a liquid pair \u2014 this is very short-horizon evidence and does not describe the session",
+            "spread 0.82 bps at mid 121.325",
+            "resting size over the 47.39 bps the feed returned (50+50 levels): bid 2,992,879 vs ask 2,724,914 (quote ccy)",
+            "resting-size imbalance +0.05 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "combined flow -0.58 (tape 0.65, book 0.35) at 100% leg coverage -> supports_short @ 0.58 (ceiling 0.7: a seconds-long window cannot support full conviction about an hours-long position)"
+          ],
+          "reasonUnavailable": null
+        }
+      ],
+      "panelSize": 7,
+      "panelAvailable": 7,
+      "debate": {
+        "direction": "NEUTRAL",
+        "confidence": 0.04886323930491727,
+        "participants": [
+          "funding",
+          "liquidity",
+          "market",
+          "news",
+          "orderflow",
+          "portfolio",
+          "risk"
+        ],
+        "absent": [],
+        "supporting": [],
+        "contradicting": [
+          "liquidity (constraint, concern 0.08)"
+        ],
+        "rationale": "NEUTRAL at 0.05 confidence from a net directional score of -0.05 (neutral band +/-0.15). Against: liquidity (constraint, concern 0.08). Confidence scaled to 100% directional coverage (7.0 of 7.0 panel weight). Then reduced a further 8% by the binding constraint (liquidity).",
+        "coverage": 1.0,
+        "constraintApplied": 0.08242324335466819,
+        "bindingConstraint": "liquidity",
+        "directionalConfidence": 0.05325248155103849
+      },
+      "decision": {
+        "action": "DO_NOT_TRADE",
+        "direction": null,
+        "size": null,
+        "leverage": null,
+        "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.05. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "whatHappened": "manual: Read-only continuous audit; isolated 2 USDT paper book; execution disconnected",
+        "whatIsHappening": "SOL/USDT is in a 'Range' regime with LOW volatility and trend strength 0.163. Market-state confidence 1.00 is DATA COVERAGE, not a forecast",
+        "why": "funding (neutral): funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way; market (supports_long): Structure (+3.00) BOS at 120.48 continuing the UP trend; news (supports_short): 21 of 40 headline(s) in the last 24h mention SOL or the wider market; orderflow (supports_short): taker flow over the last 200 trade(s): buy 44,097 vs sell 943,554 (quote ccy); liquidity (constraint, 0.08): spread 0.82 bps at mid 121.325; portfolio (constraint, 0.00): 0 open position(s) on the paper book; risk (constraint, 0.00): no governance block active (not paused, stopped or observing)",
+        "whatCouldHappenNext": "this trade resolves at one of two computed levels: target 119.42654 (-1.56%) or stop 122.26673 (+0.78%). Risk/reward is 1:2.0 by construction (2.5x ATR stop, 5.0x ATR target). Neither level is a prediction \u2014 no probability is attached to either outcome here",
+        "evidenceFor": [
+          "RSI 68.7 is not at an extreme against this side",
+          "regime is Range, in which Grid is eligible"
+        ],
+        "evidenceAgainst": [
+          "15m trend is Bullish",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.16",
+          "panel: liquidity (constraint, concern 0.08)"
+        ],
+        "probability": null,
+        "downside": "the stop is 0.78% from entry, so the loss on a stop-out is 0.78% of notional before fees and slippage (stop derived from ATR 0.37869184). The DOLLAR downside cannot be stated here because position size is set by the Risk Gateway, not by this node; a figure computed against an assumed size would be fiction. Slippage beyond the stop is not bounded either: the stop is enforced by the position monitor while the process runs, not by a resting exchange order",
+        "portfolioImpact": "the paper book holds 0 open position(s); equity $2.00; none in SOL, so this would be a new exposure; correlation clustering was not run this run (owned by the CIO agent) and drawdown from high-water mark is not available here (owned by the CEO agent), so neither is reflected in this assessment; the change in exposure cannot be quantified until the Risk Gateway sets a size",
+        "tradeWaitOrExit": "DO NOT TRADE \u2014 panel says NEUTRAL, setup says SHORT."
+      },
+      "risk": {
+        "approved": false,
+        "rejectionReasons": [
+          "nothing to validate: the Supervisor decided DO_NOT_TRADE, not TRADE or EXIT"
+        ],
+        "cautionNotes": [],
+        "checks": {
+          "NotApplicable": {
+            "status": "pass",
+            "detail": "DO_NOT_TRADE requires no risk validation and no execution plan."
+          }
+        },
+        "stopLoss": null,
+        "takeProfit": null
+      },
+      "executionPlan": null,
+      "coverageMeaning": "fraction of the panel's weight that could be measured. Three of seven specialists (orderflow, liquidity, news) have no data feed in this system, so directional coverage is capped at market+funding = 4.0 of 7.0 panel weight today. Confidence is scaled by this, so it can never reach 1.0 while those feeds are missing. With POLYMARKET_ENABLED the SUPPLEMENTARY prediction specialist widens the denominator to 8.0 only when it has a signal or failed trying \u2014 when no market resolves to the symbol it leaves the denominator at 7.0, so an inapplicable source costs nothing",
+      "constraintMeaning": "a further reduction applied by the single BINDING constraint (liquidity, portfolio or risk), not a product of all three. Low confidence from coverage means 'we could not see enough'; low confidence from a constraint means 'we saw plenty and it says do not'",
+      "debateMeaning": "deterministic weighted aggregation of the specialist findings, not a model call \u2014 identical findings always produce an identical verdict, which is what makes a past decision auditable and this graph backtestable",
+      "directionalMeaning": "two confidence numbers, because two different questions read them. `confidence` is constraint-dampened and gates OPENING a position. `directionalConfidence` is coverage-scaled only and gates CLOSING one, because a constraint against taking on new risk must never suppress a signal to shed risk \u2014 an emergency stop drives `confidence` to 0.0, and gating an exit on that made closing impossible exactly when it mattered most (CLAUDE.md invariant 4)",
+      "probabilityMeaning": "P(direction correct), populated ONLY when this system has at least 20 resolved trades to measure its own hit rate from. null means unmeasurable, not zero. Panel confidence is NOT a probability \u2014 it measures how much of the panel agreed, not how often such agreement has been right, and reporting it here would be the most persuasive fabrication available to this system",
+      "sizingMeaning": "`decision.size` and `decision.leverage` are always null: the Supervisor decides, it does not size. Size lives on `executionPlan`, set by the Risk Gateway, which is the only place in the reasoning layer that sizes \u2014 so there is exactly one answer to who decided how big this was",
+      "riskMeaning": "spec Section 11's nine deterministic checks. Nothing here consults a model: an LLM can recommend, code enforces. A check reporting 'unavailable' did NOT pass \u2014 it could not run, and inside the graph that rejects (strict mode), because the graph has every input so a missing one is a bug rather than a limitation",
+      "exitMeaning": "an EXIT decision is approved WITHOUT any risk check (the `CloseBypass` check records this). CLAUDE.md invariant 4: a close is never blocked \u2014 not by pause, emergency stop, a breached limit or a veto \u2014 and it is most important not to block one precisely when a limit has already been breached, which is when a gateway would otherwise refuse",
+      "executionMeaning": "the execution plan is INERT: a dataclass, not an event and not a call. Producing one is not placing an order \u2014 a separate deterministic service converts an approved plan into a TAR, and components/Supervisor.tsx's reviewAndExecute() remains the single execution path for every AI-originated trade. No module under graphs/ can import an order call at all",
+      "traceOutcome": "completed"
+    }
+  },
+  {
+    "cycle": 3,
+    "symbol": "ETH/USDT",
+    "elapsed_seconds": 6.463,
+    "result": {
+      "ok": true,
+      "runId": "5c97caf48aff4a56a3f674a5502f77aa",
+      "threadId": "trade_analysis:ETH/USDT-manual-5c97caf4",
+      "symbol": "ETH/USDT",
+      "regime": "Range",
+      "volatility": "LOW",
+      "liquidity": "MEDIUM",
+      "trend_strength": 0.031,
+      "confidence": 1.0,
+      "trend": "Ranging",
+      "multiTimeframeTrend": "Bullish",
+      "atr": 6.664000848911308,
+      "rsi": 50.687489390595786,
+      "support": 2707.86,
+      "resistance": 2715.71,
+      "riskLevel": "normal",
+      "price": 2714.18,
+      "candlesUsed": 119,
+      "nodesVisited": [
+        "memory_loader",
+        "data_validation",
+        "feature_generation",
+        "market_analysis",
+        "regime_detection",
+        "volatility_analysis",
+        "market_state",
+        "strategy_candidates",
+        "strategy_scoring"
+      ],
+      "unavailable": [
+        "memory store risk_events: risk_events could not be read (no database pool, or the query failed) \u2014 this is NOT the same as there being no risk events",
+        "strategy scoring is using BACKTESTED priors, not realised results: no strategy has closed enough trades on this account yet. The prior is shrunk halfway toward neutral and is superseded per strategy the moment that strategy has enough real closed trades",
+        "strategy selection (best score 0.25 for Scalping is below the 0.35 minimum \u2014 no setup worth proposing)"
+      ],
+      "errors": [],
+      "confidenceMeaning": "fraction of regime fields that could be computed, not a forecast",
+      "liquidityMeaning": "volume-based proxy \u2014 NOT order-book depth (no depth feed subscribed)",
+      "candidates": [
+        {
+          "name": "Trend",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Choppy, range-bound price action \u2014 crossovers whipsaw and every one is a loss."
+        },
+        {
+          "name": "MeanReversion",
+          "score": 0.228,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Momentum",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Low-volatility drift, where MACD crossovers are noise."
+        },
+        {
+          "name": "Scalping",
+          "score": 0.253,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Swing",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Tight consolidation with no swing amplitude."
+        },
+        {
+          "name": "Breakout",
+          "score": 0.25,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Range",
+          "score": 0.221,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Grid",
+          "score": 0.219,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Arbitrage",
+          "score": 0.218,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VWAP",
+          "score": 0.207,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VolatilityBreakout",
+          "score": 0.234,
+          "eligible": true,
+          "gatedOutReason": null
+        }
+      ],
+      "selectedStrategy": null,
+      "selectedScore": null,
+      "thesis": null,
+      "hasOpportunity": false,
+      "llmCallsMade": 0,
+      "llmTokensUsed": 0,
+      "narrativeMeaning": "prose only \u2014 written by a model from the computed figures above, and structurally unable to alter them",
+      "specialists": [],
+      "panelSize": 0,
+      "panelAvailable": 0,
+      "debate": null,
+      "decision": null,
+      "risk": null,
+      "executionPlan": null,
+      "coverageMeaning": "fraction of the panel's weight that could be measured. Three of seven specialists (orderflow, liquidity, news) have no data feed in this system, so directional coverage is capped at market+funding = 4.0 of 7.0 panel weight today. Confidence is scaled by this, so it can never reach 1.0 while those feeds are missing. With POLYMARKET_ENABLED the SUPPLEMENTARY prediction specialist widens the denominator to 8.0 only when it has a signal or failed trying \u2014 when no market resolves to the symbol it leaves the denominator at 7.0, so an inapplicable source costs nothing",
+      "constraintMeaning": "a further reduction applied by the single BINDING constraint (liquidity, portfolio or risk), not a product of all three. Low confidence from coverage means 'we could not see enough'; low confidence from a constraint means 'we saw plenty and it says do not'",
+      "debateMeaning": "deterministic weighted aggregation of the specialist findings, not a model call \u2014 identical findings always produce an identical verdict, which is what makes a past decision auditable and this graph backtestable",
+      "directionalMeaning": "two confidence numbers, because two different questions read them. `confidence` is constraint-dampened and gates OPENING a position. `directionalConfidence` is coverage-scaled only and gates CLOSING one, because a constraint against taking on new risk must never suppress a signal to shed risk \u2014 an emergency stop drives `confidence` to 0.0, and gating an exit on that made closing impossible exactly when it mattered most (CLAUDE.md invariant 4)",
+      "probabilityMeaning": "P(direction correct), populated ONLY when this system has at least 20 resolved trades to measure its own hit rate from. null means unmeasurable, not zero. Panel confidence is NOT a probability \u2014 it measures how much of the panel agreed, not how often such agreement has been right, and reporting it here would be the most persuasive fabrication available to this system",
+      "sizingMeaning": "`decision.size` and `decision.leverage` are always null: the Supervisor decides, it does not size. Size lives on `executionPlan`, set by the Risk Gateway, which is the only place in the reasoning layer that sizes \u2014 so there is exactly one answer to who decided how big this was",
+      "riskMeaning": "spec Section 11's nine deterministic checks. Nothing here consults a model: an LLM can recommend, code enforces. A check reporting 'unavailable' did NOT pass \u2014 it could not run, and inside the graph that rejects (strict mode), because the graph has every input so a missing one is a bug rather than a limitation",
+      "exitMeaning": "an EXIT decision is approved WITHOUT any risk check (the `CloseBypass` check records this). CLAUDE.md invariant 4: a close is never blocked \u2014 not by pause, emergency stop, a breached limit or a veto \u2014 and it is most important not to block one precisely when a limit has already been breached, which is when a gateway would otherwise refuse",
+      "executionMeaning": "the execution plan is INERT: a dataclass, not an event and not a call. Producing one is not placing an order \u2014 a separate deterministic service converts an approved plan into a TAR, and components/Supervisor.tsx's reviewAndExecute() remains the single execution path for every AI-originated trade. No module under graphs/ can import an order call at all",
+      "traceOutcome": "completed"
+    }
+  },
+  {
+    "cycle": 4,
+    "symbol": "XRP/USDT",
+    "elapsed_seconds": 17.793,
+    "result": {
+      "ok": true,
+      "runId": "1178a1ea95404cf9a89a462fac9cf116",
+      "threadId": "trade_analysis:XRP/USDT-manual-1178a1ea",
+      "symbol": "XRP/USDT",
+      "regime": "Range",
+      "volatility": "LOW",
+      "liquidity": "MEDIUM",
+      "trend_strength": 0.105,
+      "confidence": 1.0,
+      "trend": "Ranging",
+      "multiTimeframeTrend": "Bullish",
+      "atr": 0.005488702982782782,
+      "rsi": 52.680652680652656,
+      "support": 1.5069,
+      "resistance": null,
+      "riskLevel": "normal",
+      "price": 1.515,
+      "candlesUsed": 119,
+      "nodesVisited": [
+        "memory_loader",
+        "data_validation",
+        "feature_generation",
+        "market_analysis",
+        "regime_detection",
+        "volatility_analysis",
+        "market_state",
+        "strategy_candidates",
+        "strategy_scoring",
+        "opportunity_detection",
+        "specialist_funding",
+        "specialist_liquidity",
+        "specialist_market",
+        "specialist_news",
+        "specialist_orderflow",
+        "specialist_portfolio",
+        "specialist_risk",
+        "debate",
+        "supervisor",
+        "risk_gateway",
+        "external_consultation",
+        "trade_thesis_narrative"
+      ],
+      "unavailable": [
+        "memory store risk_events: risk_events could not be read (no database pool, or the query failed) \u2014 this is NOT the same as there being no risk events",
+        "strategy scoring is using BACKTESTED priors, not realised results: no strategy has closed enough trades on this account yet. The prior is shrunk halfway toward neutral and is superseded per strategy the moment that strategy has enough real closed trades",
+        "decision probability (only 16 resolved trade(s), need 20 to measure accuracy \u2014 a probability would be a prior, not a measurement, and panel agreement is not a hit rate)"
+      ],
+      "errors": [],
+      "confidenceMeaning": "fraction of regime fields that could be computed, not a forecast",
+      "liquidityMeaning": "volume-based proxy \u2014 NOT order-book depth (no depth feed subscribed)",
+      "candidates": [
+        {
+          "name": "Trend",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Choppy, range-bound price action \u2014 crossovers whipsaw and every one is a loss."
+        },
+        {
+          "name": "MeanReversion",
+          "score": 0.228,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Momentum",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Low-volatility drift, where MACD crossovers are noise."
+        },
+        {
+          "name": "Scalping",
+          "score": 0.253,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Swing",
+          "score": null,
+          "eligible": false,
+          "gatedOutReason": "muted in 'Range': Tight consolidation with no swing amplitude."
+        },
+        {
+          "name": "Breakout",
+          "score": 0.25,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Range",
+          "score": 0.221,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Grid",
+          "score": 0.619,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "Arbitrage",
+          "score": 0.218,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VWAP",
+          "score": 0.207,
+          "eligible": true,
+          "gatedOutReason": null
+        },
+        {
+          "name": "VolatilityBreakout",
+          "score": 0.234,
+          "eligible": true,
+          "gatedOutReason": null
+        }
+      ],
+      "selectedStrategy": "Grid",
+      "selectedScore": 0.619,
+      "thesis": {
+        "direction": "SHORT",
+        "strategy": "Grid",
+        "entryPrice": 1.515,
+        "stopLoss": 1.528721757456957,
+        "takeProfit": 1.487556485086086,
+        "supportingEvidence": [
+          "RSI 52.7 is not at an extreme against this side",
+          "regime is Range, in which Grid is eligible"
+        ],
+        "contradictingEvidence": [
+          "15m trend is Ranging",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.10"
+        ],
+        "narrative": "The supervisor decided DO_NOT_TRADE because the specialist panel returned a NEUTRAL verdict (0.08 confidence) that disagrees with the SHORT grid thesis. Contradicting evidence includes a ranging 15\u2011minute trend, a bullish multi\u2011timeframe trend, and a low trend strength of 0.10, which outweigh the supporting points of RSI\u202f52.7 and the range regime. The Risk Gateway subsequently REJECTED the setup, citing that nothing could be validated after the supervisor\u2019s DO_NOT_TRADE decision, so no approved position size exists. Consequently, the probability of direction being correct remains NOT MEASURABLE, risk\u2011event memory and strategy scoring are unknown, and no dollar downside or exposure can be quantified until a size is set."
+      },
+      "hasOpportunity": true,
+      "llmCallsMade": 1,
+      "llmTokensUsed": 1711,
+      "narrativeMeaning": "prose only \u2014 written by a model from the computed figures above, and structurally unable to alter them",
+      "specialists": [
+        {
+          "name": "liquidity",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.1980263375028661,
+          "evidence": [
+            "spread 1.98 bps at mid 1.51495",
+            "resting size over the 73.60 bps the feed returned (50+50 levels): bid 164,749,068 vs ask 91,524,121 (quote ccy)",
+            "resting-size imbalance +0.29 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "spread concern 0.20 (1.98 bps against a 5 bps threshold)",
+            "no intended size supplied, so depth was not scored against one \u2014 guessing an order size would invent the number the concern is derived from",
+            "cross-check: the traded-VOLUME proxy in market_regime.liquidity reads 'MEDIUM'. It is NOT order-book depth and cannot bound slippage or fillable size \u2014 the spread and depth above are what do"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "portfolio",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "0 open position(s) on the paper book",
+            "position notional is measured at ENTRY cost, not marked to market",
+            "equity is free cash + locked margin; unrealized P&L is not measured in this node (no per-symbol marks are fetched here)",
+            "correlated-cluster analysis not run here \u2014 owned by the CIO agent",
+            "drawdown from high-water mark not available here \u2014 owned by the CEO agent"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "risk",
+          "role": "constraint",
+          "available": true,
+          "stance": null,
+          "confidence": null,
+          "concern": 0.0,
+          "evidence": [
+            "no governance block active (not paused, stopped or observing)",
+            "ATR 0.005488703 is available, so a stop can be computed",
+            "leverage ceiling is 10x on real money and 10x on paper, and is not overridable by any setting, agent or confidence level"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "funding",
+          "role": "directional",
+          "available": true,
+          "stance": "neutral",
+          "confidence": 0.0,
+          "concern": null,
+          "evidence": [
+            "funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way",
+            "Fear & Greed 73 (Greed) is mid-range \u2014 no positioning signal"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "market",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_long",
+          "confidence": 0.26852779814392275,
+          "concern": null,
+          "evidence": [
+            "Structure (+3.00) BOS at 1.5145 continuing the UP trend",
+            "Trend (+0.42) price 1.515, SMA20 1.51262, SMA50 1.50855 (fast/slow separation +0.27% of price)",
+            "Momentum (+0.27) RSI 52.7 neutral band, leaning up",
+            "Volume (+0.21) RVOL 0.97x (latest vs 20-bar avg), baseline 1.14x, on a -0.41% candle, confirming a +0.17% 5-candle move"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "news",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.45,
+          "concern": null,
+          "evidence": [
+            "21 of 40 headline(s) in the last 24h mention XRP or the wider market",
+            "lexicon score: bullish 0.3 vs bearish 2.4 -> net -0.77",
+            "confidence 0.45 = |net| x volume 1.00, capped at 0.45 \u2014 this is keyword matching, not comprehension",
+            "event risk 0.06 from scheduled/announced-risk terms",
+            "headline: Binance BTC outflows hit highest since mid-2023 as whales deposit stablecoins [-0.6]",
+            "headline: Rain seeks US trust bank charter days after OCC sued over crypto charters [-0.5]",
+            "headline: Modern Treasury seeks US trust bank charter for digital asset custody [+0.3]",
+            "headline: CFTC joins SEC in proposing crypto framework after failed CLARITY vote [+0.0]",
+            "headline: Ethereum bears keep selling but ETH price stays near $2,700 as US spot ETFs record $206M in outflows [-0.6]",
+            "source(s) unavailable this run: CoinDesk: CoinDesk RSS: connection failed (ConnectError: [Errno 11001] getaddrinfo failed)"
+          ],
+          "reasonUnavailable": null
+        },
+        {
+          "name": "orderflow",
+          "role": "directional",
+          "available": true,
+          "stance": "supports_short",
+          "confidence": 0.5487615269525177,
+          "concern": null,
+          "evidence": [
+            "taker flow over the last 200 trade(s): buy 105,214 vs sell 110,829,388 (quote ccy)",
+            "aggressor imbalance -1.00 -> sellers (neutral band |0.15|)",
+            "a 200-trade window is seconds to minutes on a liquid pair \u2014 this is very short-horizon evidence and does not describe the session",
+            "spread 1.98 bps at mid 1.51495",
+            "resting size over the 73.60 bps the feed returned (50+50 levels): bid 164,749,068 vs ask 91,524,121 (quote ccy)",
+            "resting-size imbalance +0.29 (+1 all bid, -1 all ask; |0.25| neutral band)",
+            "snapshot only \u2014 visible resting size is not guaranteed fill, and one snapshot cannot distinguish real depth from orders that will be pulled",
+            "combined flow -0.55 (tape 0.65, book 0.35) at 100% leg coverage -> supports_short @ 0.55 (ceiling 0.7: a seconds-long window cannot support full conviction about an hours-long position)"
+          ],
+          "reasonUnavailable": null
+        }
+      ],
+      "panelSize": 7,
+      "panelAvailable": 7,
+      "debate": {
+        "direction": "NEUTRAL",
+        "confidence": 0.0793448563310989,
+        "participants": [
+          "funding",
+          "liquidity",
+          "market",
+          "news",
+          "orderflow",
+          "portfolio",
+          "risk"
+        ],
+        "absent": [],
+        "supporting": [],
+        "contradicting": [
+          "liquidity (constraint, concern 0.20)"
+        ],
+        "rationale": "NEUTRAL at 0.08 confidence from a net directional score of -0.10 (neutral band +/-0.15). Against: liquidity (constraint, concern 0.20). Confidence scaled to 100% directional coverage (7.0 of 7.0 panel weight). Then reduced a further 20% by the binding constraint (liquidity).",
+        "coverage": 1.0,
+        "constraintApplied": 0.1980263375028661,
+        "bindingConstraint": "liquidity",
+        "directionalConfidence": 0.09893698514242975
+      },
+      "decision": {
+        "action": "DO_NOT_TRADE",
+        "direction": null,
+        "size": null,
+        "leverage": null,
+        "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.08. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "whatHappened": "manual: Read-only continuous audit; isolated 2 USDT paper book; execution disconnected",
+        "whatIsHappening": "XRP/USDT is in a 'Range' regime with LOW volatility and trend strength 0.105. Market-state confidence 1.00 is DATA COVERAGE, not a forecast",
+        "why": "funding (neutral): funding rate +0.00003 is within the neutral band (+/-0.001) \u2014 no crowding evidence either way; market (supports_long): Structure (+3.00) BOS at 1.5145 continuing the UP trend; news (supports_short): 21 of 40 headline(s) in the last 24h mention XRP or the wider market; orderflow (supports_short): taker flow over the last 200 trade(s): buy 105,214 vs sell 110,829,388 (quote ccy); liquidity (constraint, 0.20): spread 1.98 bps at mid 1.51495; portfolio (constraint, 0.00): 0 open position(s) on the paper book; risk (constraint, 0.00): no governance block active (not paused, stopped or observing)",
+        "whatCouldHappenNext": "this trade resolves at one of two computed levels: target 1.4875565 (-1.81%) or stop 1.5287218 (+0.91%). Risk/reward is 1:2.0 by construction (2.5x ATR stop, 5.0x ATR target). Neither level is a prediction \u2014 no probability is attached to either outcome here",
+        "evidenceFor": [
+          "RSI 52.7 is not at an extreme against this side",
+          "regime is Range, in which Grid is eligible"
+        ],
+        "evidenceAgainst": [
+          "15m trend is Ranging",
+          "multi-timeframe trend is Bullish",
+          "trend strength 0.10",
+          "panel: liquidity (constraint, concern 0.20)"
+        ],
+        "probability": null,
+        "downside": "the stop is 0.91% from entry, so the loss on a stop-out is 0.91% of notional before fees and slippage (stop derived from ATR 0.005488703). The DOLLAR downside cannot be stated here because position size is set by the Risk Gateway, not by this node; a figure computed against an assumed size would be fiction. Slippage beyond the stop is not bounded either: the stop is enforced by the position monitor while the process runs, not by a resting exchange order",
+        "portfolioImpact": "the paper book holds 0 open position(s); equity $2.00; none in XRP, so this would be a new exposure; correlation clustering was not run this run (owned by the CIO agent) and drawdown from high-water mark is not available here (owned by the CEO agent), so neither is reflected in this assessment; the change in exposure cannot be quantified until the Risk Gateway sets a size",
+        "tradeWaitOrExit": "DO NOT TRADE \u2014 panel says NEUTRAL, setup says SHORT."
+      },
+      "risk": {
+        "approved": false,
+        "rejectionReasons": [
+          "nothing to validate: the Supervisor decided DO_NOT_TRADE, not TRADE or EXIT"
+        ],
+        "cautionNotes": [],
+        "checks": {
+          "NotApplicable": {
+            "status": "pass",
+            "detail": "DO_NOT_TRADE requires no risk validation and no execution plan."
+          }
+        },
+        "stopLoss": null,
+        "takeProfit": null
+      },
+      "executionPlan": null,
+      "coverageMeaning": "fraction of the panel's weight that could be measured. Three of seven specialists (orderflow, liquidity, news) have no data feed in this system, so directional coverage is capped at market+funding = 4.0 of 7.0 panel weight today. Confidence is scaled by this, so it can never reach 1.0 while those feeds are missing. With POLYMARKET_ENABLED the SUPPLEMENTARY prediction specialist widens the denominator to 8.0 only when it has a signal or failed trying \u2014 when no market resolves to the symbol it leaves the denominator at 7.0, so an inapplicable source costs nothing",
+      "constraintMeaning": "a further reduction applied by the single BINDING constraint (liquidity, portfolio or risk), not a product of all three. Low confidence from coverage means 'we could not see enough'; low confidence from a constraint means 'we saw plenty and it says do not'",
+      "debateMeaning": "deterministic weighted aggregation of the specialist findings, not a model call \u2014 identical findings always produce an identical verdict, which is what makes a past decision auditable and this graph backtestable",
+      "directionalMeaning": "two confidence numbers, because two different questions read them. `confidence` is constraint-dampened and gates OPENING a position. `directionalConfidence` is coverage-scaled only and gates CLOSING one, because a constraint against taking on new risk must never suppress a signal to shed risk \u2014 an emergency stop drives `confidence` to 0.0, and gating an exit on that made closing impossible exactly when it mattered most (CLAUDE.md invariant 4)",
+      "probabilityMeaning": "P(direction correct), populated ONLY when this system has at least 20 resolved trades to measure its own hit rate from. null means unmeasurable, not zero. Panel confidence is NOT a probability \u2014 it measures how much of the panel agreed, not how often such agreement has been right, and reporting it here would be the most persuasive fabrication available to this system",
+      "sizingMeaning": "`decision.size` and `decision.leverage` are always null: the Supervisor decides, it does not size. Size lives on `executionPlan`, set by the Risk Gateway, which is the only place in the reasoning layer that sizes \u2014 so there is exactly one answer to who decided how big this was",
+      "riskMeaning": "spec Section 11's nine deterministic checks. Nothing here consults a model: an LLM can recommend, code enforces. A check reporting 'unavailable' did NOT pass \u2014 it could not run, and inside the graph that rejects (strict mode), because the graph has every input so a missing one is a bug rather than a limitation",
+      "exitMeaning": "an EXIT decision is approved WITHOUT any risk check (the `CloseBypass` check records this). CLAUDE.md invariant 4: a close is never blocked \u2014 not by pause, emergency stop, a breached limit or a veto \u2014 and it is most important not to block one precisely when a limit has already been breached, which is when a gateway would otherwise refuse",
+      "executionMeaning": "the execution plan is INERT: a dataclass, not an event and not a call. Producing one is not placing an order \u2014 a separate deterministic service converts an approved plan into a TAR, and components/Supervisor.tsx's reviewAndExecute() remains the single execution path for every AI-originated trade. No module under graphs/ can import an order call at all",
+      "traceOutcome": "completed"
+    }
+  }
+]

@@ -93,8 +93,9 @@ async def assess_execution_quality(state: TradingState) -> Dict[str, Any]:
     reflection.realized_pnl = float(pnl) if pnl is not None else None
 
     order_id = receipt.get("orderId") or receipt.get("order_id")
+    tar_id = receipt.get("tar_id") or receipt.get("trade_id")
 
-    if not order_id:
+    if not order_id and not tar_id:
         reflection.execution_quality = "unavailable"
         reflection.execution_quality_detail = (
             "no order id on the trade receipt, so the persisted execution score "
@@ -117,8 +118,11 @@ async def assess_execution_quality(state: TradingState) -> Dict[str, Any]:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT score, slippage_bps, latency_ms, fully_filled, notes "
-                "FROM execution_quality WHERE order_id = $1",
-                str(order_id),
+                "FROM execution_quality WHERE order_id = $1 ORDER BY ts DESC LIMIT 1"
+                if order_id else
+                "SELECT score, slippage_bps, latency_ms, fully_filled, notes "
+                "FROM execution_quality WHERE tar_id = $1 ORDER BY ts DESC LIMIT 1",
+                str(order_id or tar_id),
             )
     except Exception as exc:  # noqa: BLE001
         logger.error("Execution quality lookup failed for %s: %s", order_id, exc)
@@ -165,16 +169,19 @@ def classify_outcome(state: TradingState) -> Dict[str, Any]:
 
     pnl = float(receipt.get("pnl", 0.0) or 0.0)
     won = pnl >= 0
-    strategies = receipt.get("strategies") or []
+    strategies = {str(s).replace("_", "").replace(" ", "").lower()
+                  for s in (receipt.get("strategies") or [receipt.get("strategy")]) if s}
 
     reflection.outcome = "Success" if won else "Failure"
 
     attribution: List[str] = []
     if not won:
-        if "trend" in strategies and "mean_reversion" not in strategies:
+        if "trend" in strategies and "meanreversion" not in strategies:
             attribution.append("Trend entry failed, possible mean reversion or false breakout.")
         elif "breakout" in strategies:
             attribution.append("Breakout failed, possible false breakout.")
+        if receipt.get("exit_reason") == "thesis-invalidated":
+            attribution.append("Exit followed a changed thesis; compare the exit panel with the entry evidence before attributing the loss.")
     reflection.attribution = attribution
 
     # Computed HERE, by a deterministic node, and never by the model.

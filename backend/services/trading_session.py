@@ -520,6 +520,17 @@ async def _run_session(session_id: str) -> None:
     # Continuous-trading bookkeeping. The loop polls fast but only DECIDES on the
     # decision interval while flat — or immediately after a close, so the next trade
     # starts without waiting out the interval.
+    from backend.core.message_bus import get_message_bus
+    bus = get_message_bus()
+    counted = set()
+    async def count_fill(event):
+        key = str(event.tar_id)
+        if (session.active and event.tab == tab and event.symbol in session.scan_list()
+                and event.fill_quantity > 0 and key not in counted):
+            counted.add(key)
+            session.trades_opened += 1
+    bus.subscribe("ORDER_FILLED", count_fill)
+
     last_decided_at = 0.0
     was_holding = False
 
@@ -572,16 +583,6 @@ async def _run_session(session_id: str) -> None:
             # which is `MAX_CONCURRENT_POSITIONS`' job to refuse, but refusing it
             # at the Risk Gateway costs a full 24-node run to reach a no.
             if await _any_open_position(session.scan_list(), tab):
-                if not was_holding:
-                    # THE FLAT -> HOLDING TRANSITION IS THE FILL, and it is the
-                    # only place this loop can observe one. `trades_opened` used
-                    # to be incremented when the graph PUBLISHED a plan, which
-                    # is two gates and a fill earlier: the CRO can still reject
-                    # (and rejected every plan for two days on GLOBAL_VAR_LIMIT),
-                    # and the fill itself can fail. So the session reported
-                    # trades it had never taken, and `MAX_TRADES_PER_SESSION`
-                    # expired sessions on that count.
-                    session.trades_opened += 1
                 was_holding = True
                 _note(session, "already holding a position; the monitor owns the exit. Waiting.")
                 continue
@@ -620,6 +621,7 @@ async def _run_session(session_id: str) -> None:
         logger.error("Autonomous session %s failed: %s", session.id, exc)
         _finish(session, "failed", f"the session loop raised: {type(exc).__name__}: {exc}")
     finally:
+        bus.unsubscribe("ORDER_FILLED", count_fill)
         _tasks.pop(session_id, None)
         _persist()
 

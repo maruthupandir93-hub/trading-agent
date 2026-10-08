@@ -30,6 +30,16 @@ TWAP_INTERVAL_MINUTES = 5
 LARGE_ORDER_QTY_THRESHOLD = 10.0
 
 
+class CloseFill(float):
+    """Price-compatible close receipt retaining the venue's identity and size."""
+    def __new__(cls, price, *, order_id=None, filled_qty=None, exchange=None):
+        value = super().__new__(cls, price)
+        value.order_id = order_id
+        value.filled_qty = filled_qty
+        value.exchange = exchange
+        return value
+
+
 class ExecutionAgent(BaseAgent):
     def __init__(self, simulation_mode: Optional[bool] = None):
         """The sole gateway to the exchange.
@@ -348,9 +358,8 @@ class ExecutionAgent(BaseAgent):
             # guarantee that survives only as long as nobody restructures the
             # branch is not a guarantee, so `self.simulation_mode` is spelled out.
             #
-            # A FAILURE FALLS THROUGH TO THE SIMULATED FILL. A test venue being
-            # down must not stop paper trading, and the trade row records which
-            # happened: `exchange_order_id` is set only for a real venue order.
+            # Connected demo mode must not turn a rejected/unknown venue order
+            # into a simulated success. Offline simulation remains explicit.
             from backend.services import paper_testnet
 
             mirrored = None
@@ -362,6 +371,14 @@ class ExecutionAgent(BaseAgent):
                     leverage=tar.approved_leverage,
                     client_order_id=f"pt_{tar.tar_id}"[:36],
                 )
+                if mirrored is None:
+                    logger.error("Demo entry for %s was not confirmed; no fill booked", tar.symbol)
+                    return
+
+            if (tar.tab == "paper" and self.simulation_mode
+                    and paper_testnet.enabled() and not paper_testnet.active()):
+                logger.error("Demo connection requested but unavailable; no fill booked for %s", tar.symbol)
+                return
 
             if mirrored:
                 exchange_name = f"{paper_testnet.venue_choice()}_testnet"
@@ -778,6 +795,9 @@ class ExecutionAgent(BaseAgent):
         price (invariant 6).
         """
         exit_side = "sell" if entry_side == "buy" else "buy"
+        requests = self.__dict__.setdefault("_close_request_ids", {})
+        request_key = (tab, symbol, entry_side, float(qty), reason)
+        close_id = requests.setdefault(request_key, f"close_{uuid.uuid4().hex[:28]}")
         # BY THE POSITION'S BOOK, not the global flag. A paper position closed
         # through the live branch sends a reduce-only order to MAINNET, which
         # trims the operator's REAL position in the same symbol if they hold one.
@@ -807,16 +827,29 @@ class ExecutionAgent(BaseAgent):
             # OPENS a position the other way.
             from backend.services import paper_testnet
 
+            close_order_id = None
+            close_exchange = None
+            if (tab == "paper" and self.simulation_mode and paper_testnet.enabled()
+                    and not paper_testnet.active()):
+                logger.error("Demo close unavailable for %s; keeping position tracked", symbol)
+                return None
             if tab == "paper" and self.simulation_mode and paper_testnet.active():
                 mirrored = await paper_testnet.place(
                     symbol=symbol,
                     side=exit_side,
                     qty=qty,
                     reduce_only=True,
-                    client_order_id=f"ptc_{symbol.replace('/', '')}_{reason}"[:36],
+                    client_order_id=close_id,
                 )
                 if mirrored:
                     fill_price = mirrored["price"]
+                    close_order_id = mirrored.get("order_id")
+                    close_exchange = f"{paper_testnet.venue_choice()}_testnet"
+                    qty = min(qty, float(mirrored["filled_qty"]))
+                else:
+                    # Connected mode must never invent a successful demo exit.
+                    return None
+                if mirrored:
                     logger.info(
                         "Testnet-mirrored close of %s %s %s at %s (%s) — the exchange's "
                         "price, not a modelled one.",
@@ -834,7 +867,9 @@ class ExecutionAgent(BaseAgent):
                     symbol=symbol, side=exit_side, qty=qty, price=fill_price,
                     leverage=1.0, reduce_only=True,
                 )
-            return fill_price
+            requests.pop(request_key, None)
+            return CloseFill(fill_price, order_id=close_order_id,
+                             filled_qty=qty, exchange=close_exchange)
 
         from backend.services.venue import get_venue
 
@@ -842,7 +877,7 @@ class ExecutionAgent(BaseAgent):
         # Idempotency key includes the reason so a stop-triggered close and a
         # later manual close of the same symbol are distinct orders, while a
         # retry of the SAME close reuses its key.
-        client_order_id = f"close_{symbol.replace('/', '')}_{reason}"[:36]
+        client_order_id = close_id
 
         # `reduce_only=True` IS WHAT MAKES THIS A CLOSE.
         #
@@ -915,18 +950,9 @@ class ExecutionAgent(BaseAgent):
             )
             return None
         filled = float(filled)
-        # A relative tolerance, because a venue's step size legitimately trims
-        # the last fraction and an exact-equality test would call every rounded
-        # close a partial one.
-        if filled < qty * 0.999:
-            logger.critical(
-                "PARTIAL CLOSE of %s: asked to close %.8g, the venue filled %.8g at %s. "
-                "ABOUT %.8g IS STILL OPEN and still carries risk. The position is being kept "
-                "under watch and the close will be retried on the next tick (reduce-only, so "
-                "the retry can only shrink what is actually there).",
-                symbol, qty, filled, fill, qty - filled,
-            )
+        if filled <= 0:
             return None
+        filled = min(filled, qty)
 
         # A paper-tab position can no longer reach this branch — `routes_to_venue`
         # sends every paper order to the simulated path — but the settle stays so
@@ -937,7 +963,9 @@ class ExecutionAgent(BaseAgent):
                 symbol=symbol, side=exit_side, qty=filled, price=fill,
                 leverage=1.0, reduce_only=True,
             )
-        return fill
+        requests.pop(request_key, None)
+        return CloseFill(fill, order_id=getattr(result, "order_id", None) or order.get("id"),
+                         filled_qty=filled, exchange=getattr(venue, "id", None))
 
     async def _apply_paper_fill(
         self, *, symbol: str, side: str, qty: float, price: float,

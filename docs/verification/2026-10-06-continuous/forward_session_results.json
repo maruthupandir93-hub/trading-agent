@@ -1,0 +1,62 @@
+[
+  {
+    "analysis": 1,
+    "poll_cycles": 1,
+    "symbol": "XRP/USDT",
+    "seconds": 17.624,
+    "decision": "DO_NOT_TRADE",
+    "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.04. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+    "plans_approved": 0,
+    "trades_opened": 0
+  },
+  {
+    "analysis": 2,
+    "poll_cycles": 2,
+    "symbol": "SOL/USDT",
+    "seconds": 8.345,
+    "decision": "DO_NOT_TRADE",
+    "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.02. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+    "plans_approved": 0,
+    "trades_opened": 0
+  },
+  {
+    "analysis": 3,
+    "poll_cycles": 4,
+    "symbol": "ETH/USDT",
+    "seconds": 5.715,
+    "decision": "NO_DECISION",
+    "rationale": "",
+    "plans_approved": 0,
+    "trades_opened": 0
+  },
+  {
+    "analysis": 4,
+    "poll_cycles": 6,
+    "symbol": "XRP/USDT",
+    "seconds": 9.839,
+    "decision": "DO_NOT_TRADE",
+    "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.07. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+    "plans_approved": 0,
+    "trades_opened": 0
+  },
+  {
+    "analysis": 5,
+    "poll_cycles": 8,
+    "symbol": "SOL/USDT",
+    "seconds": 12.076,
+    "decision": "DO_NOT_TRADE",
+    "rationale": "DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.00. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+    "plans_approved": 0,
+    "trades_opened": 0
+  },
+  {
+    "analysis": 6,
+    "poll_cycles": 10,
+    "symbol": "ETH/USDT",
+    "seconds": 5.862,
+    "decision": "NO_DECISION",
+    "rationale": "",
+    "plans_approved": 0,
+    "trades_opened": 0
+  }
+]

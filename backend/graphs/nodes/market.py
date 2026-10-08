@@ -41,6 +41,7 @@ those stored candles.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -115,67 +116,45 @@ async def validate_market_data(state: TradingState) -> Optional[Dict[str, Any]]:
     `state['market_data']`.
     """
     symbol = state["symbol"]
-    price = get_price(symbol)
-
     problems: List[str] = []
 
-    if price <= 0:
-        # get_price returns 0.0 for an unknown symbol. Passing that through would
-        # let downstream nodes compute percentages against zero.
-        problems.append(f"no live price for {symbol} (feed returned {price})")
-
-    candles: Dict[str, List[Dict[str, Any]]] = {}
-    for tf in TIMEFRAMES:
-        try:
-            bars = await fetch_klines(symbol, tf, limit=120)
-        except Exception as e:
-            problems.append(f"{tf} klines fetch failed: {e}")
-            continue
-
-        if not bars:
-            problems.append(f"{tf} klines returned empty")
-            continue
-
-        clean, rejected = _validate_candles(bars, tf)
-        if rejected:
-            # Recorded, not repaired. The count matters: 2 bad bars out of 120 is
-            # a different situation from 60.
-            problems.append(f"{tf}: {len(rejected)} malformed candle(s) discarded ({rejected[0]})")
-        if clean:
-            candles[tf] = clean
-
-    if not candles:
-        # Nothing usable. Return the problems and no snapshot — the graph
-        # continues and every later node reports unavailable, rather than the run
-        # aborting and losing the record of why.
-        logger.warning("Market data validation produced nothing usable for %s: %s", symbol, problems)
-        return {"unavailable": [f"market_data ({'; '.join(problems)})"]}
-
-    # Depth, tape and headlines, fetched HERE because this is the single fetch
-    # point (Section 39.4). Three specialists read them out of the snapshot and
-    # none of them touches the network, which is what keeps a replayed run
-    # reasoning over the same evidence as the original.
-    #
-    # Concurrent with each other and never fatal: `_fetch_specialist_feeds`
-    # returns whatever arrived plus a reason for whatever did not. A failure here
-    # must degrade three specialists, not fail the node that every other node
-    # depends on for candles.
-    book_bids, book_asks, tape, headlines, feed_problems = await _fetch_specialist_feeds(symbol)
-
-    # THE BENCHMARK, fetched at the single fetch point rather than by whoever
-    # needs it. Never fatal: BTC context sharpens a decision and no gate treats
-    # its absence as a reason to refuse (see `market_context.assess`).
-    benchmark_candles: Dict[str, List[Dict[str, Any]]] = {}
-    benchmark_symbol: Optional[str] = None
+    # Fetch independent timeframes and specialist feeds concurrently. All bars
+    # use the same run-start cutoff, so a candle closing mid-fetch cannot leak
+    # into some of the indicators but not others.
+    keys = [(symbol, tf) for tf in TIMEFRAMES]
     if symbol != BENCHMARK_SYMBOL:
-        benchmark_symbol = BENCHMARK_SYMBOL
-        for tf in TIMEFRAMES:
-            try:
-                bars = await fetch_klines(BENCHMARK_SYMBOL, tf, limit=120)
-                if bars:
-                    benchmark_candles[tf] = bars
-            except Exception as e:  # noqa: BLE001
-                feed_problems["benchmark"] = f"{BENCHMARK_SYMBOL} {tf} klines failed: {e}"
+        keys += [(BENCHMARK_SYMBOL, tf) for tf in TIMEFRAMES]
+    fetched = await asyncio.gather(
+        *(fetch_klines(sym, tf, limit=120) for sym, tf in keys),
+        _fetch_specialist_feeds(symbol), return_exceptions=True,
+    )
+    candles: Dict[str, List[Dict[str, Any]]] = {}
+    benchmark_candles: Dict[str, List[Dict[str, Any]]] = {}
+    benchmark_symbol = BENCHMARK_SYMBOL if symbol != BENCHMARK_SYMBOL else None
+    for (sym, tf), bars in zip(keys, fetched[:-1]):
+        if isinstance(bars, BaseException):
+            problems.append(f"{sym} {tf} klines failed: {type(bars).__name__}")
+            continue
+        clean, rejected = _validate_candles(bars or [], tf)
+        clean = _closed_candles(clean, state["started_at"])
+        if rejected:
+            problems.append(f"{sym} {tf}: {len(rejected)} malformed candles discarded")
+        if not clean:
+            problems.append(f"{sym} {tf}: no completed candles available")
+            continue
+        (candles if sym == symbol else benchmark_candles)[tf] = clean
+    # Read after I/O, including on the no-candles path so its diagnostic survives.
+    price = get_price(symbol)
+    if price <= 0:
+        problems.append(f"no live price for {symbol} (feed returned {price})")
+    if not candles:
+        return {"unavailable": [f"market_data ({'; '.join(problems)})"]}
+    feeds = fetched[-1]
+    if isinstance(feeds, BaseException):
+        book_bids, book_asks, tape, headlines = [], [], [], []
+        feed_problems = {"specialists": type(feeds).__name__}
+    else:
+        book_bids, book_asks, tape, headlines, feed_problems = feeds
 
     snapshot = MarketSnapshot(
         symbol=symbol,
@@ -265,6 +244,26 @@ async def _fetch_specialist_feeds(symbol: str):
             problems["news_partial"] = "; ".join(failed_sources)
 
     return bids, asks, tape, headlines, problems
+
+
+def _closed_candles(bars: List[Dict[str, Any]], as_of: float) -> List[Dict[str, Any]]:
+    """Filter exchange bars against the recorded run time (seconds UTC).
+
+    Production adapters include closeTime in milliseconds. Untimed historical
+    fixtures remain supported; no wall-clock reads occur during replay.
+    """
+    result = []
+    for bar in bars:
+        end = bar.get("closeTime")
+        if end is None:
+            result.append(bar)
+            continue
+        try:
+            if float(end) < as_of * 1000:
+                result.append(bar)
+        except (ValueError, TypeError):
+            continue
+    return result
 
 
 def _validate_candles(

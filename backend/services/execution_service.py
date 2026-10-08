@@ -387,8 +387,17 @@ class ExecutionService:
         if monitor is not None:
             fill = await monitor.close_tracked(
                 event.symbol, "thesis-invalidated", price=event.entry_price,
+                tab=event.tab,
             )
             closed_via_monitor = fill is not None
+            if fill is None and any(
+                p.get("tab") == event.tab
+                and str(p.get("symbol", "")).split(":")[0].upper()
+                == event.symbol.split(":")[0].upper()
+                for p in monitor.snapshot_open()
+            ):
+                receipt.reasons.append("watched close did not complete; monitor retains ownership for retry")
+                return receipt
 
         if fill is None:
             if closed_via_monitor is False and monitor is not None:
@@ -407,7 +416,8 @@ class ExecutionService:
                 reason="thesis-invalidated",
             )
 
-        if fill is None:
+        if fill is None or (getattr(fill, "filled_qty", None) is not None
+                            and fill.filled_qty < event.size - 1e-10):
             receipt.reasons.append(
                 "the execution agent could not fill the close. The position is still "
                 "open and this must be retried."

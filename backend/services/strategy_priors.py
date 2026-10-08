@@ -198,6 +198,9 @@ def load(*, force: bool = False) -> Dict[str, Any]:
             name = row.get("strategy")
             if not name:
                 continue
+            from backend.core.strategy_versions import signal_version
+            if row.get("signal_version", 1) != signal_version(name):
+                continue
             acc = pooled.setdefault(name, {"trades": 0.0, "wins": 0.0, "total_r": 0.0})
             try:
                 acc["trades"] += float(row.get("trades") or 0)

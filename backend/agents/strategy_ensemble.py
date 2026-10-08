@@ -118,9 +118,20 @@ def swing_trading_agent(klines: List[Dict[str, Any]]) -> str:
 
 def breakout_agent(klines: List[Dict[str, Any]]) -> str:
     """
-    Breakout Agent: Triggers if current price breaks the 14-period high/low.
+    Breakout on a completed candle beyond the prior 14-bar range, with
+    volume above that range's baseline. Live callers supply closed candles.
     """
     if len(klines) < 15:
+        return "HOLD"
+    try:
+        volumes = [float(k.get("volume", 0)) for k in klines[-15:]]
+        import math
+        if any(not math.isfinite(v) or v < 0 for v in volumes):
+            return "HOLD"
+        baseline = sum(volumes[:-1]) / 14
+        if baseline <= 0 or volumes[-1] <= baseline:
+            return "HOLD"
+    except (ValueError, TypeError):
         return "HOLD"
     current = klines[-1]["close"]
     highest = max([k["high"] for k in klines[-15:-1]])

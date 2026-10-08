@@ -901,9 +901,9 @@ class PositionMonitorAgent(BaseAgent):
                     INSERT INTO trades
                         (id, ts, tab, symbol, side, qty, price, pnl, origin_tag, note,
                          strategy, run_id, entry_context, fee, fee_measured, funding,
-                         mfe_r, mae_r)
+                          mfe_r, mae_r, exchange_order_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                            $17, $18)
+                            $17, $18, $19)
                     """,
                     str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, row_qty, exit_price, realized,
@@ -938,6 +938,7 @@ class PositionMonitorAgent(BaseAgent):
                     # travelled after the scale-out, which is precisely the
                     # question the partial-vs-trail decision turns on.
                     *self._excursions(pos),
+                    getattr(exit_price, "order_id", None),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -1305,7 +1306,8 @@ class PositionMonitorAgent(BaseAgent):
         return await self.persist_watch_list()
 
     async def close_tracked(
-        self, symbol: str, reason: str, price: Optional[float] = None
+        self, symbol: str, reason: str, price: Optional[float] = None,
+        tab: Optional[str] = None,
     ) -> Optional[float]:
         """Close a WATCHED position through the full close sequence. For the
         execution service's thesis-invalidated exits.
@@ -1341,7 +1343,8 @@ class PositionMonitorAgent(BaseAgent):
         base = str(symbol).split(":")[0].upper()
         pos = next(
             (p for p in self._open.values()
-             if str(p.symbol).split(":")[0].upper() == base),
+              if str(p.symbol).split(":")[0].upper() == base
+              and (tab is None or p.tab == tab)),
             None,
         )
         if pos is None:
@@ -1369,14 +1372,14 @@ class PositionMonitorAgent(BaseAgent):
             return None
 
         before = pos.tar_id in self._open
-        await self._close(pos, float(trigger), reason)
+        fill = await self._close(pos, float(trigger), reason)
         # `_close` keeps the position tracked when the fill fails, so its
         # departure from `_open` is the signal that the close completed. Reading
         # a return value would be nicer; `_close` returns None either way and is
         # called from the tick loop, where a return nobody reads is the honest
         # signature.
         if before and pos.tar_id not in self._open:
-            return float(trigger)
+            return float(fill) if fill is not None else None
         return None
 
     def snapshot_open(self) -> List[Dict[str, Any]]:
@@ -1950,6 +1953,8 @@ class PositionMonitorAgent(BaseAgent):
                 )
                 return
 
+            partial_qty = min(partial_qty, getattr(fill_price, "filled_qty", None) or partial_qty)
+
             sign = 1 if pos.side == "buy" else -1
             gross = (fill_price - pos.entry_price) * partial_qty * sign
 
@@ -1977,6 +1982,9 @@ class PositionMonitorAgent(BaseAgent):
                 rate=pos.funding_rate,
             )
             realized = gross - round_trip_fee(entry_share, exit_fee.cost) - partial_funding.cost
+            if pos.tab == "paper" and partial_funding.cost:
+                from backend.services.portfolio_store import adjust_paper_costs
+                await adjust_paper_costs(-partial_funding.cost)
 
             # Trim to the runner, and mark done so this fires only once (belt to the
             # break-even braces below).
@@ -2018,7 +2026,7 @@ class PositionMonitorAgent(BaseAgent):
             if not applied:
                 logger.info("Break-even move on %s not applied: %s", pos.symbol, why)
 
-    async def _close(self, pos: _Tracked, trigger_price: float, reason: str) -> None:
+    async def _close(self, pos: _Tracked, trigger_price: float, reason: str) -> Optional[float]:
         if self._execution is None:
             logger.critical(
                 "%s hit for %s at %s but no Execution Engine is attached — the position is "
@@ -2056,6 +2064,29 @@ class PositionMonitorAgent(BaseAgent):
                     pos.symbol, reason, trigger_price,
                 )
                 return
+
+            filled_qty = min(pos.qty, getattr(fill_price, "filled_qty", None) or pos.qty)
+            if filled_qty < pos.qty - max(1e-10, pos.qty * 1e-10):
+                share = filled_qty / pos.qty
+                fee = modelled_fee(filled_qty * float(fill_price))
+                entry_share = float(pos.entry_fee or 0.0) * share
+                funding_part = estimate_funding(
+                    side=pos.side, notional=filled_qty * pos.entry_price,
+                    opened_at=pos.opened_at, closed_at=datetime.datetime.utcnow(),
+                    rate=pos.funding_rate)
+                net = ((float(fill_price) - pos.entry_price) * filled_qty
+                       * (1 if pos.side == "buy" else -1)
+                       - entry_share - fee.cost - funding_part.cost)
+                await self._persist_closed_trade(pos, fill_price, net, reason,
+                                                qty=filled_qty, fee=fee, funding=funding_part.cost)
+                pos.qty -= filled_qty
+                pos.entry_fee = float(pos.entry_fee or 0.0) - entry_share
+                if pos.tab == "paper" and funding_part.cost:
+                    from backend.services.portfolio_store import adjust_paper_costs
+                    await adjust_paper_costs(-funding_part.cost)
+                await self.persist_watch_list()
+                # Existing reduce-only protection stays live for the remainder.
+                return None
 
             # Realized P&L from the ACTUAL fill, not the trigger price. The two
             # differ by slippage, and using the trigger would report the P&L we
@@ -2114,6 +2145,42 @@ class PositionMonitorAgent(BaseAgent):
             # And the take-profit — the other resting leg. Cancelled here for the
             # same reason and while its id is still in hand.
             await self._cancel_resting_tp(pos, f"close by {reason}")
+
+            # The venue is now flat and its protection is cancelled. Only now
+            # spend a bounded accounting read; never delay protecting an entry.
+            measured = None
+            if pos.tab == "paper" and getattr(fill_price, "exchange", None) == "binance_testnet":
+                from backend.services.demo_accounting import closed_round_trip
+                measured = await closed_round_trip(
+                    tar_id=str(pos.tar_id), symbol=pos.symbol,
+                    exit_order_id=fill_price.order_id, quantity=pos.qty,
+                    opened_at=pos.opened_at, closed_at=datetime.datetime.utcnow())
+            if pos.tab == "paper":
+                from backend.services.portfolio_store import adjust_paper_costs
+                # The paper fill already paid modelled fees, but not funding.
+                book_net = gross - fees
+                if measured:
+                    from dataclasses import replace
+                    pos.entry_fee = measured["entry_fee"]
+                    exit_fee = FeeResult(measured["exit_fee"], True, "Binance demo trade fills")
+                    fees = round_trip_fee(pos.entry_fee, exit_fee.cost)
+                    funding = replace(funding, cost=measured["funding"], measured=True,
+                                      detail="Binance demo funding income")
+                    realized = measured["realized"]
+                    try:
+                        from backend.core.db import get_db_pool
+                        pool = get_db_pool()
+                        if pool:
+                            async with pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE trades SET fee=$1, fee_measured=true WHERE "
+                                    "exchange_order_id=$2 AND symbol=$3 AND tab='paper' AND pnl IS NULL",
+                                    pos.entry_fee, measured["entry_order_id"], pos.symbol)
+                    except Exception as exc:
+                        logger.error("Entry fee reconciliation persistence failed: %s", type(exc).__name__)
+                delta = realized - book_net
+                if abs(delta) > 1e-12:
+                    await adjust_paper_costs(delta)
 
             self._open.pop(pos.tar_id, None)
             # Persisted BEFORE POSITION_CLOSED is published. A crash between the
@@ -2190,6 +2257,7 @@ class PositionMonitorAgent(BaseAgent):
                     entry_context=pos.entry_context,
                 )
             )
+            return float(fill_price)
         finally:
             self._closing.discard(pos.tar_id)
 

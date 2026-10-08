@@ -167,6 +167,11 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
     duplicates.
     """
     slug = to_binance_slug(symbol)
+    from backend.services import binance_testnet
+    demo_market = binance_testnet.demo_data_active()
+    base = binance_testnet.BASE_URL if demo_market else BINANCE_SPOT
+    prefix = "/fapi/v1" if demo_market else "/api/v3"
+    cache_key = f"{base}:{slug}"
     if not slug.isalnum():
         return Microstructure(
             symbol=symbol,
@@ -176,7 +181,7 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
 
     now = time.monotonic()
     if not force:
-        cached = _micro_cache.get(slug)
+        cached = _micro_cache.get(cache_key)
         if cached is not None and (now - cached[0]) < MICROSTRUCTURE_TTL_S:
             hit = cached[1]
             return Microstructure(
@@ -185,10 +190,10 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
                 fetched_at=hit.fetched_at, age_seconds=round(now - cached[0], 3),
             )
 
-    async with _lock_for(slug):
+    async with _lock_for(cache_key):
         # Re-checked inside the lock: whoever held it may have just refreshed.
         now = time.monotonic()
-        cached = _micro_cache.get(slug)
+        cached = _micro_cache.get(cache_key)
         if not force and cached is not None and (now - cached[0]) < MICROSTRUCTURE_TTL_S:
             hit = cached[1]
             return Microstructure(
@@ -199,11 +204,11 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
 
         depth_result, trades_result = await asyncio.gather(
             fetch_json(
-                f"{BINANCE_SPOT}/api/v3/depth?symbol={slug}&limit={DEPTH_LIMIT}",
+                f"{base}{prefix}/depth?symbol={slug}&limit={DEPTH_LIMIT}",
                 label="Binance depth (specialist)",
             ),
             fetch_json(
-                f"{BINANCE_SPOT}/api/v3/aggTrades?symbol={slug}&limit={TRADES_LIMIT}",
+                f"{base}{prefix}/aggTrades?symbol={slug}&limit={TRADES_LIMIT}",
                 label="Binance aggTrades (specialist)",
             ),
         )
@@ -240,7 +245,7 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
                 fetched_at=time.time(),
             )
 
-        _micro_cache[slug] = (time.monotonic(), result)
+        _micro_cache[cache_key] = (time.monotonic(), result)
         return result
 
 

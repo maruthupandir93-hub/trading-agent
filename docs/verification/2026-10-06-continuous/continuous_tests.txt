@@ -1,0 +1,102 @@
+........................................................................ [ 72%]
+...........................                                              [100%]
+============================== warnings summary ===============================
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[winners]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[losers]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[alternating]
+tests/test_loss_audit_regressions.py::test_partial_demo_exit_keeps_remainder_and_retries_exact_size
+tests/test_loss_audit_regressions.py::test_measured_demo_costs_reach_cash_close_and_learning
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:1264: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    opened_at=datetime.datetime.utcnow(),
+
+tests/test_continuous_audit.py: 3 warnings
+tests/test_post_trade_chain.py: 7 warnings
+tests/test_learning_pipeline.py: 8 warnings
+tests/test_loss_audit_regressions.py: 2 warnings
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\core\agent_base.py:297: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "ts": datetime.datetime.utcnow().isoformat(),
+
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[winners]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[losers]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[alternating]
+tests/test_loss_audit_regressions.py::test_partial_demo_exit_keeps_remainder_and_retries_exact_size
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:2075: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    opened_at=pos.opened_at, closed_at=datetime.datetime.utcnow(),
+
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[winners]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[losers]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[alternating]
+tests/test_post_trade_chain.py::test_price_through_the_stop_closes_the_position_automatically
+tests/test_post_trade_chain.py::test_the_close_publishes_position_closed_for_the_learning_pipeline
+tests/test_loss_audit_regressions.py::test_partial_demo_exit_keeps_remainder_and_retries_exact_size
+tests/test_loss_audit_regressions.py::test_measured_demo_costs_reach_cash_close_and_learning
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:2129: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    closed_at=datetime.datetime.utcnow(),
+
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[winners]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[losers]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[alternating]
+tests/test_post_trade_chain.py::test_price_through_the_stop_closes_the_position_automatically
+tests/test_post_trade_chain.py::test_the_close_publishes_position_closed_for_the_learning_pipeline
+tests/test_loss_audit_regressions.py::test_partial_demo_exit_keeps_remainder_and_retries_exact_size
+tests/test_loss_audit_regressions.py::test_measured_demo_costs_reach_cash_close_and_learning
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:2133: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    held = (datetime.datetime.utcnow() - pos.opened_at).total_seconds()
+
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[winners]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[losers]
+tests/test_continuous_audit.py::test_repeated_partial_close_retries_accounting_and_events[alternating]
+tests/test_loss_audit_regressions.py::test_partial_demo_exit_keeps_remainder_and_retries_exact_size
+tests/test_loss_audit_regressions.py::test_measured_demo_costs_reach_cash_close_and_learning
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:2157: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    opened_at=pos.opened_at, closed_at=datetime.datetime.utcnow())
+
+tests/test_continuous_audit.py: 3 warnings
+tests/test_post_trade_chain.py: 7 warnings
+tests/test_learning_pipeline.py: 9 warnings
+tests/test_loss_audit_regressions.py: 2 warnings
+  C:\Users\MARUTHUPANDI R\Downloads\Agent\trading-agent\.venv\Lib\site-packages\pydantic\main.py:263: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+
+tests/test_post_trade_chain.py::test_an_approved_fill_becomes_a_monitored_position
+tests/test_post_trade_chain.py::test_price_through_the_stop_closes_the_position_automatically
+tests/test_post_trade_chain.py::test_the_close_publishes_position_closed_for_the_learning_pipeline
+tests/test_post_trade_chain.py::test_open_positions_survive_a_restart
+tests/test_post_trade_chain.py::test_a_tar_approval_alone_produces_a_monitored_position
+tests/test_post_trade_chain.py::test_no_position_is_ever_recorded_unprotected_by_ordering_alone
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\position_monitor.py:1605: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    opened_at=datetime.datetime.utcnow(),
+
+tests/test_learning_pipeline.py: 16 warnings
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\services\research_store.py:133: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_learning_pipeline.py::test_human_can_set_status
+tests/test_learning_pipeline.py::test_get_active_hypotheses_returns_proposed_only
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\services\research_store.py:189: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "updatedAt": datetime.utcnow().isoformat(),
+
+tests/test_learning_pipeline.py: 11 warnings
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\services\research_store.py:220: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_learning_pipeline.py::test_recording_a_finding_answers_the_task
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\services\research_store.py:263: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "answeredAt": datetime.utcnow().isoformat(),
+
+tests/test_learning_pipeline.py::test_monitor_cycle_reports_real_state_not_a_hardcoded_position
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\workers\monitor_worker.py:79: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_learning_pipeline.py::test_curiosity_cycle_claims_no_anomaly_without_enough_data
+tests/test_learning_pipeline.py::test_curiosity_worker_only_queues_questions
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\workers\curiosity_worker.py:85: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_learning_pipeline.py::test_the_reflection_row_records_who_wrote_the_lesson
+tests/test_learning_pipeline.py::test_unknown_provenance_stays_null_rather_than_defaulting
+  C:\Users\MARUTH~1\AppData\Local\Temp\continuous-demo-audit-4ajl9qwx\backend\agents\reflection_agent.py:362: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    trade_id, datetime.datetime.utcnow(), symbol, content,
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+99 passed, 110 warnings in 12.79s

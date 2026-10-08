@@ -265,6 +265,8 @@ async def load_watch_list() -> List[Dict[str, Any]]:
                 "strategy": (r["strategy"] if "strategy" in r.keys() else None),
                 "run_id": (r["run_id"] if "run_id" in r.keys() else None),
                 "entry_context": (r["entry_context"] if "entry_context" in r.keys() else None),
+                **{field: _as_float(r[field]) if field in r.keys() else None
+                   for field in ("entry_fee", "initial_risk", "funding_rate", "worst_price")},
             }
         )
     return out

@@ -39,7 +39,9 @@ from backend.core.db import get_db_pool
 
 from backend.core.system_state import (
     is_emergency_stopped,
+    is_in_observation_mode,
     is_system_paused,
+    observation_reason,
     pause,
     resume,
     snapshot,
@@ -64,6 +66,18 @@ async def get_status() -> Dict[str, Any]:
         "status": "success",
         "isPaused": state["is_paused"],
         "emergencyStop": state["emergency_stop"],
+        # OBSERVATION MODE WAS THE ONE HALT THIS ROUTE DID NOT REPORT, and it
+        # is the one that fired. The operator's agent stopped opening positions
+        # for days while this endpoint answered `isPaused: false,
+        # emergencyStop: false` — a dashboard showing green over a halted
+        # system, which is worse than no indicator because it actively argues
+        # against looking further.
+        #
+        # `may_open_new_position()` is false for all THREE states, so a status
+        # route that names two of them is describing a different system from
+        # the one the gate reads.
+        "observationMode": is_in_observation_mode(),
+        "observationReason": observation_reason() or None,
         # Stated explicitly so a UI can't imply that a pause also blocks
         # exits — it does not, by design (CLAUDE.md invariant 4).
         "exitsAllowed": True,
@@ -488,6 +502,95 @@ async def get_trading_mode() -> Dict[str, Any]:
     }
 
 
+@router.get("/observation")
+async def get_observation() -> Dict[str, Any]:
+    """Whether the drawdown killswitch is holding the system, and on what.
+
+    Separate from `/status` so a panel can show the arithmetic — the limit, the
+    mark and the gap — rather than only a boolean. An operator who can see
+    "11.04% below a $1.95 mark against a 10% limit" can act; one who sees
+    "halted" can only guess.
+    """
+    from backend.agents.ceo_agent import (
+        DRAWDOWN_LIMIT_VAR,
+        get_ceo_agent,
+        max_drawdown_fraction,
+    )
+
+    agent = get_ceo_agent()
+    hwm = agent._high_water_mark
+    equity = agent._last_equity
+    drawdown = None
+    if hwm and equity is not None and hwm > 0:
+        drawdown = max(0.0, (hwm - equity) / hwm)
+
+    return {
+        "observationMode": is_in_observation_mode(),
+        "reason": observation_reason() or None,
+        "highWaterMark": hwm,
+        "lastEquity": equity,
+        "drawdownPct": round(drawdown * 100, 2) if drawdown is not None else None,
+        "limitPct": round(max_drawdown_fraction() * 100, 2),
+        "limitVariable": DRAWDOWN_LIMIT_VAR,
+        "note": (
+            "The limit and the per-trade risk have to be compatible. A stop-out "
+            "costs roughly leverage x stop%, so at 10x with a 2.5-ATR stop each "
+            "loss is ~2.7% of the account and FOUR in a row trip a 10% limit — "
+            "which at this system's ~36% break-even win rate happens about one "
+            "run in six. Raise the limit, or lower the leverage or the VaR "
+            "budget; they are one decision, not two."
+        ),
+    }
+
+
+@router.post("/observation/resume", dependencies=[Depends(require_write_auth)])
+async def resume_from_observation(body: Dict[str, Any] = {}) -> Dict[str, Any]:
+    """Leave observation mode and RE-ANCHOR the high-water mark.
+
+    BOTH HALVES ARE REQUIRED, AND DOING ONLY THE FIRST IS A NO-OP. The mark is
+    the month's peak, so an account that halted 11% below it is still 11% below
+    it the instant it resumes: the CEO re-evaluates on the next closed trade and
+    halts again. Equity can only climb by trading and trading is what the halt
+    forbids, so without re-anchoring the account cannot recover inside the
+    month. That is a deadlock, not a safety property.
+
+    `core/system_state.exit_observation_mode` has existed the whole time and
+    its docstring calls leaving "a deliberate acknowledgement" — but NO ROUTE
+    CALLED IT, so there was no way to make that acknowledgement short of
+    restarting the process, which clears the in-memory mark as a side effect
+    nobody documented.
+
+    Re-anchoring is the operator accepting the drawdown as the new baseline. It
+    is NOT automatic: a mark that followed equity down would never trip at all,
+    which is the failure `HWM_WINDOW` warns about.
+    """
+    from backend.agents.ceo_agent import rearm_high_water_mark
+    from backend.core.system_state import exit_observation_mode
+
+    was = is_in_observation_mode()
+    prior = observation_reason() or None
+
+    exit_observation_mode("operator acknowledgement via /api/admin/observation/resume")
+    new_mark = rearm_high_water_mark(body.get("equity") if isinstance(body, dict) else None)
+
+    logger.warning(
+        "OBSERVATION MODE CLEARED BY THE OPERATOR. Was halted: %s. Prior reason: %s. "
+        "High-water mark re-anchored to %s.", was, prior, new_mark,
+    )
+    return {
+        "ok": True,
+        "wasHalted": was,
+        "priorReason": prior,
+        "highWaterMark": new_mark,
+        "observationMode": is_in_observation_mode(),
+        "note": (
+            "Trading can resume. If the drawdown limit and your leverage are "
+            "still incompatible this will halt again within a few trades — see "
+            "GET /api/admin/observation for the arithmetic."
+        ),
+    }
+
+
 @router.post("/live-trading/enable", dependencies=[Depends(require_write_auth)])
 async def enable_live_trading(body: Dict[str, Any] = {}) -> Dict[str, Any]:
     """Enable real-money trading. Requires explicit confirmation.
@@ -833,10 +936,21 @@ async def set_testnet(req: TestnetRequest) -> Dict[str, Any]:
     project: a control that reports success while doing nothing is worse than no
     control.
 
-    Turning it OFF is never refused and never verified — an operator switching a
-    test venue off must not be blocked by that venue being unreachable.
+    Routing changes require a flat paper book so an existing demo position
+    cannot be orphaned by switching its close path to another venue or simulation.
     """
     from backend.services import paper_testnet
+
+    routing_changes = (req.enabled != paper_testnet.enabled()
+                       or (req.venue is not None and req.venue != paper_testnet.venue_choice()))
+    if routing_changes:
+        from backend.services.portfolio_store import get_portfolio
+        from backend.agents.position_monitor import get_position_monitor
+        portfolio = await get_portfolio()
+        paper_positions = ((portfolio or {}).get("paper") or {}).get("positions") or []
+        watched = get_position_monitor().snapshot_open()
+        if paper_positions or any(p.get("tab") == "paper" for p in watched):
+            raise HTTPException(status_code=409, detail="Close paper positions before changing demo routing.")
 
     # THE VENUE IS SET FIRST, because `credentials_present()` below asks the
     # CHOSEN venue. Checking Bybit's variables and then switching to Binance
@@ -873,8 +987,7 @@ async def set_testnet(req: TestnetRequest) -> Dict[str, Any]:
             # The setting STAYS ON and the failure is reported. Reverting it here
             # would hide a real, fixable problem (a revoked key, a mainnet key in
             # the testnet slot) behind a switch that silently refused to move —
-            # and the mirror already falls back to a simulated fill, so an
-            # unusable testnet costs faithfulness, never a trade.
+            # and connected mode refuses unconfirmed fills until repaired.
             logger.warning(
                 "Testnet mirror enabled but verification FAILED: %s", check.get("reason")
             )

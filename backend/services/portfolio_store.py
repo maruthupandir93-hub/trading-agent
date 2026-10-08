@@ -419,6 +419,16 @@ def book_equity(book: Dict[str, Any], marks: Dict[str, float]) -> Dict[str, Any]
     }
 
 
+async def adjust_paper_costs(delta: float) -> None:
+    """Apply a measured-versus-modelled cost correction after a confirmed fill."""
+    import math
+    if not math.isfinite(delta):
+        raise ValueError("cost adjustment must be finite")
+    book = _portfolio.setdefault("paper", {"cash": 0.0, "positions": []})
+    book["cash"] = float(book.get("cash") or 0.0) + delta
+    await _persist()
+
+
 async def apply_paper_fill(
     *,
     symbol: str,

@@ -156,11 +156,13 @@ def fee_from_order(raw: Optional[Dict[str, Any]], quote: str = "USDT") -> Option
 
     entries = []
     single = raw.get("fee")
-    if isinstance(single, dict):
-        entries.append(single)
     listed = raw.get("fees")
     if isinstance(listed, list):
         entries.extend(e for e in listed if isinstance(e, dict))
+    # CCXT may expose both a summary and its breakdown. They are alternatives,
+    # not independent charges. Prefer the detailed list when it has costs.
+    if not any(e.get("cost") is not None for e in entries) and isinstance(single, dict):
+        entries = [single]
     if not entries:
         return None
 

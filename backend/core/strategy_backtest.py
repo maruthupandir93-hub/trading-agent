@@ -121,6 +121,8 @@ class StrategyResult:
         """Without the full trade log, for a compact table."""
         d = asdict(self)
         d.pop("trade_log", None)
+        from backend.core.strategy_versions import signal_version
+        d["signal_version"] = signal_version(self.strategy)
         return d
 
 

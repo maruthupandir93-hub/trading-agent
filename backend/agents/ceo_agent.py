@@ -46,6 +46,7 @@ is currently unreliable. The CEO halts and reports what is still open; closing
 is the operator's call.
 """
 
+import os
 import datetime
 import logging
 from typing import Any, Dict, List, Optional
@@ -61,8 +62,51 @@ from backend.services.portfolio_store import get_portfolio
 
 logger = logging.getLogger(__name__)
 
-# Spec Section 18's threshold.
+# Spec Section 18's threshold, and the DEFAULT rather than the law.
+#
+# THIS LIMIT AND THE PER-TRADE RISK MUST BE COMPATIBLE, AND AT 10x THEY WERE
+# NOT. Measured on the operator's live $2.00 session:
+#
+#     average stop-out        $0.0531  = 2.66% of the account
+#     drawdown limit          10% from the monthly high-water mark
+#     losses needed to trip   3.8  -> FOUR consecutive stop-outs
+#
+# The payoff is a fixed 2:1, so break-even is a ~36% win rate, and four losses
+# in a row at that rate happens about 1 in 6 — routine variance, not a bad run.
+# The session took exactly four Breakout losses (-0.2123, -10.6%) and halted on
+# the fourth. The killswitch did its job; the job was impossible.
+#
+# A limit that is certain to fire within the first handful of trades stops
+# being a disaster brake and becomes a scheduled outage. The operator has to be
+# able to set one that matches the risk they chose, so this is read from the
+# env at CALL time — the `simulation_mode` rule, because a frozen-at-import
+# constant means the operator changes it, is told it worked, and the running
+# agent keeps halting on the old number until a restart.
 MAX_DRAWDOWN_FROM_HIGH_WATER_MARK = 0.10
+DRAWDOWN_LIMIT_VAR = "MAX_DRAWDOWN_FROM_HWM"
+
+
+def max_drawdown_fraction() -> float:
+    """The drawdown limit, as a fraction. Read at call time.
+
+    Bounded to (0, 1): a limit of 0 would halt on the first tick that is not a
+    new high, and one above 1 can never fire, so both are refused in favour of
+    the default rather than silently disabling the brake.
+    """
+    raw = (os.getenv(DRAWDOWN_LIMIT_VAR) or "").strip()
+    if not raw:
+        return MAX_DRAWDOWN_FROM_HIGH_WATER_MARK
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a number; using %.2f.",
+                       DRAWDOWN_LIMIT_VAR, raw, MAX_DRAWDOWN_FROM_HIGH_WATER_MARK)
+        return MAX_DRAWDOWN_FROM_HIGH_WATER_MARK
+    if not 0.0 < value < 1.0:
+        logger.warning("%s=%r is out of range (0,1); using %.2f.",
+                       DRAWDOWN_LIMIT_VAR, raw, MAX_DRAWDOWN_FROM_HIGH_WATER_MARK)
+        return MAX_DRAWDOWN_FROM_HIGH_WATER_MARK
+    return value
 
 # The high-water mark resets monthly per the spec ("monthly high-water mark").
 # Without a reset, a single early peak would gate the account forever; with too
@@ -236,14 +280,14 @@ class CEOAgent(BaseAgent):
             "equity": round(equity, 2),
             "highWaterMark": round(hwm, 2),
             "drawdownPct": round(drawdown * 100, 3),
-            "limitPct": MAX_DRAWDOWN_FROM_HIGH_WATER_MARK * 100,
+            "limitPct": max_drawdown_fraction() * 100,
             "period": period,
         }
 
-        if drawdown > MAX_DRAWDOWN_FROM_HIGH_WATER_MARK:
+        if drawdown > max_drawdown_fraction():
             reason = (
                 f"Equity ${equity:.2f} is {drawdown * 100:.2f}% below the {period} high-water mark "
-                f"of ${hwm:.2f}, exceeding the {MAX_DRAWDOWN_FROM_HIGH_WATER_MARK * 100:.0f}% "
+                f"of ${hwm:.2f}, exceeding the {max_drawdown_fraction() * 100:.0f}% "
                 f"drawdown limit."
             )
             already = is_in_observation_mode()
@@ -276,7 +320,7 @@ class CEOAgent(BaseAgent):
 
         rationale = (
             f"Mandate to trade upheld: drawdown {drawdown * 100:.2f}% is within the "
-            f"{MAX_DRAWDOWN_FROM_HIGH_WATER_MARK * 100:.0f}% limit "
+            f"{max_drawdown_fraction() * 100:.0f}% limit "
             f"(equity ${equity:.2f} vs HWM ${hwm:.2f})."
         )
         # Recorded even when it passes — a killswitch that only logs on the day
@@ -306,5 +350,76 @@ class CEOAgent(BaseAgent):
         ]
 
 
+def rearm_high_water_mark(equity: Optional[float] = None) -> Optional[float]:
+    """Re-anchor the high-water mark to current equity. Returns the new mark.
+
+    WITHOUT THIS, LEAVING OBSERVATION MODE IS POINTLESS. The mark is the
+    MONTH's peak, so an account that halted 11% below it is still 11% below it
+    the instant it resumes — the CEO re-evaluates on the next closed trade and
+    halts again. Equity can only climb by trading, and trading is what the halt
+    forbids, so the account cannot recover inside the month. That is a
+    DEADLOCK, not a safety property.
+
+    Re-anchoring is the operator ACCEPTING the drawdown as the new baseline,
+    which is exactly what `exit_observation_mode`'s docstring already calls "a
+    deliberate acknowledgement". It is deliberately NOT automatic: a mark that
+    followed equity down would never trip at all, which is the failure mode
+    `HWM_WINDOW`'s comment warns about one screen above.
+    """
+    agent = get_ceo_agent()
+    if equity is not None:
+        agent._high_water_mark = float(equity)
+    elif agent._last_equity is not None:
+        agent._high_water_mark = agent._last_equity
+    else:
+        return None
+    agent._hwm_period = agent._current_period()
+    logger.warning(
+        "CEO high-water mark RE-ANCHORED to %.2f by operator acknowledgement. "
+        "The previous peak is no longer the reference for the drawdown limit.",
+        agent._high_water_mark,
+    )
+    return agent._high_water_mark
+
+
+_ceo_agent: Optional[CEOAgent] = None
+
+
 def get_ceo_agent() -> CEOAgent:
-    return CEOAgent()
+    """The process-wide CEO. A SINGLETON, and it was not one.
+
+    THE SAME BUG `get_position_monitor` AND `get_execution_agent` ALREADY HAD,
+    missed on the third agent. This used to be `return CEOAgent()` — a new,
+    EMPTY agent on every call — while `main.py` builds one at startup and
+    subscribes it to the bus, and that instance is the only one accumulating
+    `_high_water_mark` and `_last_equity`.
+
+    The halt itself was never affected: the bus-subscribed instance tracked the
+    mark correctly and entered observation mode exactly as designed. What broke
+    was everything that tried to ASK about it or ACT on it from outside the bus:
+
+      * `GET /api/admin/observation` would read a fresh agent and report
+        `highWaterMark: null` — the arithmetic the operator needs, missing.
+      * `rearm_high_water_mark()` would re-anchor a THROWAWAY object and return
+        happily. The real agent would keep its old mark, re-evaluate on the next
+        closed trade and halt again — so the resume route would have looked like
+        it worked while the deadlock it exists to break stayed exactly in place.
+
+    That second one is why this is fixed here rather than worked around: a
+    control that reports success while doing nothing is the `simulation_mode`
+    failure, and this one would have been reached on the operator's first
+    attempt to recover a halted account.
+
+    `reset_ceo_agent()` exists for tests, so one test's high-water mark cannot
+    become the next one's starting peak.
+    """
+    global _ceo_agent
+    if _ceo_agent is None:
+        _ceo_agent = CEOAgent()
+    return _ceo_agent
+
+
+def reset_ceo_agent() -> None:
+    """Drop the singleton. For tests only."""
+    global _ceo_agent
+    _ceo_agent = None

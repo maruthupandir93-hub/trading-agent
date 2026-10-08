@@ -1,0 +1,78 @@
+{
+  "elapsed_seconds": 187.026,
+  "poll_seconds": 12.0,
+  "decision_interval_seconds": 30.0,
+  "execution_disconnected": true,
+  "session": {
+    "id": "isolated-forward-audit",
+    "symbol": "XRP/USDT",
+    "leverage": 1,
+    "start_equity": 2.0,
+    "target_equity": 3.0,
+    "floor_equity": 1.0,
+    "capital_fraction": 1.0,
+    "watch_symbols": [
+      "SOL/USDT",
+      "ETH/USDT"
+    ],
+    "scan_index": 0,
+    "daily_target_pct": null,
+    "day_anchor_date": null,
+    "day_anchor_equity": null,
+    "status": "stopped",
+    "started_at": 1791300900.480958,
+    "finished_at": null,
+    "stop_reason": "Bounded read-only audit completed",
+    "cycles_run": 10,
+    "analyses_run": 6,
+    "trades_opened": 0,
+    "plans_approved": 0,
+    "last_cycle_at": 1791301080.446665,
+    "last_decision": "NO_DECISION",
+    "last_rationale": "",
+    "log": [
+      {
+        "ts": 1791300931.5247533,
+        "message": "[XRP/USDT] DO_NOT_TRADE: DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.04. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "decision": "DO_NOT_TRADE",
+        "symbol": "XRP/USDT",
+        "run_id": "8e1ea1d376be4e78b4d66d49486c323f"
+      },
+      {
+        "ts": 1791300952.9641519,
+        "message": "[SOL/USDT] DO_NOT_TRADE: DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.02. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "decision": "DO_NOT_TRADE",
+        "symbol": "SOL/USDT",
+        "run_id": "ff80840bcd944630b62a50b18140a903"
+      },
+      {
+        "ts": 1791300984.1238885,
+        "message": "[ETH/USDT] NO_DECISION: ",
+        "decision": "NO_DECISION",
+        "symbol": "ETH/USDT",
+        "run_id": "8bb4af1391ba433d876561a4dd7d503d"
+      },
+      {
+        "ts": 1791301019.175536,
+        "message": "[XRP/USDT] DO_NOT_TRADE: DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.07. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "decision": "DO_NOT_TRADE",
+        "symbol": "XRP/USDT",
+        "run_id": "2981d835dc0444a2af839e7cf865c82a"
+      },
+      {
+        "ts": 1791301056.432989,
+        "message": "[SOL/USDT] DO_NOT_TRADE: DO NOT TRADE: the Grid setup is SHORT but the specialist panel reads NEUTRAL at 0.00. Acting on a setup the evidence argues against is the failure the panel exists to catch.",
+        "decision": "DO_NOT_TRADE",
+        "symbol": "SOL/USDT",
+        "run_id": "f1dc933b43024218b74f874482336bce"
+      },
+      {
+        "ts": 1791301087.5006988,
+        "message": "[ETH/USDT] NO_DECISION: ",
+        "decision": "NO_DECISION",
+        "symbol": "ETH/USDT",
+        "run_id": "782c53887e394b0e8a665c1f34678fe8"
+      }
+    ]
+  }
+}

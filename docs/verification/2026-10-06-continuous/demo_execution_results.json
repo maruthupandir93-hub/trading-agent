@@ -1,0 +1,150 @@
+{
+  "orders": [
+    {
+      "order_id": 3515979727,
+      "client_id": "dv_7b98a96c11da4f_buy",
+      "side": "BUY",
+      "reduce_only": false,
+      "status": "FILLED",
+      "filled_qty": "7.9",
+      "average_price": "1.51400",
+      "time_ms": 1791300749704,
+      "fills": [
+        {
+          "symbol": "XRPUSDT",
+          "id": 169536041,
+          "orderId": 3515979727,
+          "pair": "XRPUSDT",
+          "side": "BUY",
+          "price": "1.5140",
+          "qty": "1.4",
+          "realizedPnl": "0",
+          "quoteQty": "2.11960",
+          "commission": "0.00084784",
+          "commissionAsset": "USDT",
+          "time": 1791300749713,
+          "buyer": true,
+          "maker": false,
+          "positionSide": "BOTH",
+          "baseQty": "0",
+          "marginAsset": "USDT"
+        },
+        {
+          "symbol": "XRPUSDT",
+          "id": 169536042,
+          "orderId": 3515979727,
+          "pair": "XRPUSDT",
+          "side": "BUY",
+          "price": "1.5140",
+          "qty": "6.5",
+          "realizedPnl": "0",
+          "quoteQty": "9.84100",
+          "commission": "0.00393639",
+          "commissionAsset": "USDT",
+          "time": 1791300749713,
+          "buyer": true,
+          "maker": false,
+          "positionSide": "BOTH",
+          "baseQty": "0",
+          "marginAsset": "USDT"
+        }
+      ]
+    },
+    {
+      "order_id": 3515979744,
+      "client_id": "dv_7b98a96c11da4f_buy_close",
+      "side": "SELL",
+      "reduce_only": true,
+      "status": "FILLED",
+      "filled_qty": "7.9",
+      "average_price": "1.51380",
+      "time_ms": 1791300755843,
+      "fills": [
+        {
+          "symbol": "XRPUSDT",
+          "id": 169536065,
+          "orderId": 3515979744,
+          "pair": "XRPUSDT",
+          "side": "SELL",
+          "price": "1.5138",
+          "qty": "7.9",
+          "realizedPnl": "-0.00157999",
+          "quoteQty": "11.95902",
+          "commission": "0.00478360",
+          "commissionAsset": "USDT",
+          "time": 1791300755853,
+          "buyer": false,
+          "maker": false,
+          "positionSide": "BOTH",
+          "baseQty": "0",
+          "marginAsset": "USDT"
+        }
+      ]
+    },
+    {
+      "order_id": 3515979789,
+      "client_id": "dv_7b98a96c11da4f_sell",
+      "side": "SELL",
+      "reduce_only": false,
+      "status": "FILLED",
+      "filled_qty": "7.9",
+      "average_price": "1.51380",
+      "time_ms": 1791300764942,
+      "fills": [
+        {
+          "symbol": "XRPUSDT",
+          "id": 169536078,
+          "orderId": 3515979789,
+          "pair": "XRPUSDT",
+          "side": "SELL",
+          "price": "1.5138",
+          "qty": "7.9",
+          "realizedPnl": "0",
+          "quoteQty": "11.95902",
+          "commission": "0.00478360",
+          "commissionAsset": "USDT",
+          "time": 1791300764963,
+          "buyer": false,
+          "maker": false,
+          "positionSide": "BOTH",
+          "baseQty": "0",
+          "marginAsset": "USDT"
+        }
+      ]
+    },
+    {
+      "order_id": 3515979826,
+      "client_id": "dv_7b98a96c11da4f_sell_close",
+      "side": "BUY",
+      "reduce_only": true,
+      "status": "FILLED",
+      "filled_qty": "7.9",
+      "average_price": "1.51400",
+      "time_ms": 1791300771044,
+      "fills": [
+        {
+          "symbol": "XRPUSDT",
+          "id": 169536089,
+          "orderId": 3515979826,
+          "pair": "XRPUSDT",
+          "side": "BUY",
+          "price": "1.5140",
+          "qty": "7.9",
+          "realizedPnl": "-0.00158000",
+          "quoteQty": "11.96060",
+          "commission": "0.00478424",
+          "commissionAsset": "USDT",
+          "time": 1791300771044,
+          "buyer": true,
+          "maker": false,
+          "positionSide": "BOTH",
+          "baseQty": "0",
+          "marginAsset": "USDT"
+        }
+      ]
+    }
+  ],
+  "funding_income": [],
+  "flat": true,
+  "balance": 4999.01727999
+}

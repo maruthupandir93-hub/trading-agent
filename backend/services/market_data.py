@@ -166,7 +166,7 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:
                     "low": float(k[3]),
                     "close": float(k[4]),
                     "volume": float(k[5]),
-                    "closeTime": k[0] + 60000 # Approximation, CCXT does not return closeTime directly
+                    "closeTime": k[0] + int(client.parse_timeframe(interval) * 1000) - 1
                 })
             return klines
         except Exception as e:

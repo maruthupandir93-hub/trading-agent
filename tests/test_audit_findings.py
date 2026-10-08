@@ -147,19 +147,19 @@ def _live_close(monkeypatch, result, qty=100.0):
     (None, "an accepted order with no filled quantity reported"),
 ])
 def test_a_close_that_did_not_fill_is_not_reported_as_closed(monkeypatch, filled, label):
-    """The caller reads a non-None return as "the position is flat".
+    """Unknown or zero fills fail; partial receipts retain the executed quantity.
 
-    `position_monitor._close` deletes the watch row, cancels the resting stop and
-    take-profit, publishes POSITION_CLOSED and books a realized P&L on the
-    strength of this return. On a shortfall all of that happened while the
-    residual stayed open at the exchange with NOTHING enforcing its stop — the
-    exact failure the resting stop exists to prevent, reached by reporting
-    success.
-
-    None is the retryable answer, and `reduce_only=True` is what makes the retry
-    safe: it can only ever shrink what is actually there.
+    The monitor must retain the remainder and its protection instead of treating
+    any price as proof of a flat position. Its end-to-end partial retry is covered
+    in test_loss_audit_regressions.
     """
-    assert _live_close(monkeypatch, _Result(filled=filled)) is None, label
+    receipt = _live_close(monkeypatch, _Result(filled=filled))
+    if filled:
+        # A partial receipt carries the executed size; the monitor retains and
+        # retries the remainder (covered by test_loss_audit_regressions).
+        assert receipt.filled_qty == filled, label
+    else:
+        assert receipt is None, label
 
 
 def test_a_complete_close_still_returns_its_fill(monkeypatch):

@@ -251,6 +251,8 @@ class ReflectionAgent(BaseAgent):
 
     async def _reflect_on_close(self, event: PositionClosedEvent) -> None:
         receipt = {
+            "trade_id": str(event.trade_id),
+            "tar_id": str(event.trade_id),
             "symbol": event.symbol,
             "side": event.side,
             "pnl": event.realized_pnl,

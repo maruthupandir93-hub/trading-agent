@@ -1,66 +1,13 @@
-"""Mirror PAPER trades onto Bybit's testnet, so a paper result is a real fill.
+"""Route explicitly enabled paper trading to Binance Futures demo or Bybit testnet.
 
-WHAT THIS IS FOR
-================
-The operator's ask, in their words: *"if i enable that button the trade is extra
-add to api via testnet to execute trade in testing bybit server account ... so
-that i confidently check with real trade"*.
+The selected sandbox supplies actual fill prices, sizes and exchange order IDs.
+Binance uses the direct REST adapter with a fixed demo host; Bybit uses a sandbox
+Venue. Neither branch selects a mainnet endpoint.
 
-A simulated fill is booked at the last observed price, instantly, in full. That
-is honest bookkeeping and it is also the most flattering possible execution: no
-spread crossed, no slippage, no partial fill, no minimum size, no leverage
-rejection, no rate limit, no venue outage. Every one of those is a real cost that
-shows up on day one of real money and on none of the paper days before it.
-
-With this on, a paper entry places a REAL market order on Bybit's testnet and the
-paper book is credited with the price the exchange actually returned. The trade
-is still paper — the P&L, the equity, the win rate and every panel read the same
-local book they always did — but the FILL is no longer a model of one.
-
-WHY BYBIT TESTNET SPECIFICALLY, AND NOT A CHOICE
-================================================
-`scripts/bybit_testnet_roundtrip.py` already exists and already found three
-real-money bugs no offline test could (the spot-vs-perpetual symbol resolution,
-the Bybit stop that never reached the venue, and reconciliation comparing two
-spellings of one position). Binance's futures testnet is NOT an option: ccxt
-dropped support, which is exactly why this project's Binance order path remains
-unverified. So this hardcodes bybit and `testnet=True` rather than reading
-`EXCHANGE_ID` — a mirror that could be pointed at mainnet by a config typo is not
-a testing aid, it is a way to lose money by accident.
-
-THE FOUR SAFETY PROPERTIES, EACH ENFORCED RATHER THAN DOCUMENTED
-================================================================
-1. IT IS ONLY REACHABLE FROM THE SIMULATION BRANCH. `ExecutionAgent` consults it
-   inside `if self.simulation_mode:`, which is false whenever `LIVE_TRADING` is
-   on. Live trading and this cannot both be routing an order.
-2. IT NEVER TOUCHES MAINNET. `Venue(..., testnet=True)` reads
-   `BYBIT_TESTNET_API_KEY` / `_SECRET`, and `_credentials` never reads a mainnet
-   variable in sandbox mode. A mainnet key pasted there is REFUSED by the sandbox
-   endpoint — it fails closed.
-3. IT NEVER BLOCKS A PAPER TRADE. A testnet outage, a rejected size, an expired
-   key: the fill falls back to the simulated one and the trade still books. The
-   alternative is a paper account that stops working because a test venue is
-   down, which is a worse failure than a less faithful fill.
-4. THE FALLBACK IS VISIBLE, NEVER SILENT. `trades.exchange_order_id` is the
-   discriminator the rest of this system uses — NULL means no venue order stood
-   behind this row. A mirrored fill carries the testnet order id; a fallback
-   carries None, and the log says which and why.
-
-   THIS WAS NOT TRUE WHEN IT WAS FIRST WRITTEN, AND SAYING SO IS THE POINT.
-   `execution_agent` mints a `uuid.uuid4()` as `order_id` at the top of
-   `_execute_tar` and only REPLACES it when a venue returns its own — so the
-   column was non-NULL on every row, simulated or not, while this docstring,
-   CLAUDE.md and the Settings panel all told the operator it discriminated. It
-   is the field you reach for to answer "was this paper result real?", so a
-   documented discriminator that does not discriminate is worse than an
-   undocumented one. `_execute_tar` now tracks `venue_backed` and writes the
-   column only when a venue order genuinely stood behind the fill;
-   `tests/test_audit_findings.py` pins it.
-
-READ AT CALL TIME, like every other operator toggle here. A module-level
-`os.getenv` would be the `simulation_mode` bug again: the operator flips the
-switch, is told it worked, and the running agent keeps the old behaviour until a
-restart.
+Connected demo entry and close failures must not become simulated successes.
+The execution agent books only confirmed fills. Offline paper simulation remains
+available when the operator has not enabled demo routing. Settings are read at
+call time; callers must not change the selected venue while positions are open.
 """
 
 from __future__ import annotations
