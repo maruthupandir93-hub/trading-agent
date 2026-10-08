@@ -142,6 +142,42 @@ def get_price(symbol: str) -> float:
     # 3. The polled ccxt cache.
     return _prices.get(symbol, 0.0)
 
+_INTERVAL_UNITS_MS = {"s": 1_000, "m": 60_000, "h": 3_600_000,
+                      "d": 86_400_000, "w": 604_800_000}
+
+
+def _interval_ms(interval: str) -> int:
+    """`15m` -> 900000. A candle's duration in milliseconds.
+
+    WHY NOT `client.parse_timeframe`: that is a ccxt EXCHANGE method, and
+    `get_exchange_client()` returns this project's `ExchangeClient` WRAPPER,
+    which holds the ccxt object on `.exchange` and does not forward unknown
+    attributes. Calling it raised
+
+        'ExchangeClient' object has no attribute 'parse_timeframe'
+
+    inside the retry loop, so every fetch burned its three attempts and
+    returned [] — `scripts/run_backtests.py` reported "insufficient candles (0)"
+    for all six symbol/timeframe pairs and produced a summary with no runs.
+
+    Reaching through to `client.exchange.parse_timeframe` would work and is
+    still the wrong call here: it makes candle arithmetic depend on a live
+    exchange object, so it cannot be unit-tested offline and it fails whenever
+    the client has not connected. The duration of a timeframe is a property of
+    the STRING, so it is parsed as one.
+
+    The value this replaced was a hardcoded `k[0] + 60000` — correct for 1m and
+    wrong for every other interval, which is the bug the change was fixing.
+    """
+    text = (interval or "").strip().lower()
+    if len(text) < 2 or not text[:-1].isdigit():
+        raise ValueError(f"unrecognised candle interval {interval!r}")
+    unit = _INTERVAL_UNITS_MS.get(text[-1])
+    if unit is None:
+        raise ValueError(f"unrecognised candle interval unit in {interval!r}")
+    return int(text[:-1]) * unit
+
+
 async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:
     """
     Fetch historical klines via CCXT with exponential backoff.
@@ -166,7 +202,7 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 100) -> list:
                     "low": float(k[3]),
                     "close": float(k[4]),
                     "volume": float(k[5]),
-                    "closeTime": k[0] + int(client.parse_timeframe(interval) * 1000) - 1
+                    "closeTime": k[0] + _interval_ms(interval) - 1
                 })
             return klines
         except Exception as e:

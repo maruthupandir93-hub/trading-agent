@@ -95,6 +95,17 @@ def test_observation_mode_records_why():
 
 @pytest.mark.asyncio
 async def test_ceo_halts_when_drawdown_exceeds_the_limit(monkeypatch):
+    # THE LIMIT IS PINNED, NOT INHERITED. It became env-configurable
+    # (`MAX_DRAWDOWN_FROM_HWM`) because 10% was unreachable at 10x leverage —
+    # each stop-out cost 2.66% of the operator's account, so four losses in a
+    # row tripped it, and at a ~36% break-even win rate that is one run in six.
+    #
+    # The moment `.env` set 0.30 this test failed: a -15% drawdown no longer
+    # exceeds the limit, so it asserted a halt that correctly did not happen.
+    # It had been testing the DEFAULT while claiming to test the halt — the
+    # same shape as `test_partial_tp` inheriting PARTIAL_TP_FRACTION.
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.10")
+
     ceo = CEOAgent()
 
     equities = iter([1000.0, 1000.0, 850.0])  # peak 1000, then -15%
@@ -120,6 +131,9 @@ async def test_ceo_halts_when_drawdown_exceeds_the_limit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ceo_does_not_halt_just_below_the_limit(monkeypatch):
+    # Pinned for the same reason as the test above: "just below" is only
+    # meaningful against a known limit.
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.10")
     """Guard against an off-by-one that would halt on every small dip."""
     ceo = CEOAgent()
     equities = iter([1000.0, 1000.0 * (1 - (MAX_DRAWDOWN_FROM_HIGH_WATER_MARK - 0.005))])

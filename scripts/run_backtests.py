@@ -163,6 +163,24 @@ async def main_async(symbols: List[str], timeframes: List[str], limit: int) -> i
             "MIN_SAMPLE in strategy_performance still governs live promotion, on REAL closes.",
         ],
     }
+    # A RUN THAT MEASURED NOTHING MUST NOT BE STORED, and storing one is worse
+    # than failing. `services/strategy_priors` picks the NEWEST dated directory,
+    # so an empty summary SHADOWS the last good one and silently removes the
+    # prior from every strategy — the scorer drops back to a flat neutral 0.5
+    # with nothing anywhere saying why.
+    #
+    # Not hypothetical: on 2026-10-08 the kline fetch raised
+    # `'ExchangeClient' object has no attribute 'parse_timeframe'` inside its
+    # retry loop, every fetch returned [], all six symbol/timeframe pairs
+    # reported "insufficient candles (0)" — and this line wrote the empty
+    # result over the top anyway. The script exited 0.
+    if not runs:
+        print("\n  NOT STORED: every symbol/timeframe produced zero candles, so this")
+        print("  run measured nothing. Writing it would shadow the last good summary")
+        print("  and silently drop the prior from every strategy. Check the fetch")
+        print("  errors above — the data source failed, the strategies did not.")
+        return 1
+
     summary_path = out_dir / "summary.json"
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\n  Stored: {summary_path.relative_to(ROOT)}")

@@ -148,11 +148,21 @@ def test_a_backtest_moves_a_strategy_off_neutral_by_less_than_its_raw_rate_would
     """
     neutral = sp._neutral_equivalent_win_rate()
     data = sp.load(force=True)["strategies"]
-    grid = data.get("Grid")
-    if grid is None or not grid["usable"]:
-        pytest.skip("the stored backtest has no usable Grid row")
 
-    raw, shrunk = grid["rawWinRate"], grid["shrunkWinRate"]
+    # ANY LOSING STRATEGY, NOT A NAMED ONE. This used to pick "Grid", which was
+    # a loser in the September window and is a WINNER in the October one — the
+    # test was pinning a market regime while claiming to test the shrinkage.
+    # Eight of eleven strategies changed sign between those two runs, so a
+    # hardcoded name here is a timer, not an assertion.
+    loser = next(
+        (v for v in data.values()
+         if v["usable"] and v["rawWinRate"] < neutral),
+        None,
+    )
+    if loser is None:
+        pytest.skip("the stored backtest has no usable below-neutral strategy")
+
+    raw, shrunk = loser["rawWinRate"], loser["shrunkWinRate"]
     assert raw < shrunk < neutral, "a losing backtest must be pulled toward neutral"
     assert shrunk == pytest.approx((raw + neutral) / 2, abs=1e-3), (
         "halfway, because effective_n is capped at the same floor as the weight"
@@ -238,19 +248,33 @@ def test_the_committed_backtest_ranks_the_losing_strategies_below_neutral():
     if not data:
         pytest.skip("no backtest is committed in this checkout")
 
-    for name in ("Grid", "Range", "MeanReversion"):
-        entry = data.get(name)
-        if entry is None or not entry["usable"]:
+    # SIGN-CONSISTENCY ACROSS WHATEVER THE FILE SAYS, not a named ranking.
+    #
+    # This used to assert Grid/Range/MeanReversion below neutral and
+    # Scalping/Breakout/Momentum above — true of the September window and
+    # EXACTLY INVERTED in the October one. Eight of eleven strategies changed
+    # sign between the two runs, so the names were encoding a market regime
+    # that the file is supposed to be the authority on.
+    #
+    # The property that must hold in every regime: a strategy the backtest
+    # says LOSES must not score above neutral, and one it says WINS must not
+    # score below. If that ever breaks, the prior is arguing against its own
+    # evidence, which is the only way this feature can do harm.
+    checked = 0
+    for name, entry in data.items():
+        if not entry["usable"]:
             continue
-        assert entry["expectancyR"] < 0
-        assert entry["shrunkWinRate"] < neutral, f"{name} must score below neutral"
-
-    for name in ("Scalping", "Breakout", "Momentum"):
-        entry = data.get(name)
-        if entry is None or not entry["usable"]:
-            continue
-        assert entry["expectancyR"] > 0
-        assert entry["shrunkWinRate"] >= neutral - 1e-9, f"{name} must not be penalised"
+        checked += 1
+        if entry["expectancyR"] < 0:
+            assert entry["shrunkWinRate"] < neutral, (
+                f"{name} loses ({entry['expectancyR']:+.3f}R) but scores at or "
+                f"above neutral"
+            )
+        elif entry["expectancyR"] > 0:
+            assert entry["shrunkWinRate"] >= neutral - 1e-9, (
+                f"{name} wins ({entry['expectancyR']:+.3f}R) but is penalised"
+            )
+    assert checked >= 5, f"only {checked} usable strategies — is the file real?"
 
 
 def test_the_status_carries_the_caveats_with_the_numbers():
