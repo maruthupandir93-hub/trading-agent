@@ -234,6 +234,31 @@ class ExecutionService:
 
         if size is None:
             receipt.reasons.append(note)
+            # THIS REFUSAL WAS SILENT, AND IT KILLED 25 OF 27 APPROVED PLANS.
+            #
+            # Measured on the operator's live $1.92 session over 22.7 hours:
+            # 1,855 graph runs -> 27 plans the Risk Gateway approved -> 2 fills.
+            # The other 25 died HERE, and nothing said so: the session counter
+            # `plans_approved` incremented, `trades_opened` did not, and no log
+            # line anywhere connected the two. The operator saw an agent that
+            # "decided to trade" 27 times and traded twice.
+            #
+            # The cause is arithmetic, not a fault: at $1.92 equity the 5% VaR
+            # budget caps notional at ~$4.24 once the stop is wider than ~1.3%,
+            # and XRP's perpetual MIN_NOTIONAL is $5. Every ordinary 2.5-ATR
+            # stop produced an order the venue would refuse.
+            #
+            # Paper is quantised against the VENUE's rules on purpose — a paper
+            # fill the real venue would reject is not a rehearsal — so the fix
+            # is sizing, not an exemption. But a gate this consequential must
+            # be VISIBLE, which is the same lesson as observation mode.
+            logger.warning(
+                "PLAN REFUSED AT THE VENUE RULES for %s: %s (requested size %s, "
+                "entry %s). The Risk Gateway approved it; it died on the "
+                "instrument's minimums. Raise MAX_PORTFOLIO_VAR_FRACTION or the "
+                "account size, or this repeats on every decision.",
+                event.symbol, note, event.size, event.entry_price,
+            )
             _submitted[basis] = receipt
             return receipt
 
