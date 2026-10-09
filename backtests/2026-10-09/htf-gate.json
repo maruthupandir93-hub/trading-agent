@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-10-09T16:27:50.319359+00:00",
+  "symbols": [
+    "XRP/USDT",
+    "SOL/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "SUI/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "LTC/USDT",
+    "BNB/USDT",
+    "ETH/USDT",
+    "TRX/USDT",
+    "DOT/USDT"
+  ],
+  "timeframes": [
+    "15m",
+    "1h"
+  ],
+  "candlesPerSeries": 1500,
+  "warmupBars": 320,
+  "riskModel": {
+    "stopMult": 2.5,
+    "targetMult": 5.0
+  },
+  "all": {
+    "trades": 3539,
+    "wins": 1243,
+    "winRate": 0.3512,
+    "expectancyR": -0.0591,
+    "totalR": -208.99,
+    "standardError": 0.0232
+  },
+  "kept": {
+    "trades": 1691,
+    "wins": 623,
+    "winRate": 0.3684,
+    "expectancyR": 0.0079,
+    "totalR": 13.43,
+    "standardError": 0.0346
+  },
+  "blocked": {
+    "trades": 1848,
+    "wins": 620,
+    "winRate": 0.3355,
+    "expectancyR": -0.1204,
+    "totalR": -222.43,
+    "standardError": 0.0311
+  },
+  "byState": {
+    "aligned": {
+      "trades": 1366,
+      "wins": 499,
+      "winRate": 0.3653,
+      "expectancyR": -0.0048,
+      "totalR": -6.59,
+      "standardError": 0.0382
+    },
+    "counter_trend": {
+      "trades": 1848,
+      "wins": 620,
+      "winRate": 0.3355,
+      "expectancyR": -0.1204,
+      "totalR": -222.43,
+      "standardError": 0.0311
+    },
+    "mixed": {
+      "trades": 325,
+      "wins": 124,
+      "winRate": 0.3815,
+      "expectancyR": 0.0616,
+      "totalR": 20.03,
+      "standardError": 0.0812
+    }
+  },
+  "caveats": [
+    "Net of taker fees. No slippage, no funding.",
+    "The gate is evaluated on bars up to and INCLUDING the entry bar only.",
+    "Pools all eleven strategies; live, one is selected and the panel must also agree, so trade count is not a live frequency forecast.",
+    "This isolates ONE live filter's contribution, not the system's."
+  ]
+}

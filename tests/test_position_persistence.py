@@ -172,7 +172,7 @@ async def test_the_monitor_still_works_with_no_database(caplog):
     tar_id = uuid.uuid4()
     await agent.handle_event(
         TarApprovedEvent(
-            tar_id=tar_id, symbol="BTC/USDT", direction="long", approved_size=0.05,
+            tar_id=tar_id, symbol="BTC/USDT", direction="LONG", approved_size=0.05,
             approved_leverage=2, cro_rationale="ok", stop_loss=68_000.0,
             tab="paper", take_profit=76_000.0,
         )

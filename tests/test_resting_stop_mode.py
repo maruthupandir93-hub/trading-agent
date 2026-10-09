@@ -106,7 +106,7 @@ def monitor(bus, monkeypatch):
 def _open(monitor, entry=100.0, stop=98.0, side="buy", tab="real"):
     tar_id = uuid.uuid4()
     asyncio.run(monitor.handle_event(TarApprovedEvent(
-        tar_id=tar_id, symbol="SOL/USDT", direction="long" if side == "buy" else "short",
+        tar_id=tar_id, symbol="SOL/USDT", direction="LONG" if side == "buy" else "SHORT",
         approved_size=10.0, approved_leverage=3, cro_rationale="v",
         stop_loss=stop, take_profit=(entry + 5000) if side == "buy" else (entry - 5000),
         tab=tab,

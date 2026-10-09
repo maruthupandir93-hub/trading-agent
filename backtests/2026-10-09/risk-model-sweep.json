@@ -1,0 +1,4104 @@
+{
+  "generatedAt": "2026-10-09T16:15:36.290874+00:00",
+  "symbols": [
+    "XRP/USDT",
+    "SOL/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "SUI/USDT"
+  ],
+  "timeframes": [
+    "15m",
+    "1h"
+  ],
+  "candlesPerSeries": 1500,
+  "splitFraction": 0.6,
+  "seriesFetched": [
+    {
+      "symbol": "XRP/USDT",
+      "timeframe": "15m",
+      "candles": 1000
+    },
+    {
+      "symbol": "XRP/USDT",
+      "timeframe": "1h",
+      "candles": 1000
+    },
+    {
+      "symbol": "SOL/USDT",
+      "timeframe": "15m",
+      "candles": 1000
+    },
+    {
+      "symbol": "SOL/USDT",
+      "timeframe": "1h",
+      "candles": 1000
+    },
+    {
+      "symbol": "DOGE/USDT",
+      "timeframe": "15m",
+      "candles": 1000
+    },
+    {
+      "symbol": "DOGE/USDT",
+      "timeframe": "1h",
+      "candles": 1000
+    },
+    {
+      "symbol": "ADA/USDT",
+      "timeframe": "15m",
+      "candles": 1000
+    },
+    {
+      "symbol": "ADA/USDT",
+      "timeframe": "1h",
+      "candles": 1000
+    },
+    {
+      "symbol": "SUI/USDT",
+      "timeframe": "15m",
+      "candles": 1000
+    },
+    {
+      "symbol": "SUI/USDT",
+      "timeframe": "1h",
+      "candles": 1000
+    }
+  ],
+  "liveRiskModel": {
+    "stopMult": 2.5,
+    "targetMult": 5.0,
+    "source": "backend/core/risk_manager.py"
+  },
+  "minTradesToRank": 150,
+  "grid": {
+    "1.5x1.5": {
+      "stopMult": 1.5,
+      "ratio": 1.5,
+      "targetMult": 2.25,
+      "inSample": {
+        "trades": 3505,
+        "wins": 1334,
+        "winRate": 0.3806,
+        "expectancyR": -0.1566,
+        "grossExpectancyR": -0.0485,
+        "totalR": -548.86,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 315,
+            "wins": 111,
+            "winRate": 0.3524,
+            "expectancyR": -0.1973,
+            "grossExpectancyR": -0.119,
+            "totalR": -62.15
+          },
+          "Breakout": {
+            "trades": 255,
+            "wins": 97,
+            "winRate": 0.3804,
+            "expectancyR": -0.1648,
+            "grossExpectancyR": -0.049,
+            "totalR": -42.02
+          },
+          "Grid": {
+            "trades": 448,
+            "wins": 163,
+            "winRate": 0.3638,
+            "expectancyR": -0.2046,
+            "grossExpectancyR": -0.0904,
+            "totalR": -91.67
+          },
+          "MeanReversion": {
+            "trades": 306,
+            "wins": 119,
+            "winRate": 0.3889,
+            "expectancyR": -0.1379,
+            "grossExpectancyR": -0.0278,
+            "totalR": -42.21
+          },
+          "Momentum": {
+            "trades": 359,
+            "wins": 127,
+            "winRate": 0.3538,
+            "expectancyR": -0.2324,
+            "grossExpectancyR": -0.1156,
+            "totalR": -83.42
+          },
+          "Range": {
+            "trades": 430,
+            "wins": 154,
+            "winRate": 0.3581,
+            "expectancyR": -0.2226,
+            "grossExpectancyR": -0.1047,
+            "totalR": -95.71
+          },
+          "Scalping": {
+            "trades": 254,
+            "wins": 111,
+            "winRate": 0.437,
+            "expectancyR": -0.0247,
+            "grossExpectancyR": 0.0925,
+            "totalR": -6.27
+          },
+          "Swing": {
+            "trades": 414,
+            "wins": 169,
+            "winRate": 0.4082,
+            "expectancyR": -0.09,
+            "grossExpectancyR": 0.0205,
+            "totalR": -37.27
+          },
+          "Trend": {
+            "trades": 464,
+            "wins": 181,
+            "winRate": 0.3901,
+            "expectancyR": -0.1346,
+            "grossExpectancyR": -0.0248,
+            "totalR": -62.47
+          },
+          "VWAP": {
+            "trades": 217,
+            "wins": 85,
+            "winRate": 0.3917,
+            "expectancyR": -0.0907,
+            "grossExpectancyR": -0.0208,
+            "totalR": -19.68
+          },
+          "VolatilityBreakout": {
+            "trades": 43,
+            "wins": 17,
+            "winRate": 0.3953,
+            "expectancyR": -0.139,
+            "grossExpectancyR": -0.0116,
+            "totalR": -5.98
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 2371,
+        "wins": 952,
+        "winRate": 0.4015,
+        "expectancyR": -0.1176,
+        "grossExpectancyR": 0.0038,
+        "totalR": -278.72,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 182,
+            "wins": 83,
+            "winRate": 0.456,
+            "expectancyR": 0.0643,
+            "grossExpectancyR": 0.1401,
+            "totalR": 11.7
+          },
+          "Breakout": {
+            "trades": 191,
+            "wins": 81,
+            "winRate": 0.4241,
+            "expectancyR": -0.0775,
+            "grossExpectancyR": 0.0602,
+            "totalR": -14.8
+          },
+          "Grid": {
+            "trades": 305,
+            "wins": 117,
+            "winRate": 0.3836,
+            "expectancyR": -0.1735,
+            "grossExpectancyR": -0.041,
+            "totalR": -52.93
+          },
+          "MeanReversion": {
+            "trades": 205,
+            "wins": 79,
+            "winRate": 0.3854,
+            "expectancyR": -0.1759,
+            "grossExpectancyR": -0.0366,
+            "totalR": -36.06
+          },
+          "Momentum": {
+            "trades": 246,
+            "wins": 95,
+            "winRate": 0.3862,
+            "expectancyR": -0.1507,
+            "grossExpectancyR": -0.0345,
+            "totalR": -37.06
+          },
+          "Range": {
+            "trades": 280,
+            "wins": 113,
+            "winRate": 0.4036,
+            "expectancyR": -0.1268,
+            "grossExpectancyR": 0.0089,
+            "totalR": -35.51
+          },
+          "Scalping": {
+            "trades": 172,
+            "wins": 59,
+            "winRate": 0.343,
+            "expectancyR": -0.262,
+            "grossExpectancyR": -0.1424,
+            "totalR": -45.07
+          },
+          "Swing": {
+            "trades": 303,
+            "wins": 120,
+            "winRate": 0.396,
+            "expectancyR": -0.1379,
+            "grossExpectancyR": -0.0099,
+            "totalR": -41.78
+          },
+          "Trend": {
+            "trades": 329,
+            "wins": 130,
+            "winRate": 0.3951,
+            "expectancyR": -0.1275,
+            "grossExpectancyR": -0.0122,
+            "totalR": -41.95
+          },
+          "VWAP": {
+            "trades": 119,
+            "wins": 58,
+            "winRate": 0.4874,
+            "expectancyR": 0.1539,
+            "grossExpectancyR": 0.2185,
+            "totalR": 18.32
+          },
+          "VolatilityBreakout": {
+            "trades": 39,
+            "wins": 17,
+            "winRate": 0.4359,
+            "expectancyR": -0.0915,
+            "grossExpectancyR": 0.0897,
+            "totalR": -3.57
+          }
+        }
+      }
+    },
+    "1.5x2.0": {
+      "stopMult": 1.5,
+      "ratio": 2.0,
+      "targetMult": 3.0,
+      "inSample": {
+        "trades": 2907,
+        "wins": 978,
+        "winRate": 0.3364,
+        "expectancyR": -0.0924,
+        "grossExpectancyR": 0.0093,
+        "totalR": -268.59,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 269,
+            "wins": 92,
+            "winRate": 0.342,
+            "expectancyR": -0.0514,
+            "grossExpectancyR": 0.026,
+            "totalR": -13.83
+          },
+          "Breakout": {
+            "trades": 233,
+            "wins": 70,
+            "winRate": 0.3004,
+            "expectancyR": -0.2142,
+            "grossExpectancyR": -0.0987,
+            "totalR": -49.91
+          },
+          "Grid": {
+            "trades": 355,
+            "wins": 120,
+            "winRate": 0.338,
+            "expectancyR": -0.0886,
+            "grossExpectancyR": 0.0141,
+            "totalR": -31.45
+          },
+          "MeanReversion": {
+            "trades": 269,
+            "wins": 95,
+            "winRate": 0.3532,
+            "expectancyR": -0.0429,
+            "grossExpectancyR": 0.0595,
+            "totalR": -11.53
+          },
+          "Momentum": {
+            "trades": 302,
+            "wins": 94,
+            "winRate": 0.3113,
+            "expectancyR": -0.1763,
+            "grossExpectancyR": -0.0662,
+            "totalR": -53.24
+          },
+          "Range": {
+            "trades": 346,
+            "wins": 111,
+            "winRate": 0.3208,
+            "expectancyR": -0.1434,
+            "grossExpectancyR": -0.0376,
+            "totalR": -49.61
+          },
+          "Scalping": {
+            "trades": 221,
+            "wins": 86,
+            "winRate": 0.3891,
+            "expectancyR": 0.0609,
+            "grossExpectancyR": 0.1674,
+            "totalR": 13.46
+          },
+          "Swing": {
+            "trades": 299,
+            "wins": 103,
+            "winRate": 0.3445,
+            "expectancyR": -0.0745,
+            "grossExpectancyR": 0.0334,
+            "totalR": -22.27
+          },
+          "Trend": {
+            "trades": 374,
+            "wins": 122,
+            "winRate": 0.3262,
+            "expectancyR": -0.1264,
+            "grossExpectancyR": -0.0214,
+            "totalR": -47.27
+          },
+          "VWAP": {
+            "trades": 198,
+            "wins": 71,
+            "winRate": 0.3586,
+            "expectancyR": 0.0068,
+            "grossExpectancyR": 0.0758,
+            "totalR": 1.34
+          },
+          "VolatilityBreakout": {
+            "trades": 41,
+            "wins": 14,
+            "winRate": 0.3415,
+            "expectancyR": -0.1047,
+            "grossExpectancyR": 0.0244,
+            "totalR": -4.29
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1977,
+        "wins": 701,
+        "winRate": 0.3546,
+        "expectancyR": -0.0592,
+        "grossExpectancyR": 0.0637,
+        "totalR": -117.07,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 145,
+            "wins": 56,
+            "winRate": 0.3862,
+            "expectancyR": 0.0827,
+            "grossExpectancyR": 0.1586,
+            "totalR": 11.99
+          },
+          "Breakout": {
+            "trades": 171,
+            "wins": 70,
+            "winRate": 0.4094,
+            "expectancyR": 0.0859,
+            "grossExpectancyR": 0.2281,
+            "totalR": 14.68
+          },
+          "Grid": {
+            "trades": 238,
+            "wins": 85,
+            "winRate": 0.3571,
+            "expectancyR": -0.0653,
+            "grossExpectancyR": 0.0714,
+            "totalR": -15.53
+          },
+          "MeanReversion": {
+            "trades": 177,
+            "wins": 64,
+            "winRate": 0.3616,
+            "expectancyR": -0.0552,
+            "grossExpectancyR": 0.0847,
+            "totalR": -9.78
+          },
+          "Momentum": {
+            "trades": 201,
+            "wins": 70,
+            "winRate": 0.3483,
+            "expectancyR": -0.0761,
+            "grossExpectancyR": 0.0448,
+            "totalR": -15.29
+          },
+          "Range": {
+            "trades": 233,
+            "wins": 82,
+            "winRate": 0.3519,
+            "expectancyR": -0.0842,
+            "grossExpectancyR": 0.0558,
+            "totalR": -19.62
+          },
+          "Scalping": {
+            "trades": 157,
+            "wins": 43,
+            "winRate": 0.2739,
+            "expectancyR": -0.297,
+            "grossExpectancyR": -0.1783,
+            "totalR": -46.62
+          },
+          "Swing": {
+            "trades": 240,
+            "wins": 79,
+            "winRate": 0.3292,
+            "expectancyR": -0.1404,
+            "grossExpectancyR": -0.0125,
+            "totalR": -33.7
+          },
+          "Trend": {
+            "trades": 270,
+            "wins": 94,
+            "winRate": 0.3481,
+            "expectancyR": -0.0711,
+            "grossExpectancyR": 0.0444,
+            "totalR": -19.19
+          },
+          "VWAP": {
+            "trades": 108,
+            "wins": 44,
+            "winRate": 0.4074,
+            "expectancyR": 0.1566,
+            "grossExpectancyR": 0.2222,
+            "totalR": 16.91
+          },
+          "VolatilityBreakout": {
+            "trades": 37,
+            "wins": 14,
+            "winRate": 0.3784,
+            "expectancyR": -0.025,
+            "grossExpectancyR": 0.1351,
+            "totalR": -0.93
+          }
+        }
+      }
+    },
+    "1.5x2.5": {
+      "stopMult": 1.5,
+      "ratio": 2.5,
+      "targetMult": 3.75,
+      "inSample": {
+        "trades": 2485,
+        "wins": 776,
+        "winRate": 0.3123,
+        "expectancyR": -0.0054,
+        "grossExpectancyR": 0.093,
+        "totalR": -13.38,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 221,
+            "wins": 77,
+            "winRate": 0.3484,
+            "expectancyR": 0.1431,
+            "grossExpectancyR": 0.2195,
+            "totalR": 31.62
+          },
+          "Breakout": {
+            "trades": 211,
+            "wins": 59,
+            "winRate": 0.2796,
+            "expectancyR": -0.1329,
+            "grossExpectancyR": -0.0213,
+            "totalR": -28.05
+          },
+          "Grid": {
+            "trades": 269,
+            "wins": 90,
+            "winRate": 0.3346,
+            "expectancyR": 0.0771,
+            "grossExpectancyR": 0.171,
+            "totalR": 20.74
+          },
+          "MeanReversion": {
+            "trades": 233,
+            "wins": 79,
+            "winRate": 0.3391,
+            "expectancyR": 0.0929,
+            "grossExpectancyR": 0.1867,
+            "totalR": 21.65
+          },
+          "Momentum": {
+            "trades": 273,
+            "wins": 75,
+            "winRate": 0.2747,
+            "expectancyR": -0.1463,
+            "grossExpectancyR": -0.0385,
+            "totalR": -39.95
+          },
+          "Range": {
+            "trades": 282,
+            "wins": 85,
+            "winRate": 0.3014,
+            "expectancyR": -0.0432,
+            "grossExpectancyR": 0.055,
+            "totalR": -12.19
+          },
+          "Scalping": {
+            "trades": 192,
+            "wins": 63,
+            "winRate": 0.3281,
+            "expectancyR": 0.0443,
+            "grossExpectancyR": 0.1484,
+            "totalR": 8.51
+          },
+          "Swing": {
+            "trades": 275,
+            "wins": 83,
+            "winRate": 0.3018,
+            "expectancyR": -0.0487,
+            "grossExpectancyR": 0.0564,
+            "totalR": -13.38
+          },
+          "Trend": {
+            "trades": 309,
+            "wins": 87,
+            "winRate": 0.2816,
+            "expectancyR": -0.1219,
+            "grossExpectancyR": -0.0146,
+            "totalR": -37.67
+          },
+          "VWAP": {
+            "trades": 179,
+            "wins": 65,
+            "winRate": 0.3631,
+            "expectancyR": 0.202,
+            "grossExpectancyR": 0.271,
+            "totalR": 36.15
+          },
+          "VolatilityBreakout": {
+            "trades": 41,
+            "wins": 13,
+            "winRate": 0.3171,
+            "expectancyR": -0.0194,
+            "grossExpectancyR": 0.1098,
+            "totalR": -0.79
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1603,
+        "wins": 467,
+        "winRate": 0.2913,
+        "expectancyR": -0.1042,
+        "grossExpectancyR": 0.0196,
+        "totalR": -167.01,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 111,
+            "wins": 34,
+            "winRate": 0.3063,
+            "expectancyR": -0.0021,
+            "grossExpectancyR": 0.0721,
+            "totalR": -0.24
+          },
+          "Breakout": {
+            "trades": 150,
+            "wins": 51,
+            "winRate": 0.34,
+            "expectancyR": 0.0451,
+            "grossExpectancyR": 0.19,
+            "totalR": 6.77
+          },
+          "Grid": {
+            "trades": 191,
+            "wins": 54,
+            "winRate": 0.2827,
+            "expectancyR": -0.1503,
+            "grossExpectancyR": -0.0105,
+            "totalR": -28.7
+          },
+          "MeanReversion": {
+            "trades": 148,
+            "wins": 43,
+            "winRate": 0.2905,
+            "expectancyR": -0.1251,
+            "grossExpectancyR": 0.0169,
+            "totalR": -18.52
+          },
+          "Momentum": {
+            "trades": 175,
+            "wins": 49,
+            "winRate": 0.28,
+            "expectancyR": -0.1346,
+            "grossExpectancyR": -0.02,
+            "totalR": -23.56
+          },
+          "Range": {
+            "trades": 181,
+            "wins": 49,
+            "winRate": 0.2707,
+            "expectancyR": -0.1999,
+            "grossExpectancyR": -0.0525,
+            "totalR": -36.19
+          },
+          "Scalping": {
+            "trades": 130,
+            "wins": 26,
+            "winRate": 0.2,
+            "expectancyR": -0.424,
+            "grossExpectancyR": -0.3,
+            "totalR": -55.12
+          },
+          "Swing": {
+            "trades": 186,
+            "wins": 56,
+            "winRate": 0.3011,
+            "expectancyR": -0.0723,
+            "grossExpectancyR": 0.0538,
+            "totalR": -13.44
+          },
+          "Trend": {
+            "trades": 197,
+            "wins": 58,
+            "winRate": 0.2944,
+            "expectancyR": -0.0827,
+            "grossExpectancyR": 0.0305,
+            "totalR": -16.29
+          },
+          "VWAP": {
+            "trades": 99,
+            "wins": 36,
+            "winRate": 0.3636,
+            "expectancyR": 0.2067,
+            "grossExpectancyR": 0.2727,
+            "totalR": 20.47
+          },
+          "VolatilityBreakout": {
+            "trades": 35,
+            "wins": 11,
+            "winRate": 0.3143,
+            "expectancyR": -0.0626,
+            "grossExpectancyR": 0.1,
+            "totalR": -2.19
+          }
+        }
+      }
+    },
+    "1.5x3.0": {
+      "stopMult": 1.5,
+      "ratio": 3.0,
+      "targetMult": 4.5,
+      "inSample": {
+        "trades": 2177,
+        "wins": 625,
+        "winRate": 0.2871,
+        "expectancyR": 0.0531,
+        "grossExpectancyR": 0.1484,
+        "totalR": 115.56,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 186,
+            "wins": 62,
+            "winRate": 0.3333,
+            "expectancyR": 0.2579,
+            "grossExpectancyR": 0.3333,
+            "totalR": 47.97
+          },
+          "Breakout": {
+            "trades": 197,
+            "wins": 53,
+            "winRate": 0.269,
+            "expectancyR": -0.0345,
+            "grossExpectancyR": 0.0761,
+            "totalR": -6.79
+          },
+          "Grid": {
+            "trades": 228,
+            "wins": 69,
+            "winRate": 0.3026,
+            "expectancyR": 0.1208,
+            "grossExpectancyR": 0.2105,
+            "totalR": 27.55
+          },
+          "MeanReversion": {
+            "trades": 209,
+            "wins": 64,
+            "winRate": 0.3062,
+            "expectancyR": 0.135,
+            "grossExpectancyR": 0.2249,
+            "totalR": 28.22
+          },
+          "Momentum": {
+            "trades": 246,
+            "wins": 61,
+            "winRate": 0.248,
+            "expectancyR": -0.1141,
+            "grossExpectancyR": -0.0081,
+            "totalR": -28.07
+          },
+          "Range": {
+            "trades": 231,
+            "wins": 64,
+            "winRate": 0.2771,
+            "expectancyR": 0.0155,
+            "grossExpectancyR": 0.1082,
+            "totalR": 3.59
+          },
+          "Scalping": {
+            "trades": 176,
+            "wins": 53,
+            "winRate": 0.3011,
+            "expectancyR": 0.1009,
+            "grossExpectancyR": 0.2045,
+            "totalR": 17.76
+          },
+          "Swing": {
+            "trades": 237,
+            "wins": 67,
+            "winRate": 0.2827,
+            "expectancyR": 0.0296,
+            "grossExpectancyR": 0.1308,
+            "totalR": 7.01
+          },
+          "Trend": {
+            "trades": 265,
+            "wins": 67,
+            "winRate": 0.2528,
+            "expectancyR": -0.0877,
+            "grossExpectancyR": 0.0113,
+            "totalR": -23.24
+          },
+          "VWAP": {
+            "trades": 161,
+            "wins": 53,
+            "winRate": 0.3292,
+            "expectancyR": 0.2476,
+            "grossExpectancyR": 0.3168,
+            "totalR": 39.86
+          },
+          "VolatilityBreakout": {
+            "trades": 41,
+            "wins": 12,
+            "winRate": 0.2927,
+            "expectancyR": 0.0416,
+            "grossExpectancyR": 0.1707,
+            "totalR": 1.71
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1395,
+        "wins": 351,
+        "winRate": 0.2516,
+        "expectancyR": -0.1222,
+        "grossExpectancyR": 0.0065,
+        "totalR": -170.54,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 94,
+            "wins": 26,
+            "winRate": 0.2766,
+            "expectancyR": 0.0307,
+            "grossExpectancyR": 0.1064,
+            "totalR": 2.89
+          },
+          "Breakout": {
+            "trades": 135,
+            "wins": 41,
+            "winRate": 0.3037,
+            "expectancyR": 0.0695,
+            "grossExpectancyR": 0.2148,
+            "totalR": 9.38
+          },
+          "Grid": {
+            "trades": 157,
+            "wins": 40,
+            "winRate": 0.2548,
+            "expectancyR": -0.1264,
+            "grossExpectancyR": 0.0191,
+            "totalR": -19.85
+          },
+          "MeanReversion": {
+            "trades": 119,
+            "wins": 29,
+            "winRate": 0.2437,
+            "expectancyR": -0.1752,
+            "grossExpectancyR": -0.0252,
+            "totalR": -20.85
+          },
+          "Momentum": {
+            "trades": 170,
+            "wins": 37,
+            "winRate": 0.2176,
+            "expectancyR": -0.2471,
+            "grossExpectancyR": -0.1294,
+            "totalR": -42.01
+          },
+          "Range": {
+            "trades": 152,
+            "wins": 35,
+            "winRate": 0.2303,
+            "expectancyR": -0.2335,
+            "grossExpectancyR": -0.079,
+            "totalR": -35.49
+          },
+          "Scalping": {
+            "trades": 129,
+            "wins": 25,
+            "winRate": 0.1938,
+            "expectancyR": -0.3471,
+            "grossExpectancyR": -0.2248,
+            "totalR": -44.77
+          },
+          "Swing": {
+            "trades": 159,
+            "wins": 43,
+            "winRate": 0.2704,
+            "expectancyR": -0.0574,
+            "grossExpectancyR": 0.0818,
+            "totalR": -9.13
+          },
+          "Trend": {
+            "trades": 161,
+            "wins": 39,
+            "winRate": 0.2422,
+            "expectancyR": -0.1522,
+            "grossExpectancyR": -0.0311,
+            "totalR": -24.51
+          },
+          "VWAP": {
+            "trades": 86,
+            "wins": 27,
+            "winRate": 0.314,
+            "expectancyR": 0.1903,
+            "grossExpectancyR": 0.2558,
+            "totalR": 16.37
+          },
+          "VolatilityBreakout": {
+            "trades": 33,
+            "wins": 9,
+            "winRate": 0.2727,
+            "expectancyR": -0.078,
+            "grossExpectancyR": 0.0909,
+            "totalR": -2.57
+          }
+        }
+      }
+    },
+    "2.0x1.5": {
+      "stopMult": 2.0,
+      "ratio": 1.5,
+      "targetMult": 3.0,
+      "inSample": {
+        "trades": 2335,
+        "wins": 943,
+        "winRate": 0.4039,
+        "expectancyR": -0.0637,
+        "grossExpectancyR": 0.0096,
+        "totalR": -148.66,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 218,
+            "wins": 92,
+            "winRate": 0.422,
+            "expectancyR": -0.0019,
+            "grossExpectancyR": 0.0551,
+            "totalR": -0.42
+          },
+          "Breakout": {
+            "trades": 199,
+            "wins": 68,
+            "winRate": 0.3417,
+            "expectancyR": -0.2302,
+            "grossExpectancyR": -0.1457,
+            "totalR": -45.8
+          },
+          "Grid": {
+            "trades": 275,
+            "wins": 116,
+            "winRate": 0.4218,
+            "expectancyR": -0.016,
+            "grossExpectancyR": 0.0545,
+            "totalR": -4.39
+          },
+          "MeanReversion": {
+            "trades": 221,
+            "wins": 91,
+            "winRate": 0.4118,
+            "expectancyR": -0.0416,
+            "grossExpectancyR": 0.0294,
+            "totalR": -9.2
+          },
+          "Momentum": {
+            "trades": 231,
+            "wins": 91,
+            "winRate": 0.3939,
+            "expectancyR": -0.0994,
+            "grossExpectancyR": -0.0152,
+            "totalR": -22.95
+          },
+          "Range": {
+            "trades": 261,
+            "wins": 105,
+            "winRate": 0.4023,
+            "expectancyR": -0.0661,
+            "grossExpectancyR": 0.0057,
+            "totalR": -17.24
+          },
+          "Scalping": {
+            "trades": 194,
+            "wins": 82,
+            "winRate": 0.4227,
+            "expectancyR": -0.0245,
+            "grossExpectancyR": 0.0567,
+            "totalR": -4.76
+          },
+          "Swing": {
+            "trades": 240,
+            "wins": 93,
+            "winRate": 0.3875,
+            "expectancyR": -0.1073,
+            "grossExpectancyR": -0.0313,
+            "totalR": -25.76
+          },
+          "Trend": {
+            "trades": 293,
+            "wins": 115,
+            "winRate": 0.3925,
+            "expectancyR": -0.0944,
+            "grossExpectancyR": -0.0188,
+            "totalR": -27.66
+          },
+          "VWAP": {
+            "trades": 162,
+            "wins": 72,
+            "winRate": 0.4444,
+            "expectancyR": 0.0586,
+            "grossExpectancyR": 0.1111,
+            "totalR": 9.49
+          },
+          "VolatilityBreakout": {
+            "trades": 41,
+            "wins": 18,
+            "winRate": 0.439,
+            "expectancyR": 0.0007,
+            "grossExpectancyR": 0.0976,
+            "totalR": 0.03
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1588,
+        "wins": 659,
+        "winRate": 0.415,
+        "expectancyR": -0.0566,
+        "grossExpectancyR": 0.0375,
+        "totalR": -89.89,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 118,
+            "wins": 50,
+            "winRate": 0.4237,
+            "expectancyR": 0.0014,
+            "grossExpectancyR": 0.0593,
+            "totalR": 0.16
+          },
+          "Breakout": {
+            "trades": 143,
+            "wins": 68,
+            "winRate": 0.4755,
+            "expectancyR": 0.0818,
+            "grossExpectancyR": 0.1888,
+            "totalR": 11.7
+          },
+          "Grid": {
+            "trades": 187,
+            "wins": 78,
+            "winRate": 0.4171,
+            "expectancyR": -0.0627,
+            "grossExpectancyR": 0.0428,
+            "totalR": -11.72
+          },
+          "MeanReversion": {
+            "trades": 154,
+            "wins": 64,
+            "winRate": 0.4156,
+            "expectancyR": -0.0675,
+            "grossExpectancyR": 0.039,
+            "totalR": -10.4
+          },
+          "Momentum": {
+            "trades": 158,
+            "wins": 67,
+            "winRate": 0.4241,
+            "expectancyR": -0.0355,
+            "grossExpectancyR": 0.0601,
+            "totalR": -5.6
+          },
+          "Range": {
+            "trades": 185,
+            "wins": 78,
+            "winRate": 0.4216,
+            "expectancyR": -0.0527,
+            "grossExpectancyR": 0.054,
+            "totalR": -9.75
+          },
+          "Scalping": {
+            "trades": 137,
+            "wins": 46,
+            "winRate": 0.3358,
+            "expectancyR": -0.2498,
+            "grossExpectancyR": -0.1606,
+            "totalR": -34.22
+          },
+          "Swing": {
+            "trades": 177,
+            "wins": 71,
+            "winRate": 0.4011,
+            "expectancyR": -0.0932,
+            "grossExpectancyR": 0.0028,
+            "totalR": -16.49
+          },
+          "Trend": {
+            "trades": 202,
+            "wins": 79,
+            "winRate": 0.3911,
+            "expectancyR": -0.1131,
+            "grossExpectancyR": -0.0223,
+            "totalR": -22.84
+          },
+          "VWAP": {
+            "trades": 93,
+            "wins": 42,
+            "winRate": 0.4516,
+            "expectancyR": 0.0804,
+            "grossExpectancyR": 0.129,
+            "totalR": 7.48
+          },
+          "VolatilityBreakout": {
+            "trades": 34,
+            "wins": 16,
+            "winRate": 0.4706,
+            "expectancyR": 0.0527,
+            "grossExpectancyR": 0.1765,
+            "totalR": 1.79
+          }
+        }
+      }
+    },
+    "2.0x2.0": {
+      "stopMult": 2.0,
+      "ratio": 2.0,
+      "targetMult": 4.0,
+      "inSample": {
+        "trades": 1898,
+        "wins": 689,
+        "winRate": 0.363,
+        "expectancyR": 0.0169,
+        "grossExpectancyR": 0.089,
+        "totalR": 32.06,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 173,
+            "wins": 70,
+            "winRate": 0.4046,
+            "expectancyR": 0.1572,
+            "grossExpectancyR": 0.2139,
+            "totalR": 27.2
+          },
+          "Breakout": {
+            "trades": 180,
+            "wins": 55,
+            "winRate": 0.3056,
+            "expectancyR": -0.1629,
+            "grossExpectancyR": -0.0833,
+            "totalR": -29.32
+          },
+          "Grid": {
+            "trades": 202,
+            "wins": 81,
+            "winRate": 0.401,
+            "expectancyR": 0.1355,
+            "grossExpectancyR": 0.203,
+            "totalR": 27.36
+          },
+          "MeanReversion": {
+            "trades": 180,
+            "wins": 70,
+            "winRate": 0.3889,
+            "expectancyR": 0.0963,
+            "grossExpectancyR": 0.1667,
+            "totalR": 17.34
+          },
+          "Momentum": {
+            "trades": 204,
+            "wins": 66,
+            "winRate": 0.3235,
+            "expectancyR": -0.1138,
+            "grossExpectancyR": -0.0294,
+            "totalR": -23.22
+          },
+          "Range": {
+            "trades": 203,
+            "wins": 83,
+            "winRate": 0.4089,
+            "expectancyR": 0.1568,
+            "grossExpectancyR": 0.2266,
+            "totalR": 31.82
+          },
+          "Scalping": {
+            "trades": 157,
+            "wins": 50,
+            "winRate": 0.3185,
+            "expectancyR": -0.1231,
+            "grossExpectancyR": -0.0446,
+            "totalR": -19.32
+          },
+          "Swing": {
+            "trades": 197,
+            "wins": 68,
+            "winRate": 0.3452,
+            "expectancyR": -0.0443,
+            "grossExpectancyR": 0.0355,
+            "totalR": -8.73
+          },
+          "Trend": {
+            "trades": 218,
+            "wins": 71,
+            "winRate": 0.3257,
+            "expectancyR": -0.0939,
+            "grossExpectancyR": -0.0229,
+            "totalR": -20.46
+          },
+          "VWAP": {
+            "trades": 143,
+            "wins": 58,
+            "winRate": 0.4056,
+            "expectancyR": 0.1633,
+            "grossExpectancyR": 0.2168,
+            "totalR": 23.36
+          },
+          "VolatilityBreakout": {
+            "trades": 41,
+            "wins": 17,
+            "winRate": 0.4146,
+            "expectancyR": 0.1471,
+            "grossExpectancyR": 0.2439,
+            "totalR": 6.03
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1207,
+        "wins": 403,
+        "winRate": 0.3339,
+        "expectancyR": -0.0942,
+        "grossExpectancyR": 0.0017,
+        "totalR": -113.73,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 78,
+            "wins": 23,
+            "winRate": 0.2949,
+            "expectancyR": -0.1722,
+            "grossExpectancyR": -0.1154,
+            "totalR": -13.43
+          },
+          "Breakout": {
+            "trades": 122,
+            "wins": 46,
+            "winRate": 0.377,
+            "expectancyR": 0.025,
+            "grossExpectancyR": 0.1311,
+            "totalR": 3.05
+          },
+          "Grid": {
+            "trades": 142,
+            "wins": 48,
+            "winRate": 0.338,
+            "expectancyR": -0.0953,
+            "grossExpectancyR": 0.0141,
+            "totalR": -13.53
+          },
+          "MeanReversion": {
+            "trades": 109,
+            "wins": 37,
+            "winRate": 0.3394,
+            "expectancyR": -0.095,
+            "grossExpectancyR": 0.0184,
+            "totalR": -10.36
+          },
+          "Momentum": {
+            "trades": 124,
+            "wins": 37,
+            "winRate": 0.2984,
+            "expectancyR": -0.2014,
+            "grossExpectancyR": -0.1048,
+            "totalR": -24.97
+          },
+          "Range": {
+            "trades": 138,
+            "wins": 42,
+            "winRate": 0.3043,
+            "expectancyR": -0.2016,
+            "grossExpectancyR": -0.0869,
+            "totalR": -27.83
+          },
+          "Scalping": {
+            "trades": 111,
+            "wins": 29,
+            "winRate": 0.2613,
+            "expectancyR": -0.3095,
+            "grossExpectancyR": -0.2162,
+            "totalR": -34.35
+          },
+          "Swing": {
+            "trades": 133,
+            "wins": 51,
+            "winRate": 0.3835,
+            "expectancyR": 0.0524,
+            "grossExpectancyR": 0.1504,
+            "totalR": 6.97
+          },
+          "Trend": {
+            "trades": 138,
+            "wins": 46,
+            "winRate": 0.3333,
+            "expectancyR": -0.0816,
+            "grossExpectancyR": 0.0,
+            "totalR": -11.26
+          },
+          "VWAP": {
+            "trades": 82,
+            "wins": 34,
+            "winRate": 0.4146,
+            "expectancyR": 0.1943,
+            "grossExpectancyR": 0.2439,
+            "totalR": 15.93
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 10,
+            "winRate": 0.3333,
+            "expectancyR": -0.1315,
+            "grossExpectancyR": 0.0,
+            "totalR": -3.95
+          }
+        }
+      }
+    },
+    "2.0x2.5": {
+      "stopMult": 2.0,
+      "ratio": 2.5,
+      "targetMult": 5.0,
+      "inSample": {
+        "trades": 1617,
+        "wins": 544,
+        "winRate": 0.3364,
+        "expectancyR": 0.1082,
+        "grossExpectancyR": 0.1775,
+        "totalR": 174.95,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 139,
+            "wins": 58,
+            "winRate": 0.4173,
+            "expectancyR": 0.4045,
+            "grossExpectancyR": 0.4604,
+            "totalR": 56.22
+          },
+          "Breakout": {
+            "trades": 167,
+            "wins": 47,
+            "winRate": 0.2814,
+            "expectancyR": -0.0947,
+            "grossExpectancyR": -0.015,
+            "totalR": -15.81
+          },
+          "Grid": {
+            "trades": 161,
+            "wins": 64,
+            "winRate": 0.3975,
+            "expectancyR": 0.3272,
+            "grossExpectancyR": 0.3913,
+            "totalR": 52.68
+          },
+          "MeanReversion": {
+            "trades": 157,
+            "wins": 57,
+            "winRate": 0.3631,
+            "expectancyR": 0.2054,
+            "grossExpectancyR": 0.2707,
+            "totalR": 32.24
+          },
+          "Momentum": {
+            "trades": 179,
+            "wins": 51,
+            "winRate": 0.2849,
+            "expectancyR": -0.081,
+            "grossExpectancyR": -0.0028,
+            "totalR": -14.5
+          },
+          "Range": {
+            "trades": 158,
+            "wins": 62,
+            "winRate": 0.3924,
+            "expectancyR": 0.3081,
+            "grossExpectancyR": 0.3734,
+            "totalR": 48.68
+          },
+          "Scalping": {
+            "trades": 134,
+            "wins": 36,
+            "winRate": 0.2687,
+            "expectancyR": -0.1359,
+            "grossExpectancyR": -0.0597,
+            "totalR": -18.2
+          },
+          "Swing": {
+            "trades": 168,
+            "wins": 54,
+            "winRate": 0.3214,
+            "expectancyR": 0.052,
+            "grossExpectancyR": 0.125,
+            "totalR": 8.73
+          },
+          "Trend": {
+            "trades": 193,
+            "wins": 55,
+            "winRate": 0.285,
+            "expectancyR": -0.0724,
+            "grossExpectancyR": -0.0026,
+            "totalR": -13.98
+          },
+          "VWAP": {
+            "trades": 123,
+            "wins": 45,
+            "winRate": 0.3659,
+            "expectancyR": 0.227,
+            "grossExpectancyR": 0.2805,
+            "totalR": 27.92
+          },
+          "VolatilityBreakout": {
+            "trades": 38,
+            "wins": 15,
+            "winRate": 0.3947,
+            "expectancyR": 0.2885,
+            "grossExpectancyR": 0.3816,
+            "totalR": 10.96
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1042,
+        "wins": 284,
+        "winRate": 0.2726,
+        "expectancyR": -0.146,
+        "grossExpectancyR": -0.0461,
+        "totalR": -152.1,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 69,
+            "wins": 17,
+            "winRate": 0.2464,
+            "expectancyR": -0.1967,
+            "grossExpectancyR": -0.1377,
+            "totalR": -13.57
+          },
+          "Breakout": {
+            "trades": 103,
+            "wins": 36,
+            "winRate": 0.3495,
+            "expectancyR": 0.1091,
+            "grossExpectancyR": 0.2233,
+            "totalR": 11.23
+          },
+          "Grid": {
+            "trades": 110,
+            "wins": 28,
+            "winRate": 0.2545,
+            "expectancyR": -0.225,
+            "grossExpectancyR": -0.1091,
+            "totalR": -24.75
+          },
+          "MeanReversion": {
+            "trades": 89,
+            "wins": 22,
+            "winRate": 0.2472,
+            "expectancyR": -0.2554,
+            "grossExpectancyR": -0.1348,
+            "totalR": -22.73
+          },
+          "Momentum": {
+            "trades": 114,
+            "wins": 30,
+            "winRate": 0.2632,
+            "expectancyR": -0.1733,
+            "grossExpectancyR": -0.0789,
+            "totalR": -19.75
+          },
+          "Range": {
+            "trades": 110,
+            "wins": 25,
+            "winRate": 0.2273,
+            "expectancyR": -0.3272,
+            "grossExpectancyR": -0.2045,
+            "totalR": -35.99
+          },
+          "Scalping": {
+            "trades": 107,
+            "wins": 27,
+            "winRate": 0.2523,
+            "expectancyR": -0.209,
+            "grossExpectancyR": -0.1168,
+            "totalR": -22.37
+          },
+          "Swing": {
+            "trades": 116,
+            "wins": 35,
+            "winRate": 0.3017,
+            "expectancyR": -0.0456,
+            "grossExpectancyR": 0.056,
+            "totalR": -5.28
+          },
+          "Trend": {
+            "trades": 127,
+            "wins": 32,
+            "winRate": 0.252,
+            "expectancyR": -0.2088,
+            "grossExpectancyR": -0.1181,
+            "totalR": -26.52
+          },
+          "VWAP": {
+            "trades": 67,
+            "wins": 22,
+            "winRate": 0.3284,
+            "expectancyR": 0.098,
+            "grossExpectancyR": 0.1493,
+            "totalR": 6.57
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 10,
+            "winRate": 0.3333,
+            "expectancyR": 0.0352,
+            "grossExpectancyR": 0.1667,
+            "totalR": 1.05
+          }
+        }
+      }
+    },
+    "2.0x3.0": {
+      "stopMult": 2.0,
+      "ratio": 3.0,
+      "targetMult": 6.0,
+      "inSample": {
+        "trades": 1381,
+        "wins": 405,
+        "winRate": 0.2933,
+        "expectancyR": 0.1045,
+        "grossExpectancyR": 0.1731,
+        "totalR": 144.34,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 115,
+            "wins": 40,
+            "winRate": 0.3478,
+            "expectancyR": 0.3351,
+            "grossExpectancyR": 0.3913,
+            "totalR": 38.54
+          },
+          "Breakout": {
+            "trades": 155,
+            "wins": 38,
+            "winRate": 0.2452,
+            "expectancyR": -0.1027,
+            "grossExpectancyR": -0.0193,
+            "totalR": -15.92
+          },
+          "Grid": {
+            "trades": 131,
+            "wins": 44,
+            "winRate": 0.3359,
+            "expectancyR": 0.2827,
+            "grossExpectancyR": 0.3435,
+            "totalR": 37.04
+          },
+          "MeanReversion": {
+            "trades": 122,
+            "wins": 39,
+            "winRate": 0.3197,
+            "expectancyR": 0.221,
+            "grossExpectancyR": 0.2787,
+            "totalR": 26.97
+          },
+          "Momentum": {
+            "trades": 145,
+            "wins": 37,
+            "winRate": 0.2552,
+            "expectancyR": -0.0573,
+            "grossExpectancyR": 0.0207,
+            "totalR": -8.31
+          },
+          "Range": {
+            "trades": 127,
+            "wins": 42,
+            "winRate": 0.3307,
+            "expectancyR": 0.26,
+            "grossExpectancyR": 0.3228,
+            "totalR": 33.02
+          },
+          "Scalping": {
+            "trades": 128,
+            "wins": 32,
+            "winRate": 0.25,
+            "expectancyR": -0.0773,
+            "grossExpectancyR": 0.0,
+            "totalR": -9.9
+          },
+          "Swing": {
+            "trades": 151,
+            "wins": 45,
+            "winRate": 0.298,
+            "expectancyR": 0.1232,
+            "grossExpectancyR": 0.1921,
+            "totalR": 18.6
+          },
+          "Trend": {
+            "trades": 164,
+            "wins": 40,
+            "winRate": 0.2439,
+            "expectancyR": -0.0963,
+            "grossExpectancyR": -0.0244,
+            "totalR": -15.8
+          },
+          "VWAP": {
+            "trades": 106,
+            "wins": 34,
+            "winRate": 0.3208,
+            "expectancyR": 0.2312,
+            "grossExpectancyR": 0.283,
+            "totalR": 24.51
+          },
+          "VolatilityBreakout": {
+            "trades": 37,
+            "wins": 14,
+            "winRate": 0.3784,
+            "expectancyR": 0.4212,
+            "grossExpectancyR": 0.5135,
+            "totalR": 15.59
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 921,
+        "wins": 219,
+        "winRate": 0.2378,
+        "expectancyR": -0.1499,
+        "grossExpectancyR": -0.0489,
+        "totalR": -138.03,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 59,
+            "wins": 10,
+            "winRate": 0.1695,
+            "expectancyR": -0.383,
+            "grossExpectancyR": -0.322,
+            "totalR": -22.6
+          },
+          "Breakout": {
+            "trades": 104,
+            "wins": 32,
+            "winRate": 0.3077,
+            "expectancyR": 0.1192,
+            "grossExpectancyR": 0.2308,
+            "totalR": 12.4
+          },
+          "Grid": {
+            "trades": 96,
+            "wins": 21,
+            "winRate": 0.2188,
+            "expectancyR": -0.2451,
+            "grossExpectancyR": -0.125,
+            "totalR": -23.53
+          },
+          "MeanReversion": {
+            "trades": 79,
+            "wins": 16,
+            "winRate": 0.2025,
+            "expectancyR": -0.3156,
+            "grossExpectancyR": -0.1899,
+            "totalR": -24.93
+          },
+          "Momentum": {
+            "trades": 100,
+            "wins": 23,
+            "winRate": 0.23,
+            "expectancyR": -0.1797,
+            "grossExpectancyR": -0.08,
+            "totalR": -17.97
+          },
+          "Range": {
+            "trades": 98,
+            "wins": 20,
+            "winRate": 0.2041,
+            "expectancyR": -0.3095,
+            "grossExpectancyR": -0.1837,
+            "totalR": -30.33
+          },
+          "Scalping": {
+            "trades": 88,
+            "wins": 20,
+            "winRate": 0.2273,
+            "expectancyR": -0.1883,
+            "grossExpectancyR": -0.0909,
+            "totalR": -16.57
+          },
+          "Swing": {
+            "trades": 106,
+            "wins": 29,
+            "winRate": 0.2736,
+            "expectancyR": 0.0001,
+            "grossExpectancyR": 0.0943,
+            "totalR": 0.01
+          },
+          "Trend": {
+            "trades": 104,
+            "wins": 24,
+            "winRate": 0.2308,
+            "expectancyR": -0.1603,
+            "grossExpectancyR": -0.0769,
+            "totalR": -16.67
+          },
+          "VWAP": {
+            "trades": 57,
+            "wins": 15,
+            "winRate": 0.2632,
+            "expectancyR": 0.002,
+            "grossExpectancyR": 0.0526,
+            "totalR": 0.11
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 9,
+            "winRate": 0.3,
+            "expectancyR": 0.0685,
+            "grossExpectancyR": 0.2,
+            "totalR": 2.05
+          }
+        }
+      }
+    },
+    "2.5x1.5": {
+      "stopMult": 2.5,
+      "ratio": 1.5,
+      "targetMult": 3.75,
+      "inSample": {
+        "trades": 1675,
+        "wins": 693,
+        "winRate": 0.4137,
+        "expectancyR": -0.0235,
+        "grossExpectancyR": 0.0343,
+        "totalR": -39.28,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 151,
+            "wins": 68,
+            "winRate": 0.4503,
+            "expectancyR": 0.0802,
+            "grossExpectancyR": 0.1258,
+            "totalR": 12.11
+          },
+          "Breakout": {
+            "trades": 153,
+            "wins": 57,
+            "winRate": 0.3725,
+            "expectancyR": -0.1312,
+            "grossExpectancyR": -0.0686,
+            "totalR": -20.07
+          },
+          "Grid": {
+            "trades": 184,
+            "wins": 85,
+            "winRate": 0.462,
+            "expectancyR": 0.0992,
+            "grossExpectancyR": 0.1549,
+            "totalR": 18.26
+          },
+          "MeanReversion": {
+            "trades": 157,
+            "wins": 73,
+            "winRate": 0.465,
+            "expectancyR": 0.1055,
+            "grossExpectancyR": 0.1624,
+            "totalR": 16.56
+          },
+          "Momentum": {
+            "trades": 170,
+            "wins": 66,
+            "winRate": 0.3882,
+            "expectancyR": -0.0981,
+            "grossExpectancyR": -0.0294,
+            "totalR": -16.67
+          },
+          "Range": {
+            "trades": 181,
+            "wins": 79,
+            "winRate": 0.4365,
+            "expectancyR": 0.0344,
+            "grossExpectancyR": 0.0912,
+            "totalR": 6.22
+          },
+          "Scalping": {
+            "trades": 133,
+            "wins": 50,
+            "winRate": 0.3759,
+            "expectancyR": -0.1209,
+            "grossExpectancyR": -0.0601,
+            "totalR": -16.08
+          },
+          "Swing": {
+            "trades": 169,
+            "wins": 64,
+            "winRate": 0.3787,
+            "expectancyR": -0.1135,
+            "grossExpectancyR": -0.0533,
+            "totalR": -19.18
+          },
+          "Trend": {
+            "trades": 203,
+            "wins": 70,
+            "winRate": 0.3448,
+            "expectancyR": -0.1971,
+            "grossExpectancyR": -0.1379,
+            "totalR": -40.01
+          },
+          "VWAP": {
+            "trades": 134,
+            "wins": 63,
+            "winRate": 0.4701,
+            "expectancyR": 0.1321,
+            "grossExpectancyR": 0.1754,
+            "totalR": 17.7
+          },
+          "VolatilityBreakout": {
+            "trades": 40,
+            "wins": 18,
+            "winRate": 0.45,
+            "expectancyR": 0.0468,
+            "grossExpectancyR": 0.125,
+            "totalR": 1.87
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 1102,
+        "wins": 416,
+        "winRate": 0.3775,
+        "expectancyR": -0.131,
+        "grossExpectancyR": -0.0563,
+        "totalR": -144.36,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 73,
+            "wins": 27,
+            "winRate": 0.3699,
+            "expectancyR": -0.1206,
+            "grossExpectancyR": -0.0754,
+            "totalR": -8.8
+          },
+          "Breakout": {
+            "trades": 107,
+            "wins": 46,
+            "winRate": 0.4299,
+            "expectancyR": -0.0062,
+            "grossExpectancyR": 0.0748,
+            "totalR": -0.66
+          },
+          "Grid": {
+            "trades": 121,
+            "wins": 45,
+            "winRate": 0.3719,
+            "expectancyR": -0.1512,
+            "grossExpectancyR": -0.0703,
+            "totalR": -18.29
+          },
+          "MeanReversion": {
+            "trades": 107,
+            "wins": 43,
+            "winRate": 0.4019,
+            "expectancyR": -0.0845,
+            "grossExpectancyR": 0.0047,
+            "totalR": -9.04
+          },
+          "Momentum": {
+            "trades": 113,
+            "wins": 42,
+            "winRate": 0.3717,
+            "expectancyR": -0.1496,
+            "grossExpectancyR": -0.0708,
+            "totalR": -16.9
+          },
+          "Range": {
+            "trades": 119,
+            "wins": 45,
+            "winRate": 0.3782,
+            "expectancyR": -0.1461,
+            "grossExpectancyR": -0.0546,
+            "totalR": -17.38
+          },
+          "Scalping": {
+            "trades": 87,
+            "wins": 24,
+            "winRate": 0.2759,
+            "expectancyR": -0.3816,
+            "grossExpectancyR": -0.3104,
+            "totalR": -33.2
+          },
+          "Swing": {
+            "trades": 126,
+            "wins": 47,
+            "winRate": 0.373,
+            "expectancyR": -0.1424,
+            "grossExpectancyR": -0.0674,
+            "totalR": -17.94
+          },
+          "Trend": {
+            "trades": 142,
+            "wins": 52,
+            "winRate": 0.3662,
+            "expectancyR": -0.1511,
+            "grossExpectancyR": -0.0845,
+            "totalR": -21.45
+          },
+          "VWAP": {
+            "trades": 77,
+            "wins": 35,
+            "winRate": 0.4545,
+            "expectancyR": 0.0968,
+            "grossExpectancyR": 0.1364,
+            "totalR": 7.46
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 10,
+            "winRate": 0.3333,
+            "expectancyR": -0.2719,
+            "grossExpectancyR": -0.1667,
+            "totalR": -8.16
+          }
+        }
+      }
+    },
+    "2.5x2.0": {
+      "stopMult": 2.5,
+      "ratio": 2.0,
+      "targetMult": 5.0,
+      "inSample": {
+        "trades": 1348,
+        "wins": 493,
+        "winRate": 0.3657,
+        "expectancyR": 0.0421,
+        "grossExpectancyR": 0.0972,
+        "totalR": 56.73,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 120,
+            "wins": 53,
+            "winRate": 0.4417,
+            "expectancyR": 0.2802,
+            "grossExpectancyR": 0.325,
+            "totalR": 33.63
+          },
+          "Breakout": {
+            "trades": 141,
+            "wins": 40,
+            "winRate": 0.2837,
+            "expectancyR": -0.2089,
+            "grossExpectancyR": -0.1489,
+            "totalR": -29.45
+          },
+          "Grid": {
+            "trades": 130,
+            "wins": 57,
+            "winRate": 0.4385,
+            "expectancyR": 0.2662,
+            "grossExpectancyR": 0.3154,
+            "totalR": 34.6
+          },
+          "MeanReversion": {
+            "trades": 120,
+            "wins": 50,
+            "winRate": 0.4167,
+            "expectancyR": 0.2008,
+            "grossExpectancyR": 0.25,
+            "totalR": 24.1
+          },
+          "Momentum": {
+            "trades": 136,
+            "wins": 44,
+            "winRate": 0.3235,
+            "expectancyR": -0.0993,
+            "grossExpectancyR": -0.0294,
+            "totalR": -13.5
+          },
+          "Range": {
+            "trades": 133,
+            "wins": 55,
+            "winRate": 0.4135,
+            "expectancyR": 0.1906,
+            "grossExpectancyR": 0.2406,
+            "totalR": 25.35
+          },
+          "Scalping": {
+            "trades": 105,
+            "wins": 31,
+            "winRate": 0.2952,
+            "expectancyR": -0.1742,
+            "grossExpectancyR": -0.1143,
+            "totalR": -18.29
+          },
+          "Swing": {
+            "trades": 149,
+            "wins": 51,
+            "winRate": 0.3423,
+            "expectancyR": -0.0313,
+            "grossExpectancyR": 0.0269,
+            "totalR": -4.67
+          },
+          "Trend": {
+            "trades": 170,
+            "wins": 52,
+            "winRate": 0.3059,
+            "expectancyR": -0.1389,
+            "grossExpectancyR": -0.0824,
+            "totalR": -23.61
+          },
+          "VWAP": {
+            "trades": 107,
+            "wins": 45,
+            "winRate": 0.4206,
+            "expectancyR": 0.2182,
+            "grossExpectancyR": 0.2617,
+            "totalR": 23.34
+          },
+          "VolatilityBreakout": {
+            "trades": 37,
+            "wins": 15,
+            "winRate": 0.4054,
+            "expectancyR": 0.141,
+            "grossExpectancyR": 0.2162,
+            "totalR": 5.22
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 877,
+        "wins": 271,
+        "winRate": 0.309,
+        "expectancyR": -0.1526,
+        "grossExpectancyR": -0.073,
+        "totalR": -133.8,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 57,
+            "wins": 17,
+            "winRate": 0.2982,
+            "expectancyR": -0.1523,
+            "grossExpectancyR": -0.1053,
+            "totalR": -8.68
+          },
+          "Breakout": {
+            "trades": 85,
+            "wins": 35,
+            "winRate": 0.4118,
+            "expectancyR": 0.1495,
+            "grossExpectancyR": 0.2353,
+            "totalR": 12.71
+          },
+          "Grid": {
+            "trades": 88,
+            "wins": 25,
+            "winRate": 0.2841,
+            "expectancyR": -0.2396,
+            "grossExpectancyR": -0.1477,
+            "totalR": -21.09
+          },
+          "MeanReversion": {
+            "trades": 77,
+            "wins": 25,
+            "winRate": 0.3247,
+            "expectancyR": -0.1293,
+            "grossExpectancyR": -0.026,
+            "totalR": -9.95
+          },
+          "Momentum": {
+            "trades": 102,
+            "wins": 31,
+            "winRate": 0.3039,
+            "expectancyR": -0.1674,
+            "grossExpectancyR": -0.0882,
+            "totalR": -17.08
+          },
+          "Range": {
+            "trades": 89,
+            "wins": 24,
+            "winRate": 0.2697,
+            "expectancyR": -0.2943,
+            "grossExpectancyR": -0.191,
+            "totalR": -26.2
+          },
+          "Scalping": {
+            "trades": 83,
+            "wins": 24,
+            "winRate": 0.2892,
+            "expectancyR": -0.2042,
+            "grossExpectancyR": -0.1325,
+            "totalR": -16.94
+          },
+          "Swing": {
+            "trades": 99,
+            "wins": 32,
+            "winRate": 0.3232,
+            "expectancyR": -0.1075,
+            "grossExpectancyR": -0.0303,
+            "totalR": -10.64
+          },
+          "Trend": {
+            "trades": 111,
+            "wins": 29,
+            "winRate": 0.2613,
+            "expectancyR": -0.2831,
+            "grossExpectancyR": -0.2162,
+            "totalR": -31.42
+          },
+          "VWAP": {
+            "trades": 56,
+            "wins": 19,
+            "winRate": 0.3393,
+            "expectancyR": -0.0241,
+            "grossExpectancyR": 0.0179,
+            "totalR": -1.35
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 10,
+            "winRate": 0.3333,
+            "expectancyR": -0.1052,
+            "grossExpectancyR": 0.0,
+            "totalR": -3.16
+          }
+        }
+      }
+    },
+    "2.5x2.5": {
+      "stopMult": 2.5,
+      "ratio": 2.5,
+      "targetMult": 6.25,
+      "inSample": {
+        "trades": 1102,
+        "wins": 322,
+        "winRate": 0.2922,
+        "expectancyR": -0.032,
+        "grossExpectancyR": 0.0227,
+        "totalR": -35.25,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 90,
+            "wins": 26,
+            "winRate": 0.2889,
+            "expectancyR": -0.0318,
+            "grossExpectancyR": 0.0111,
+            "totalR": -2.86
+          },
+          "Breakout": {
+            "trades": 123,
+            "wins": 30,
+            "winRate": 0.2439,
+            "expectancyR": -0.2068,
+            "grossExpectancyR": -0.1463,
+            "totalR": -25.44
+          },
+          "Grid": {
+            "trades": 92,
+            "wins": 31,
+            "winRate": 0.337,
+            "expectancyR": 0.1324,
+            "grossExpectancyR": 0.1793,
+            "totalR": 12.18
+          },
+          "MeanReversion": {
+            "trades": 92,
+            "wins": 32,
+            "winRate": 0.3478,
+            "expectancyR": 0.1716,
+            "grossExpectancyR": 0.2174,
+            "totalR": 15.78
+          },
+          "Momentum": {
+            "trades": 108,
+            "wins": 34,
+            "winRate": 0.3148,
+            "expectancyR": 0.0327,
+            "grossExpectancyR": 0.1019,
+            "totalR": 3.53
+          },
+          "Range": {
+            "trades": 101,
+            "wins": 31,
+            "winRate": 0.3069,
+            "expectancyR": 0.027,
+            "grossExpectancyR": 0.0743,
+            "totalR": 2.72
+          },
+          "Scalping": {
+            "trades": 93,
+            "wins": 24,
+            "winRate": 0.2581,
+            "expectancyR": -0.1582,
+            "grossExpectancyR": -0.0968,
+            "totalR": -14.72
+          },
+          "Swing": {
+            "trades": 135,
+            "wins": 37,
+            "winRate": 0.2741,
+            "expectancyR": -0.0991,
+            "grossExpectancyR": -0.0407,
+            "totalR": -13.38
+          },
+          "Trend": {
+            "trades": 148,
+            "wins": 33,
+            "winRate": 0.223,
+            "expectancyR": -0.2763,
+            "grossExpectancyR": -0.2196,
+            "totalR": -40.89
+          },
+          "VWAP": {
+            "trades": 84,
+            "wins": 30,
+            "winRate": 0.3571,
+            "expectancyR": 0.2083,
+            "grossExpectancyR": 0.25,
+            "totalR": 17.5
+          },
+          "VolatilityBreakout": {
+            "trades": 36,
+            "wins": 14,
+            "winRate": 0.3889,
+            "expectancyR": 0.2865,
+            "grossExpectancyR": 0.3611,
+            "totalR": 10.32
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 753,
+        "wins": 197,
+        "winRate": 0.2616,
+        "expectancyR": -0.1653,
+        "grossExpectancyR": -0.0843,
+        "totalR": -124.45,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 49,
+            "wins": 11,
+            "winRate": 0.2245,
+            "expectancyR": -0.2626,
+            "grossExpectancyR": -0.2143,
+            "totalR": -12.87
+          },
+          "Breakout": {
+            "trades": 69,
+            "wins": 22,
+            "winRate": 0.3188,
+            "expectancyR": 0.0266,
+            "grossExpectancyR": 0.116,
+            "totalR": 1.84
+          },
+          "Grid": {
+            "trades": 76,
+            "wins": 18,
+            "winRate": 0.2368,
+            "expectancyR": -0.2649,
+            "grossExpectancyR": -0.1711,
+            "totalR": -20.13
+          },
+          "MeanReversion": {
+            "trades": 71,
+            "wins": 19,
+            "winRate": 0.2676,
+            "expectancyR": -0.1673,
+            "grossExpectancyR": -0.0634,
+            "totalR": -11.88
+          },
+          "Momentum": {
+            "trades": 91,
+            "wins": 25,
+            "winRate": 0.2747,
+            "expectancyR": -0.1217,
+            "grossExpectancyR": -0.0385,
+            "totalR": -11.07
+          },
+          "Range": {
+            "trades": 75,
+            "wins": 17,
+            "winRate": 0.2267,
+            "expectancyR": -0.3139,
+            "grossExpectancyR": -0.2067,
+            "totalR": -23.54
+          },
+          "Scalping": {
+            "trades": 68,
+            "wins": 17,
+            "winRate": 0.25,
+            "expectancyR": -0.1993,
+            "grossExpectancyR": -0.125,
+            "totalR": -13.55
+          },
+          "Swing": {
+            "trades": 86,
+            "wins": 24,
+            "winRate": 0.2791,
+            "expectancyR": -0.0968,
+            "grossExpectancyR": -0.0232,
+            "totalR": -8.32
+          },
+          "Trend": {
+            "trades": 94,
+            "wins": 21,
+            "winRate": 0.2234,
+            "expectancyR": -0.2814,
+            "grossExpectancyR": -0.2181,
+            "totalR": -26.45
+          },
+          "VWAP": {
+            "trades": 44,
+            "wins": 14,
+            "winRate": 0.3182,
+            "expectancyR": 0.0721,
+            "grossExpectancyR": 0.1136,
+            "totalR": 3.17
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 9,
+            "winRate": 0.3,
+            "expectancyR": -0.0552,
+            "grossExpectancyR": 0.05,
+            "totalR": -1.66
+          }
+        }
+      }
+    },
+    "2.5x3.0": {
+      "stopMult": 2.5,
+      "ratio": 3.0,
+      "targetMult": 7.5,
+      "inSample": {
+        "trades": 969,
+        "wins": 258,
+        "winRate": 0.2663,
+        "expectancyR": 0.0111,
+        "grossExpectancyR": 0.065,
+        "totalR": 10.78,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 82,
+            "wins": 23,
+            "winRate": 0.2805,
+            "expectancyR": 0.0785,
+            "grossExpectancyR": 0.122,
+            "totalR": 6.44
+          },
+          "Breakout": {
+            "trades": 108,
+            "wins": 26,
+            "winRate": 0.2407,
+            "expectancyR": -0.099,
+            "grossExpectancyR": -0.037,
+            "totalR": -10.7
+          },
+          "Grid": {
+            "trades": 85,
+            "wins": 31,
+            "winRate": 0.3647,
+            "expectancyR": 0.41,
+            "grossExpectancyR": 0.4588,
+            "totalR": 34.85
+          },
+          "MeanReversion": {
+            "trades": 77,
+            "wins": 24,
+            "winRate": 0.3117,
+            "expectancyR": 0.2025,
+            "grossExpectancyR": 0.2468,
+            "totalR": 15.59
+          },
+          "Momentum": {
+            "trades": 106,
+            "wins": 21,
+            "winRate": 0.1981,
+            "expectancyR": -0.2775,
+            "grossExpectancyR": -0.2075,
+            "totalR": -29.41
+          },
+          "Range": {
+            "trades": 89,
+            "wins": 28,
+            "winRate": 0.3146,
+            "expectancyR": 0.2107,
+            "grossExpectancyR": 0.2584,
+            "totalR": 18.76
+          },
+          "Scalping": {
+            "trades": 88,
+            "wins": 23,
+            "winRate": 0.2614,
+            "expectancyR": -0.0163,
+            "grossExpectancyR": 0.0455,
+            "totalR": -1.44
+          },
+          "Swing": {
+            "trades": 104,
+            "wins": 20,
+            "winRate": 0.1923,
+            "expectancyR": -0.2818,
+            "grossExpectancyR": -0.2308,
+            "totalR": -29.31
+          },
+          "Trend": {
+            "trades": 129,
+            "wins": 24,
+            "winRate": 0.186,
+            "expectancyR": -0.3083,
+            "grossExpectancyR": -0.2558,
+            "totalR": -39.77
+          },
+          "VWAP": {
+            "trades": 67,
+            "wins": 26,
+            "winRate": 0.3881,
+            "expectancyR": 0.5112,
+            "grossExpectancyR": 0.5522,
+            "totalR": 34.25
+          },
+          "VolatilityBreakout": {
+            "trades": 34,
+            "wins": 12,
+            "winRate": 0.3529,
+            "expectancyR": 0.3384,
+            "grossExpectancyR": 0.4118,
+            "totalR": 11.5
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 653,
+        "wins": 164,
+        "winRate": 0.2511,
+        "expectancyR": -0.0802,
+        "grossExpectancyR": 0.0046,
+        "totalR": -52.37,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 43,
+            "wins": 10,
+            "winRate": 0.2326,
+            "expectancyR": -0.1195,
+            "grossExpectancyR": -0.0698,
+            "totalR": -5.14
+          },
+          "Breakout": {
+            "trades": 62,
+            "wins": 21,
+            "winRate": 0.3387,
+            "expectancyR": 0.2682,
+            "grossExpectancyR": 0.3548,
+            "totalR": 16.63
+          },
+          "Grid": {
+            "trades": 66,
+            "wins": 15,
+            "winRate": 0.2273,
+            "expectancyR": -0.1918,
+            "grossExpectancyR": -0.0909,
+            "totalR": -12.66
+          },
+          "MeanReversion": {
+            "trades": 60,
+            "wins": 18,
+            "winRate": 0.3,
+            "expectancyR": 0.0847,
+            "grossExpectancyR": 0.2,
+            "totalR": 5.08
+          },
+          "Momentum": {
+            "trades": 71,
+            "wins": 18,
+            "winRate": 0.2535,
+            "expectancyR": -0.0747,
+            "grossExpectancyR": 0.0141,
+            "totalR": -5.31
+          },
+          "Range": {
+            "trades": 67,
+            "wins": 14,
+            "winRate": 0.209,
+            "expectancyR": -0.2813,
+            "grossExpectancyR": -0.1642,
+            "totalR": -18.84
+          },
+          "Scalping": {
+            "trades": 64,
+            "wins": 14,
+            "winRate": 0.2188,
+            "expectancyR": -0.2019,
+            "grossExpectancyR": -0.125,
+            "totalR": -12.92
+          },
+          "Swing": {
+            "trades": 76,
+            "wins": 18,
+            "winRate": 0.2368,
+            "expectancyR": -0.1279,
+            "grossExpectancyR": -0.0526,
+            "totalR": -9.72
+          },
+          "Trend": {
+            "trades": 75,
+            "wins": 16,
+            "winRate": 0.2133,
+            "expectancyR": -0.2084,
+            "grossExpectancyR": -0.1467,
+            "totalR": -15.63
+          },
+          "VWAP": {
+            "trades": 39,
+            "wins": 11,
+            "winRate": 0.2821,
+            "expectancyR": 0.0845,
+            "grossExpectancyR": 0.1282,
+            "totalR": 3.3
+          },
+          "VolatilityBreakout": {
+            "trades": 30,
+            "wins": 9,
+            "winRate": 0.3,
+            "expectancyR": 0.0948,
+            "grossExpectancyR": 0.2,
+            "totalR": 2.84
+          }
+        }
+      }
+    },
+    "3.0x1.5": {
+      "stopMult": 3.0,
+      "ratio": 1.5,
+      "targetMult": 4.5,
+      "inSample": {
+        "trades": 1292,
+        "wins": 563,
+        "winRate": 0.4358,
+        "expectancyR": 0.0435,
+        "grossExpectancyR": 0.0894,
+        "totalR": 56.17,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 113,
+            "wins": 59,
+            "winRate": 0.5221,
+            "expectancyR": 0.2671,
+            "grossExpectancyR": 0.3053,
+            "totalR": 30.18
+          },
+          "Breakout": {
+            "trades": 128,
+            "wins": 47,
+            "winRate": 0.3672,
+            "expectancyR": -0.1306,
+            "grossExpectancyR": -0.082,
+            "totalR": -16.72
+          },
+          "Grid": {
+            "trades": 129,
+            "wins": 65,
+            "winRate": 0.5039,
+            "expectancyR": 0.2158,
+            "grossExpectancyR": 0.2597,
+            "totalR": 27.83
+          },
+          "MeanReversion": {
+            "trades": 120,
+            "wins": 59,
+            "winRate": 0.4917,
+            "expectancyR": 0.1852,
+            "grossExpectancyR": 0.2292,
+            "totalR": 22.22
+          },
+          "Momentum": {
+            "trades": 138,
+            "wins": 53,
+            "winRate": 0.3841,
+            "expectancyR": -0.0938,
+            "grossExpectancyR": -0.0399,
+            "totalR": -12.94
+          },
+          "Range": {
+            "trades": 133,
+            "wins": 66,
+            "winRate": 0.4962,
+            "expectancyR": 0.1955,
+            "grossExpectancyR": 0.2406,
+            "totalR": 26.0
+          },
+          "Scalping": {
+            "trades": 106,
+            "wins": 42,
+            "winRate": 0.3962,
+            "expectancyR": -0.058,
+            "grossExpectancyR": -0.0094,
+            "totalR": -6.14
+          },
+          "Swing": {
+            "trades": 136,
+            "wins": 50,
+            "winRate": 0.3676,
+            "expectancyR": -0.1275,
+            "grossExpectancyR": -0.0809,
+            "totalR": -17.33
+          },
+          "Trend": {
+            "trades": 154,
+            "wins": 56,
+            "winRate": 0.3636,
+            "expectancyR": -0.1359,
+            "grossExpectancyR": -0.0909,
+            "totalR": -20.93
+          },
+          "VWAP": {
+            "trades": 98,
+            "wins": 50,
+            "winRate": 0.5102,
+            "expectancyR": 0.2388,
+            "grossExpectancyR": 0.2755,
+            "totalR": 23.4
+          },
+          "VolatilityBreakout": {
+            "trades": 37,
+            "wins": 16,
+            "winRate": 0.4324,
+            "expectancyR": 0.016,
+            "grossExpectancyR": 0.0811,
+            "totalR": 0.59
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 801,
+        "wins": 290,
+        "winRate": 0.362,
+        "expectancyR": -0.1645,
+        "grossExpectancyR": -0.0949,
+        "totalR": -131.78,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 53,
+            "wins": 17,
+            "winRate": 0.3208,
+            "expectancyR": -0.2392,
+            "grossExpectancyR": -0.1981,
+            "totalR": -12.68
+          },
+          "Breakout": {
+            "trades": 80,
+            "wins": 35,
+            "winRate": 0.4375,
+            "expectancyR": 0.0214,
+            "grossExpectancyR": 0.0938,
+            "totalR": 1.71
+          },
+          "Grid": {
+            "trades": 84,
+            "wins": 28,
+            "winRate": 0.3333,
+            "expectancyR": -0.2433,
+            "grossExpectancyR": -0.1667,
+            "totalR": -20.44
+          },
+          "MeanReversion": {
+            "trades": 74,
+            "wins": 25,
+            "winRate": 0.3378,
+            "expectancyR": -0.2429,
+            "grossExpectancyR": -0.1554,
+            "totalR": -17.97
+          },
+          "Momentum": {
+            "trades": 89,
+            "wins": 36,
+            "winRate": 0.4045,
+            "expectancyR": -0.0608,
+            "grossExpectancyR": 0.0112,
+            "totalR": -5.41
+          },
+          "Range": {
+            "trades": 83,
+            "wins": 25,
+            "winRate": 0.3012,
+            "expectancyR": -0.3334,
+            "grossExpectancyR": -0.247,
+            "totalR": -27.67
+          },
+          "Scalping": {
+            "trades": 74,
+            "wins": 25,
+            "winRate": 0.3378,
+            "expectancyR": -0.2119,
+            "grossExpectancyR": -0.1554,
+            "totalR": -15.68
+          },
+          "Swing": {
+            "trades": 88,
+            "wins": 29,
+            "winRate": 0.3295,
+            "expectancyR": -0.247,
+            "grossExpectancyR": -0.1761,
+            "totalR": -21.73
+          },
+          "Trend": {
+            "trades": 96,
+            "wins": 38,
+            "winRate": 0.3958,
+            "expectancyR": -0.0785,
+            "grossExpectancyR": -0.0104,
+            "totalR": -7.54
+          },
+          "VWAP": {
+            "trades": 51,
+            "wins": 22,
+            "winRate": 0.4314,
+            "expectancyR": 0.0438,
+            "grossExpectancyR": 0.0784,
+            "totalR": 2.23
+          },
+          "VolatilityBreakout": {
+            "trades": 29,
+            "wins": 10,
+            "winRate": 0.3448,
+            "expectancyR": -0.2279,
+            "grossExpectancyR": -0.1379,
+            "totalR": -6.61
+          }
+        }
+      }
+    },
+    "3.0x2.0": {
+      "stopMult": 3.0,
+      "ratio": 2.0,
+      "targetMult": 6.0,
+      "inSample": {
+        "trades": 936,
+        "wins": 338,
+        "winRate": 0.3611,
+        "expectancyR": 0.0387,
+        "grossExpectancyR": 0.0833,
+        "totalR": 36.19,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 75,
+            "wins": 32,
+            "winRate": 0.4267,
+            "expectancyR": 0.2441,
+            "grossExpectancyR": 0.28,
+            "totalR": 18.31
+          },
+          "Breakout": {
+            "trades": 110,
+            "wins": 35,
+            "winRate": 0.3182,
+            "expectancyR": -0.0972,
+            "grossExpectancyR": -0.0454,
+            "totalR": -10.69
+          },
+          "Grid": {
+            "trades": 82,
+            "wins": 34,
+            "winRate": 0.4146,
+            "expectancyR": 0.2051,
+            "grossExpectancyR": 0.2439,
+            "totalR": 16.82
+          },
+          "MeanReversion": {
+            "trades": 80,
+            "wins": 34,
+            "winRate": 0.425,
+            "expectancyR": 0.2366,
+            "grossExpectancyR": 0.275,
+            "totalR": 18.93
+          },
+          "Momentum": {
+            "trades": 94,
+            "wins": 34,
+            "winRate": 0.3617,
+            "expectancyR": 0.029,
+            "grossExpectancyR": 0.0851,
+            "totalR": 2.73
+          },
+          "Range": {
+            "trades": 84,
+            "wins": 35,
+            "winRate": 0.4167,
+            "expectancyR": 0.2095,
+            "grossExpectancyR": 0.25,
+            "totalR": 17.6
+          },
+          "Scalping": {
+            "trades": 86,
+            "wins": 28,
+            "winRate": 0.3256,
+            "expectancyR": -0.072,
+            "grossExpectancyR": -0.0232,
+            "totalR": -6.2
+          },
+          "Swing": {
+            "trades": 110,
+            "wins": 34,
+            "winRate": 0.3091,
+            "expectancyR": -0.1194,
+            "grossExpectancyR": -0.0727,
+            "totalR": -13.13
+          },
+          "Trend": {
+            "trades": 112,
+            "wins": 29,
+            "winRate": 0.2589,
+            "expectancyR": -0.2656,
+            "grossExpectancyR": -0.2232,
+            "totalR": -29.74
+          },
+          "VWAP": {
+            "trades": 70,
+            "wins": 30,
+            "winRate": 0.4286,
+            "expectancyR": 0.2517,
+            "grossExpectancyR": 0.2857,
+            "totalR": 17.62
+          },
+          "VolatilityBreakout": {
+            "trades": 33,
+            "wins": 13,
+            "winRate": 0.3939,
+            "expectancyR": 0.1201,
+            "grossExpectancyR": 0.1818,
+            "totalR": 3.96
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 685,
+        "wins": 205,
+        "winRate": 0.2993,
+        "expectancyR": -0.1724,
+        "grossExpectancyR": -0.1022,
+        "totalR": -118.12,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 45,
+            "wins": 11,
+            "winRate": 0.2444,
+            "expectancyR": -0.3069,
+            "grossExpectancyR": -0.2667,
+            "totalR": -13.81
+          },
+          "Breakout": {
+            "trades": 73,
+            "wins": 27,
+            "winRate": 0.3699,
+            "expectancyR": 0.0308,
+            "grossExpectancyR": 0.1096,
+            "totalR": 2.25
+          },
+          "Grid": {
+            "trades": 71,
+            "wins": 21,
+            "winRate": 0.2958,
+            "expectancyR": -0.193,
+            "grossExpectancyR": -0.1127,
+            "totalR": -13.7
+          },
+          "MeanReversion": {
+            "trades": 65,
+            "wins": 18,
+            "winRate": 0.2769,
+            "expectancyR": -0.2581,
+            "grossExpectancyR": -0.1692,
+            "totalR": -16.77
+          },
+          "Momentum": {
+            "trades": 82,
+            "wins": 22,
+            "winRate": 0.2683,
+            "expectancyR": -0.266,
+            "grossExpectancyR": -0.1951,
+            "totalR": -21.81
+          },
+          "Range": {
+            "trades": 71,
+            "wins": 19,
+            "winRate": 0.2676,
+            "expectancyR": -0.2881,
+            "grossExpectancyR": -0.1972,
+            "totalR": -20.45
+          },
+          "Scalping": {
+            "trades": 61,
+            "wins": 19,
+            "winRate": 0.3115,
+            "expectancyR": -0.1251,
+            "grossExpectancyR": -0.0656,
+            "totalR": -7.63
+          },
+          "Swing": {
+            "trades": 76,
+            "wins": 21,
+            "winRate": 0.2763,
+            "expectancyR": -0.2364,
+            "grossExpectancyR": -0.171,
+            "totalR": -17.97
+          },
+          "Trend": {
+            "trades": 75,
+            "wins": 25,
+            "winRate": 0.3333,
+            "expectancyR": -0.0573,
+            "grossExpectancyR": -0.0,
+            "totalR": -4.3
+          },
+          "VWAP": {
+            "trades": 37,
+            "wins": 13,
+            "winRate": 0.3514,
+            "expectancyR": 0.0185,
+            "grossExpectancyR": 0.0541,
+            "totalR": 0.68
+          },
+          "VolatilityBreakout": {
+            "trades": 29,
+            "wins": 9,
+            "winRate": 0.3103,
+            "expectancyR": -0.1589,
+            "grossExpectancyR": -0.069,
+            "totalR": -4.61
+          }
+        }
+      }
+    },
+    "3.0x2.5": {
+      "stopMult": 3.0,
+      "ratio": 2.5,
+      "targetMult": 7.5,
+      "inSample": {
+        "trades": 806,
+        "wins": 264,
+        "winRate": 0.3275,
+        "expectancyR": 0.1021,
+        "grossExpectancyR": 0.1464,
+        "totalR": 82.28,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 59,
+            "wins": 29,
+            "winRate": 0.4915,
+            "expectancyR": 0.6852,
+            "grossExpectancyR": 0.7203,
+            "totalR": 40.42
+          },
+          "Breakout": {
+            "trades": 93,
+            "wins": 24,
+            "winRate": 0.2581,
+            "expectancyR": -0.1481,
+            "grossExpectancyR": -0.0968,
+            "totalR": -13.77
+          },
+          "Grid": {
+            "trades": 74,
+            "wins": 32,
+            "winRate": 0.4324,
+            "expectancyR": 0.4727,
+            "grossExpectancyR": 0.5135,
+            "totalR": 34.98
+          },
+          "MeanReversion": {
+            "trades": 64,
+            "wins": 26,
+            "winRate": 0.4062,
+            "expectancyR": 0.3851,
+            "grossExpectancyR": 0.4219,
+            "totalR": 24.65
+          },
+          "Momentum": {
+            "trades": 76,
+            "wins": 15,
+            "winRate": 0.1974,
+            "expectancyR": -0.3633,
+            "grossExpectancyR": -0.3092,
+            "totalR": -27.61
+          },
+          "Range": {
+            "trades": 72,
+            "wins": 31,
+            "winRate": 0.4306,
+            "expectancyR": 0.4653,
+            "grossExpectancyR": 0.5069,
+            "totalR": 33.5
+          },
+          "Scalping": {
+            "trades": 80,
+            "wins": 25,
+            "winRate": 0.3125,
+            "expectancyR": 0.0452,
+            "grossExpectancyR": 0.0937,
+            "totalR": 3.61
+          },
+          "Swing": {
+            "trades": 97,
+            "wins": 22,
+            "winRate": 0.2268,
+            "expectancyR": -0.2496,
+            "grossExpectancyR": -0.2062,
+            "totalR": -24.21
+          },
+          "Trend": {
+            "trades": 104,
+            "wins": 23,
+            "winRate": 0.2212,
+            "expectancyR": -0.2695,
+            "grossExpectancyR": -0.226,
+            "totalR": -28.03
+          },
+          "VWAP": {
+            "trades": 56,
+            "wins": 26,
+            "winRate": 0.4643,
+            "expectancyR": 0.5913,
+            "grossExpectancyR": 0.625,
+            "totalR": 33.11
+          },
+          "VolatilityBreakout": {
+            "trades": 31,
+            "wins": 11,
+            "winRate": 0.3548,
+            "expectancyR": 0.1813,
+            "grossExpectancyR": 0.2419,
+            "totalR": 5.62
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 587,
+        "wins": 163,
+        "winRate": 0.2777,
+        "expectancyR": -0.1015,
+        "grossExpectancyR": -0.0281,
+        "totalR": -59.55,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 39,
+            "wins": 10,
+            "winRate": 0.2564,
+            "expectancyR": -0.1444,
+            "grossExpectancyR": -0.1026,
+            "totalR": -5.63
+          },
+          "Breakout": {
+            "trades": 64,
+            "wins": 20,
+            "winRate": 0.3125,
+            "expectancyR": 0.0192,
+            "grossExpectancyR": 0.0938,
+            "totalR": 1.23
+          },
+          "Grid": {
+            "trades": 56,
+            "wins": 14,
+            "winRate": 0.25,
+            "expectancyR": -0.2119,
+            "grossExpectancyR": -0.125,
+            "totalR": -11.87
+          },
+          "MeanReversion": {
+            "trades": 55,
+            "wins": 17,
+            "winRate": 0.3091,
+            "expectancyR": -0.0174,
+            "grossExpectancyR": 0.0818,
+            "totalR": -0.96
+          },
+          "Momentum": {
+            "trades": 73,
+            "wins": 18,
+            "winRate": 0.2466,
+            "expectancyR": -0.2098,
+            "grossExpectancyR": -0.137,
+            "totalR": -15.31
+          },
+          "Range": {
+            "trades": 57,
+            "wins": 13,
+            "winRate": 0.2281,
+            "expectancyR": -0.3037,
+            "grossExpectancyR": -0.2018,
+            "totalR": -17.31
+          },
+          "Scalping": {
+            "trades": 58,
+            "wins": 13,
+            "winRate": 0.2241,
+            "expectancyR": -0.2786,
+            "grossExpectancyR": -0.2155,
+            "totalR": -16.16
+          },
+          "Swing": {
+            "trades": 66,
+            "wins": 17,
+            "winRate": 0.2576,
+            "expectancyR": -0.1666,
+            "grossExpectancyR": -0.0985,
+            "totalR": -10.99
+          },
+          "Trend": {
+            "trades": 57,
+            "wins": 20,
+            "winRate": 0.3509,
+            "expectancyR": 0.1713,
+            "grossExpectancyR": 0.2281,
+            "totalR": 9.76
+          },
+          "VWAP": {
+            "trades": 33,
+            "wins": 12,
+            "winRate": 0.3636,
+            "expectancyR": 0.2362,
+            "grossExpectancyR": 0.2727,
+            "totalR": 7.79
+          },
+          "VolatilityBreakout": {
+            "trades": 29,
+            "wins": 9,
+            "winRate": 0.3103,
+            "expectancyR": -0.0038,
+            "grossExpectancyR": 0.0862,
+            "totalR": -0.11
+          }
+        }
+      }
+    },
+    "3.0x3.0": {
+      "stopMult": 3.0,
+      "ratio": 3.0,
+      "targetMult": 9.0,
+      "inSample": {
+        "trades": 708,
+        "wins": 182,
+        "winRate": 0.2571,
+        "expectancyR": -0.0154,
+        "grossExpectancyR": 0.0282,
+        "totalR": -10.91,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 58,
+            "wins": 22,
+            "winRate": 0.3793,
+            "expectancyR": 0.4806,
+            "grossExpectancyR": 0.5172,
+            "totalR": 27.88
+          },
+          "Breakout": {
+            "trades": 85,
+            "wins": 10,
+            "winRate": 0.1176,
+            "expectancyR": -0.5756,
+            "grossExpectancyR": -0.5294,
+            "totalR": -48.92
+          },
+          "Grid": {
+            "trades": 64,
+            "wins": 25,
+            "winRate": 0.3906,
+            "expectancyR": 0.5225,
+            "grossExpectancyR": 0.5625,
+            "totalR": 33.44
+          },
+          "MeanReversion": {
+            "trades": 50,
+            "wins": 14,
+            "winRate": 0.28,
+            "expectancyR": 0.083,
+            "grossExpectancyR": 0.12,
+            "totalR": 4.15
+          },
+          "Momentum": {
+            "trades": 69,
+            "wins": 14,
+            "winRate": 0.2029,
+            "expectancyR": -0.2429,
+            "grossExpectancyR": -0.1884,
+            "totalR": -16.76
+          },
+          "Range": {
+            "trades": 63,
+            "wins": 24,
+            "winRate": 0.381,
+            "expectancyR": 0.4826,
+            "grossExpectancyR": 0.5238,
+            "totalR": 30.41
+          },
+          "Scalping": {
+            "trades": 68,
+            "wins": 15,
+            "winRate": 0.2206,
+            "expectancyR": -0.1642,
+            "grossExpectancyR": -0.1176,
+            "totalR": -11.17
+          },
+          "Swing": {
+            "trades": 80,
+            "wins": 12,
+            "winRate": 0.15,
+            "expectancyR": -0.444,
+            "grossExpectancyR": -0.4,
+            "totalR": -35.52
+          },
+          "Trend": {
+            "trades": 92,
+            "wins": 14,
+            "winRate": 0.1522,
+            "expectancyR": -0.4352,
+            "grossExpectancyR": -0.3913,
+            "totalR": -40.04
+          },
+          "VWAP": {
+            "trades": 50,
+            "wins": 22,
+            "winRate": 0.44,
+            "expectancyR": 0.7273,
+            "grossExpectancyR": 0.76,
+            "totalR": 36.37
+          },
+          "VolatilityBreakout": {
+            "trades": 29,
+            "wins": 10,
+            "winRate": 0.3448,
+            "expectancyR": 0.319,
+            "grossExpectancyR": 0.3793,
+            "totalR": 9.25
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 531,
+        "wins": 141,
+        "winRate": 0.2655,
+        "expectancyR": -0.0137,
+        "grossExpectancyR": 0.0621,
+        "totalR": -7.27,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 35,
+            "wins": 8,
+            "winRate": 0.2286,
+            "expectancyR": -0.1293,
+            "grossExpectancyR": -0.0857,
+            "totalR": -4.52
+          },
+          "Breakout": {
+            "trades": 56,
+            "wins": 17,
+            "winRate": 0.3036,
+            "expectancyR": 0.136,
+            "grossExpectancyR": 0.2143,
+            "totalR": 7.62
+          },
+          "Grid": {
+            "trades": 50,
+            "wins": 14,
+            "winRate": 0.28,
+            "expectancyR": 0.0282,
+            "grossExpectancyR": 0.12,
+            "totalR": 1.41
+          },
+          "MeanReversion": {
+            "trades": 50,
+            "wins": 14,
+            "winRate": 0.28,
+            "expectancyR": 0.0182,
+            "grossExpectancyR": 0.12,
+            "totalR": 0.91
+          },
+          "Momentum": {
+            "trades": 71,
+            "wins": 17,
+            "winRate": 0.2394,
+            "expectancyR": -0.1163,
+            "grossExpectancyR": -0.0423,
+            "totalR": -8.26
+          },
+          "Range": {
+            "trades": 51,
+            "wins": 13,
+            "winRate": 0.2549,
+            "expectancyR": -0.0892,
+            "grossExpectancyR": 0.0196,
+            "totalR": -4.55
+          },
+          "Scalping": {
+            "trades": 49,
+            "wins": 10,
+            "winRate": 0.2041,
+            "expectancyR": -0.2489,
+            "grossExpectancyR": -0.1837,
+            "totalR": -12.19
+          },
+          "Swing": {
+            "trades": 62,
+            "wins": 16,
+            "winRate": 0.2581,
+            "expectancyR": -0.0334,
+            "grossExpectancyR": 0.0322,
+            "totalR": -2.07
+          },
+          "Trend": {
+            "trades": 54,
+            "wins": 16,
+            "winRate": 0.2963,
+            "expectancyR": 0.1277,
+            "grossExpectancyR": 0.1852,
+            "totalR": 6.89
+          },
+          "VWAP": {
+            "trades": 26,
+            "wins": 9,
+            "winRate": 0.3462,
+            "expectancyR": 0.3475,
+            "grossExpectancyR": 0.3846,
+            "totalR": 9.04
+          },
+          "VolatilityBreakout": {
+            "trades": 27,
+            "wins": 7,
+            "winRate": 0.2593,
+            "expectancyR": -0.0571,
+            "grossExpectancyR": 0.037,
+            "totalR": -1.54
+          }
+        }
+      }
+    },
+    "3.5x1.5": {
+      "stopMult": 3.5,
+      "ratio": 1.5,
+      "targetMult": 5.25,
+      "inSample": {
+        "trades": 955,
+        "wins": 392,
+        "winRate": 0.4105,
+        "expectancyR": -0.0117,
+        "grossExpectancyR": 0.0262,
+        "totalR": -11.16,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 83,
+            "wins": 39,
+            "winRate": 0.4699,
+            "expectancyR": 0.1435,
+            "grossExpectancyR": 0.1747,
+            "totalR": 11.91
+          },
+          "Breakout": {
+            "trades": 110,
+            "wins": 37,
+            "winRate": 0.3364,
+            "expectancyR": -0.2034,
+            "grossExpectancyR": -0.1591,
+            "totalR": -22.37
+          },
+          "Grid": {
+            "trades": 91,
+            "wins": 43,
+            "winRate": 0.4725,
+            "expectancyR": 0.1459,
+            "grossExpectancyR": 0.1813,
+            "totalR": 13.28
+          },
+          "MeanReversion": {
+            "trades": 90,
+            "wins": 44,
+            "winRate": 0.4889,
+            "expectancyR": 0.1875,
+            "grossExpectancyR": 0.2222,
+            "totalR": 16.87
+          },
+          "Momentum": {
+            "trades": 94,
+            "wins": 34,
+            "winRate": 0.3617,
+            "expectancyR": -0.1382,
+            "grossExpectancyR": -0.0958,
+            "totalR": -13.0
+          },
+          "Range": {
+            "trades": 95,
+            "wins": 43,
+            "winRate": 0.4526,
+            "expectancyR": 0.095,
+            "grossExpectancyR": 0.1316,
+            "totalR": 9.03
+          },
+          "Scalping": {
+            "trades": 80,
+            "wins": 35,
+            "winRate": 0.4375,
+            "expectancyR": 0.0553,
+            "grossExpectancyR": 0.0937,
+            "totalR": 4.42
+          },
+          "Swing": {
+            "trades": 100,
+            "wins": 35,
+            "winRate": 0.35,
+            "expectancyR": -0.163,
+            "grossExpectancyR": -0.125,
+            "totalR": -16.3
+          },
+          "Trend": {
+            "trades": 106,
+            "wins": 31,
+            "winRate": 0.2925,
+            "expectancyR": -0.3069,
+            "grossExpectancyR": -0.2689,
+            "totalR": -32.53
+          },
+          "VWAP": {
+            "trades": 74,
+            "wins": 38,
+            "winRate": 0.5135,
+            "expectancyR": 0.2535,
+            "grossExpectancyR": 0.2838,
+            "totalR": 18.76
+          },
+          "VolatilityBreakout": {
+            "trades": 32,
+            "wins": 13,
+            "winRate": 0.4062,
+            "expectancyR": -0.0382,
+            "grossExpectancyR": 0.0156,
+            "totalR": -1.22
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 608,
+        "wins": 248,
+        "winRate": 0.4079,
+        "expectancyR": -0.0429,
+        "grossExpectancyR": 0.0197,
+        "totalR": -26.1,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 45,
+            "wins": 18,
+            "winRate": 0.4,
+            "expectancyR": -0.0343,
+            "grossExpectancyR": 0.0,
+            "totalR": -1.55
+          },
+          "Breakout": {
+            "trades": 57,
+            "wins": 26,
+            "winRate": 0.4561,
+            "expectancyR": 0.0722,
+            "grossExpectancyR": 0.1403,
+            "totalR": 4.12
+          },
+          "Grid": {
+            "trades": 61,
+            "wins": 22,
+            "winRate": 0.3607,
+            "expectancyR": -0.1715,
+            "grossExpectancyR": -0.0983,
+            "totalR": -10.46
+          },
+          "MeanReversion": {
+            "trades": 59,
+            "wins": 22,
+            "winRate": 0.3729,
+            "expectancyR": -0.1479,
+            "grossExpectancyR": -0.0678,
+            "totalR": -8.73
+          },
+          "Momentum": {
+            "trades": 60,
+            "wins": 28,
+            "winRate": 0.4667,
+            "expectancyR": 0.0967,
+            "grossExpectancyR": 0.1667,
+            "totalR": 5.8
+          },
+          "Range": {
+            "trades": 63,
+            "wins": 21,
+            "winRate": 0.3333,
+            "expectancyR": -0.2515,
+            "grossExpectancyR": -0.1667,
+            "totalR": -15.84
+          },
+          "Scalping": {
+            "trades": 57,
+            "wins": 25,
+            "winRate": 0.4386,
+            "expectancyR": 0.0445,
+            "grossExpectancyR": 0.0965,
+            "totalR": 2.53
+          },
+          "Swing": {
+            "trades": 69,
+            "wins": 28,
+            "winRate": 0.4058,
+            "expectancyR": -0.0411,
+            "grossExpectancyR": 0.0145,
+            "totalR": -2.83
+          },
+          "Trend": {
+            "trades": 71,
+            "wins": 29,
+            "winRate": 0.4085,
+            "expectancyR": -0.0332,
+            "grossExpectancyR": 0.0211,
+            "totalR": -2.36
+          },
+          "VWAP": {
+            "trades": 38,
+            "wins": 18,
+            "winRate": 0.4737,
+            "expectancyR": 0.1548,
+            "grossExpectancyR": 0.1842,
+            "totalR": 5.88
+          },
+          "VolatilityBreakout": {
+            "trades": 28,
+            "wins": 11,
+            "winRate": 0.3929,
+            "expectancyR": -0.0952,
+            "grossExpectancyR": -0.0179,
+            "totalR": -2.66
+          }
+        }
+      }
+    },
+    "3.5x2.0": {
+      "stopMult": 3.5,
+      "ratio": 2.0,
+      "targetMult": 7.0,
+      "inSample": {
+        "trades": 726,
+        "wins": 259,
+        "winRate": 0.3567,
+        "expectancyR": 0.0335,
+        "grossExpectancyR": 0.0702,
+        "totalR": 24.31,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 59,
+            "wins": 27,
+            "winRate": 0.4576,
+            "expectancyR": 0.3424,
+            "grossExpectancyR": 0.3729,
+            "totalR": 20.2
+          },
+          "Breakout": {
+            "trades": 88,
+            "wins": 25,
+            "winRate": 0.2841,
+            "expectancyR": -0.1931,
+            "grossExpectancyR": -0.1477,
+            "totalR": -16.99
+          },
+          "Grid": {
+            "trades": 65,
+            "wins": 30,
+            "winRate": 0.4615,
+            "expectancyR": 0.3509,
+            "grossExpectancyR": 0.3846,
+            "totalR": 22.81
+          },
+          "MeanReversion": {
+            "trades": 62,
+            "wins": 29,
+            "winRate": 0.4677,
+            "expectancyR": 0.3703,
+            "grossExpectancyR": 0.4032,
+            "totalR": 22.96
+          },
+          "Momentum": {
+            "trades": 71,
+            "wins": 15,
+            "winRate": 0.2113,
+            "expectancyR": -0.4082,
+            "grossExpectancyR": -0.3662,
+            "totalR": -28.98
+          },
+          "Range": {
+            "trades": 69,
+            "wins": 30,
+            "winRate": 0.4348,
+            "expectancyR": 0.2696,
+            "grossExpectancyR": 0.3043,
+            "totalR": 18.6
+          },
+          "Scalping": {
+            "trades": 64,
+            "wins": 23,
+            "winRate": 0.3594,
+            "expectancyR": 0.0423,
+            "grossExpectancyR": 0.0781,
+            "totalR": 2.7
+          },
+          "Swing": {
+            "trades": 76,
+            "wins": 21,
+            "winRate": 0.2763,
+            "expectancyR": -0.2059,
+            "grossExpectancyR": -0.1711,
+            "totalR": -15.64
+          },
+          "Trend": {
+            "trades": 88,
+            "wins": 23,
+            "winRate": 0.2614,
+            "expectancyR": -0.2518,
+            "grossExpectancyR": -0.2159,
+            "totalR": -22.16
+          },
+          "VWAP": {
+            "trades": 53,
+            "wins": 25,
+            "winRate": 0.4717,
+            "expectancyR": 0.3861,
+            "grossExpectancyR": 0.4151,
+            "totalR": 20.47
+          },
+          "VolatilityBreakout": {
+            "trades": 31,
+            "wins": 11,
+            "winRate": 0.3548,
+            "expectancyR": 0.0112,
+            "grossExpectancyR": 0.0645,
+            "totalR": 0.35
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 490,
+        "wins": 163,
+        "winRate": 0.3327,
+        "expectancyR": -0.0683,
+        "grossExpectancyR": -0.002,
+        "totalR": -33.47,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 33,
+            "wins": 10,
+            "winRate": 0.303,
+            "expectancyR": -0.1268,
+            "grossExpectancyR": -0.0909,
+            "totalR": -4.19
+          },
+          "Breakout": {
+            "trades": 48,
+            "wins": 19,
+            "winRate": 0.3958,
+            "expectancyR": 0.12,
+            "grossExpectancyR": 0.1875,
+            "totalR": 5.76
+          },
+          "Grid": {
+            "trades": 49,
+            "wins": 16,
+            "winRate": 0.3265,
+            "expectancyR": -0.0993,
+            "grossExpectancyR": -0.0204,
+            "totalR": -4.87
+          },
+          "MeanReversion": {
+            "trades": 48,
+            "wins": 16,
+            "winRate": 0.3333,
+            "expectancyR": -0.0897,
+            "grossExpectancyR": 0.0,
+            "totalR": -4.31
+          },
+          "Momentum": {
+            "trades": 51,
+            "wins": 18,
+            "winRate": 0.3529,
+            "expectancyR": -0.0151,
+            "grossExpectancyR": 0.0588,
+            "totalR": -0.77
+          },
+          "Range": {
+            "trades": 50,
+            "wins": 14,
+            "winRate": 0.28,
+            "expectancyR": -0.2539,
+            "grossExpectancyR": -0.16,
+            "totalR": -12.7
+          },
+          "Scalping": {
+            "trades": 48,
+            "wins": 15,
+            "winRate": 0.3125,
+            "expectancyR": -0.1179,
+            "grossExpectancyR": -0.0625,
+            "totalR": -5.66
+          },
+          "Swing": {
+            "trades": 58,
+            "wins": 17,
+            "winRate": 0.2931,
+            "expectancyR": -0.1766,
+            "grossExpectancyR": -0.1207,
+            "totalR": -10.24
+          },
+          "Trend": {
+            "trades": 50,
+            "wins": 18,
+            "winRate": 0.36,
+            "expectancyR": 0.0303,
+            "grossExpectancyR": 0.08,
+            "totalR": 1.51
+          },
+          "VWAP": {
+            "trades": 29,
+            "wins": 11,
+            "winRate": 0.3793,
+            "expectancyR": 0.1068,
+            "grossExpectancyR": 0.1379,
+            "totalR": 3.1
+          },
+          "VolatilityBreakout": {
+            "trades": 26,
+            "wins": 9,
+            "winRate": 0.3462,
+            "expectancyR": -0.0428,
+            "grossExpectancyR": 0.0385,
+            "totalR": -1.11
+          }
+        }
+      }
+    },
+    "3.5x2.5": {
+      "stopMult": 3.5,
+      "ratio": 2.5,
+      "targetMult": 8.75,
+      "inSample": {
+        "trades": 585,
+        "wins": 175,
+        "winRate": 0.2991,
+        "expectancyR": 0.0091,
+        "grossExpectancyR": 0.047,
+        "totalR": 5.3,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 45,
+            "wins": 23,
+            "winRate": 0.5111,
+            "expectancyR": 0.7565,
+            "grossExpectancyR": 0.7889,
+            "totalR": 34.04
+          },
+          "Breakout": {
+            "trades": 75,
+            "wins": 9,
+            "winRate": 0.12,
+            "expectancyR": -0.6225,
+            "grossExpectancyR": -0.58,
+            "totalR": -46.68
+          },
+          "Grid": {
+            "trades": 49,
+            "wins": 19,
+            "winRate": 0.3878,
+            "expectancyR": 0.322,
+            "grossExpectancyR": 0.3571,
+            "totalR": 15.78
+          },
+          "MeanReversion": {
+            "trades": 40,
+            "wins": 15,
+            "winRate": 0.375,
+            "expectancyR": 0.28,
+            "grossExpectancyR": 0.3125,
+            "totalR": 11.2
+          },
+          "Momentum": {
+            "trades": 65,
+            "wins": 16,
+            "winRate": 0.2462,
+            "expectancyR": -0.1822,
+            "grossExpectancyR": -0.1385,
+            "totalR": -11.85
+          },
+          "Range": {
+            "trades": 48,
+            "wins": 19,
+            "winRate": 0.3958,
+            "expectancyR": 0.3494,
+            "grossExpectancyR": 0.3854,
+            "totalR": 16.77
+          },
+          "Scalping": {
+            "trades": 60,
+            "wins": 18,
+            "winRate": 0.3,
+            "expectancyR": 0.012,
+            "grossExpectancyR": 0.05,
+            "totalR": 0.72
+          },
+          "Swing": {
+            "trades": 63,
+            "wins": 12,
+            "winRate": 0.1905,
+            "expectancyR": -0.3695,
+            "grossExpectancyR": -0.3333,
+            "totalR": -23.28
+          },
+          "Trend": {
+            "trades": 73,
+            "wins": 14,
+            "winRate": 0.1918,
+            "expectancyR": -0.3674,
+            "grossExpectancyR": -0.3288,
+            "totalR": -26.82
+          },
+          "VWAP": {
+            "trades": 39,
+            "wins": 21,
+            "winRate": 0.5385,
+            "expectancyR": 0.8563,
+            "grossExpectancyR": 0.8846,
+            "totalR": 33.4
+          },
+          "VolatilityBreakout": {
+            "trades": 28,
+            "wins": 9,
+            "winRate": 0.3214,
+            "expectancyR": 0.0721,
+            "grossExpectancyR": 0.125,
+            "totalR": 2.02
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 442,
+        "wins": 138,
+        "winRate": 0.3122,
+        "expectancyR": 0.0246,
+        "grossExpectancyR": 0.0928,
+        "totalR": 10.86,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 28,
+            "wins": 8,
+            "winRate": 0.2857,
+            "expectancyR": -0.0382,
+            "grossExpectancyR": -0.0,
+            "totalR": -1.07
+          },
+          "Breakout": {
+            "trades": 47,
+            "wins": 17,
+            "winRate": 0.3617,
+            "expectancyR": 0.1993,
+            "grossExpectancyR": 0.266,
+            "totalR": 9.37
+          },
+          "Grid": {
+            "trades": 44,
+            "wins": 16,
+            "winRate": 0.3636,
+            "expectancyR": 0.1901,
+            "grossExpectancyR": 0.2727,
+            "totalR": 8.37
+          },
+          "MeanReversion": {
+            "trades": 41,
+            "wins": 13,
+            "winRate": 0.3171,
+            "expectancyR": 0.0144,
+            "grossExpectancyR": 0.1098,
+            "totalR": 0.59
+          },
+          "Momentum": {
+            "trades": 45,
+            "wins": 13,
+            "winRate": 0.2889,
+            "expectancyR": -0.0658,
+            "grossExpectancyR": 0.0111,
+            "totalR": -2.96
+          },
+          "Range": {
+            "trades": 47,
+            "wins": 15,
+            "winRate": 0.3191,
+            "expectancyR": 0.0189,
+            "grossExpectancyR": 0.117,
+            "totalR": 0.89
+          },
+          "Scalping": {
+            "trades": 43,
+            "wins": 12,
+            "winRate": 0.2791,
+            "expectancyR": -0.0788,
+            "grossExpectancyR": -0.0233,
+            "totalR": -3.39
+          },
+          "Swing": {
+            "trades": 52,
+            "wins": 16,
+            "winRate": 0.3077,
+            "expectancyR": 0.0179,
+            "grossExpectancyR": 0.0769,
+            "totalR": 0.93
+          },
+          "Trend": {
+            "trades": 47,
+            "wins": 13,
+            "winRate": 0.2766,
+            "expectancyR": -0.0749,
+            "grossExpectancyR": -0.0319,
+            "totalR": -3.52
+          },
+          "VWAP": {
+            "trades": 24,
+            "wins": 8,
+            "winRate": 0.3333,
+            "expectancyR": 0.1337,
+            "grossExpectancyR": 0.1667,
+            "totalR": 3.21
+          },
+          "VolatilityBreakout": {
+            "trades": 24,
+            "wins": 7,
+            "winRate": 0.2917,
+            "expectancyR": -0.0648,
+            "grossExpectancyR": 0.0208,
+            "totalR": -1.56
+          }
+        }
+      }
+    },
+    "3.5x3.0": {
+      "stopMult": 3.5,
+      "ratio": 3.0,
+      "targetMult": 10.5,
+      "inSample": {
+        "trades": 542,
+        "wins": 116,
+        "winRate": 0.214,
+        "expectancyR": -0.183,
+        "grossExpectancyR": -0.1439,
+        "totalR": -99.17,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 40,
+            "wins": 15,
+            "winRate": 0.375,
+            "expectancyR": 0.4661,
+            "grossExpectancyR": 0.5,
+            "totalR": 18.64
+          },
+          "Breakout": {
+            "trades": 68,
+            "wins": 9,
+            "winRate": 0.1324,
+            "expectancyR": -0.5142,
+            "grossExpectancyR": -0.4706,
+            "totalR": -34.96
+          },
+          "Grid": {
+            "trades": 48,
+            "wins": 15,
+            "winRate": 0.3125,
+            "expectancyR": 0.2114,
+            "grossExpectancyR": 0.25,
+            "totalR": 10.15
+          },
+          "MeanReversion": {
+            "trades": 43,
+            "wins": 9,
+            "winRate": 0.2093,
+            "expectancyR": -0.1996,
+            "grossExpectancyR": -0.1628,
+            "totalR": -8.58
+          },
+          "Momentum": {
+            "trades": 58,
+            "wins": 7,
+            "winRate": 0.1207,
+            "expectancyR": -0.5611,
+            "grossExpectancyR": -0.5172,
+            "totalR": -32.54
+          },
+          "Range": {
+            "trades": 48,
+            "wins": 15,
+            "winRate": 0.3125,
+            "expectancyR": 0.2115,
+            "grossExpectancyR": 0.25,
+            "totalR": 10.15
+          },
+          "Scalping": {
+            "trades": 50,
+            "wins": 8,
+            "winRate": 0.16,
+            "expectancyR": -0.3965,
+            "grossExpectancyR": -0.36,
+            "totalR": -19.83
+          },
+          "Swing": {
+            "trades": 58,
+            "wins": 9,
+            "winRate": 0.1552,
+            "expectancyR": -0.4164,
+            "grossExpectancyR": -0.3793,
+            "totalR": -24.15
+          },
+          "Trend": {
+            "trades": 73,
+            "wins": 7,
+            "winRate": 0.0959,
+            "expectancyR": -0.6544,
+            "grossExpectancyR": -0.6165,
+            "totalR": -47.77
+          },
+          "VWAP": {
+            "trades": 30,
+            "wins": 16,
+            "winRate": 0.5333,
+            "expectancyR": 1.1054,
+            "grossExpectancyR": 1.1333,
+            "totalR": 33.16
+          },
+          "VolatilityBreakout": {
+            "trades": 26,
+            "wins": 6,
+            "winRate": 0.2308,
+            "expectancyR": -0.132,
+            "grossExpectancyR": -0.0769,
+            "totalR": -3.43
+          }
+        }
+      },
+      "outOfSample": {
+        "trades": 409,
+        "wins": 114,
+        "winRate": 0.2787,
+        "expectancyR": 0.0439,
+        "grossExpectancyR": 0.1149,
+        "totalR": 17.96,
+        "byStrategy": {
+          "Arbitrage": {
+            "trades": 27,
+            "wins": 7,
+            "winRate": 0.2593,
+            "expectancyR": -0.0019,
+            "grossExpectancyR": 0.037,
+            "totalR": -0.05
+          },
+          "Breakout": {
+            "trades": 38,
+            "wins": 13,
+            "winRate": 0.3421,
+            "expectancyR": 0.2991,
+            "grossExpectancyR": 0.3684,
+            "totalR": 11.36
+          },
+          "Grid": {
+            "trades": 42,
+            "wins": 12,
+            "winRate": 0.2857,
+            "expectancyR": 0.0587,
+            "grossExpectancyR": 0.1428,
+            "totalR": 2.47
+          },
+          "MeanReversion": {
+            "trades": 40,
+            "wins": 11,
+            "winRate": 0.275,
+            "expectancyR": 0.0022,
+            "grossExpectancyR": 0.1,
+            "totalR": 0.09
+          },
+          "Momentum": {
+            "trades": 41,
+            "wins": 10,
+            "winRate": 0.2439,
+            "expectancyR": -0.1064,
+            "grossExpectancyR": -0.0244,
+            "totalR": -4.36
+          },
+          "Range": {
+            "trades": 43,
+            "wins": 11,
+            "winRate": 0.2558,
+            "expectancyR": -0.0788,
+            "grossExpectancyR": 0.0232,
+            "totalR": -3.39
+          },
+          "Scalping": {
+            "trades": 37,
+            "wins": 11,
+            "winRate": 0.2973,
+            "expectancyR": 0.1298,
+            "grossExpectancyR": 0.1892,
+            "totalR": 4.8
+          },
+          "Swing": {
+            "trades": 50,
+            "wins": 14,
+            "winRate": 0.28,
+            "expectancyR": 0.0558,
+            "grossExpectancyR": 0.12,
+            "totalR": 2.79
+          },
+          "Trend": {
+            "trades": 46,
+            "wins": 12,
+            "winRate": 0.2609,
+            "expectancyR": 0.0014,
+            "grossExpectancyR": 0.0435,
+            "totalR": 0.06
+          },
+          "VWAP": {
+            "trades": 21,
+            "wins": 6,
+            "winRate": 0.2857,
+            "expectancyR": 0.1068,
+            "grossExpectancyR": 0.1429,
+            "totalR": 2.24
+          },
+          "VolatilityBreakout": {
+            "trades": 24,
+            "wins": 7,
+            "winRate": 0.2917,
+            "expectancyR": 0.081,
+            "grossExpectancyR": 0.1667,
+            "totalR": 1.94
+          }
+        }
+      }
+    }
+  },
+  "caveats": [
+    "Expectancy is NET of taker fees. Gross is reported beside it.",
+    "Ambiguous bars assume the stop filled first (conservative).",
+    "No slippage, no funding, no partial fills.",
+    "Pools all eleven strategies; the live agent trades the ONE the scorer picks and only when the panel agrees, so trade COUNT here is not a forecast of live frequency.",
+    "A pair must be positive in BOTH halves to be worth considering.",
+    "This informs; it does not deploy. The multipliers are a human edit to backend/core/risk_manager.py AND lib/riskManager.ts."
+  ]
+}

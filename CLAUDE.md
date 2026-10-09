@@ -1724,12 +1724,34 @@ browser ws://).
 
 ### Why the agent barely trades in sideways markets (it is not a bug)
 
-Confidence-to-trade is set PER REGIME in `dynamic_thresholding.get_required_confidence`:
-Bull Trend 0.60, Bear Trend 0.65, **Range 0.75, Low Volatility 0.70**, High Vol
-0.85. In a ranging/quiet market the debate reaches only ~0.20, so the Supervisor
-returns WAIT — measured live, 2,904 evaluations in one day, every rejection either
-"debate concluded NEUTRAL" or "Confidence 0.20 does not meet the 0.75 threshold
-for regime 'Range'". This is the trend-follower correctly staying out of chop: the
+**THE NUMBERS THIS SECTION USED TO QUOTE WERE STALE, AND READING THEM COST A
+WRONG DIAGNOSIS.** It said "Bull Trend 0.60, Bear Trend 0.65, Range 0.75, Low
+Volatility 0.70, High Vol 0.85". Those are the PRE-RESCALING values.
+`dynamic_thresholding` was rescaled to the units `score_debate` actually emits —
+its own docstring explains why — and the live table is:
+
+    Bull Trend 0.180   Bear Trend 0.194   Range 0.225
+    Low Volatility 0.211   High Volatility 0.256
+    Liquidity Crisis / Unknown -> UNREACHABLE (1.01, above the 1.0 cap)
+
+    graphs/nodes/supervisor.MIN_CONFIDENCE_TO_TRADE = 0.18   <- the GRAPH path's
+                                                                flat bar
+
+and `BASE_CONFIDENCE_TO_TRADE` is pinned equal to that 0.18 by a test. The
+difference is not cosmetic. Against 0.75 a live reading of 0.12 looks five times
+short and the agent looks structurally unable to trade; against 0.225 the same
+reading is marginal, and a measured max of 0.21 is ABOVE the graph path's 0.18.
+That is the behaviour `MIN_CONFIDENCE_TO_TRADE`'s own note describes — "whether
+the agent traded at all was decided by rounding" — not a wall.
+
+WHICH BAR APPLIES DEPENDS ON THE PATH, and only one of them runs today. The
+per-regime table is read by `agents/supervisor_agent` (the EVENT path), which
+no longer originates entries while `GRAPH_EXECUTION_ENABLED=true`. The path that
+does is `graphs/nodes/supervisor`, whose bar is the flat 0.18. Quoting the
+per-regime numbers as "the" threshold describes a path that is switched off.
+
+In a ranging/quiet market the debate reaches only ~0.09-0.21, so the Supervisor
+returns WAIT or DO_NOT_TRADE. This is the trend-follower correctly staying out of chop: the
 backtest showed the range strategies (MeanReversion, Range, Grid) are
 net-negative, and the ledger's noise-band stop-outs were exactly what forcing
 range trades produces. Longs-only recently is the same cause — the debate found no
@@ -2855,6 +2877,145 @@ measured minimums, `noDecisionReason` in the comment saying why that key is
 dead. A mention is not a call and the comment has to keep naming what it warns
 about, so the answer is always to strip comments and strings with `tokenize`,
 never to water down the comment.
+
+### What actually raises profit, measured — and the three numbers that were noise
+
+The operator asked for "more profitable trades" and for the whole system to be
+tested. Four experiments, all committed and reproducible, all storing their
+output under `backtests/<date>/`. Two produced findings; two produced the
+absence of one, which took longer to establish and matters more.
+
+**1. THE RISK MODEL IS NOT THE LEVER.** `scripts/sweep_risk_model.py` walks
+twenty (stop, reward-ratio) pairs over 10,000 candles, splitting each series
+60/40 so the first half chooses and the second half judges. NINETEEN of twenty
+pairs are negative out of sample, the live 2.5x/2:1 among them, and the best
+in-sample pair (2.0x/2.5:1, +0.1082R) is **-0.1460R** out of sample — a
+textbook curve fit, which is exactly what the split exists to expose.
+
+The explanation is not the risk model. Measured on the same halves:
+
+    IN-SAMPLE  (every series trending UP)    long win 46.4%   short win 30.0%
+                                             ...and it took 52.8% SHORTS
+    OUT-OF-SAMPLE (every series trending DOWN) long win 30.8%  short win 41.3%
+                                             ...and it took 55.1% LONGS
+
+Each side wins in the regime that favours it, comfortably above the 33.3%
+break-even a 2:1 payoff needs. What loses money is the MIX: the raw ensemble is
+systematically on the wrong side of the prevailing trend, because the
+mean-reversion and range strategies fire hardest exactly when a trend extends.
+No stop/target pair fixes a direction problem.
+
+**2. THE HIGHER-TIMEFRAME GATE IS NOW DEMONSTRATED, which CLAUDE.md had
+explicitly left open.** The section that added it says: *"ALL THREE ARE
+HYPOTHESES ... whether they raise EXPECTANCY depends on how many removed trades
+would have won, and 12 trades cannot say."* `scripts/measure_htf_gate.py` says,
+over 3,539 trades on twelve instruments and two timeframes:
+
+    every signal          -0.0591R +/-0.0232   35.1%   3,539 trades
+    the gate LETS THROUGH +0.0079R +/-0.0346   36.8%   1,691 trades
+    the gate BLOCKS       -0.1204R +/-0.0311   33.6%   1,848 trades
+
+    z = +2.76 on kept-vs-blocked, and it survives a correction for the
+    comparisons made.
+
+It calls the REAL `market_context.build` + `assess` on bars up to and including
+the entry bar — never a re-implementation, and never a hindsight filter on
+"which way the window went", which would prove only that the winning side wins.
+
+TWO HONEST LIMITS, both printed by the script itself. The kept set's +0.0079R is
+NOT distinguishable from zero; its interval includes it. So the gate is
+demonstrated to REMOVE A LOSING HALF, and is not demonstrated to leave a
+profitable one — the remaining edge has to come from strategy selection and the
+panel, which this experiment does not isolate. And `mixed` (+0.0616R, 325
+trades) is positive but also indistinguishable from zero, so the design choice
+not to block MIXED is consistent with the data without being proved by it.
+
+**3. CONVICTION DOES NOT PREDICT OUTCOME ON THE DETERMINISTIC DEBATE.**
+`scripts/measure_conviction.py`, 799 trades: the 0.3-0.4 confidence bucket
+returned +0.0779R and the 0.2-0.3 bucket +0.0703R. z = +0.03. Flat.
+
+This is `algorithms.debate.score_debate` — the EVENT path's five-leg debate, a
+pure function of candles, which is why it can be replayed at all. It is NOT the
+graph's nine-specialist panel, which needs an order book, a tape and news and
+cannot be replayed offline. So it does not license moving the live bar in either
+direction; it says the premise is unverified on the one debate that can be
+measured.
+
+**4. THE THREE NUMBERS THAT WERE NOISE, and the throwaway script that nearly
+made them findings.** `backend/core/evidence.py` exists because of this.
+
+A first pass printed every table as bare expectancies. Three readings looked
+decisive: the gate result, "the debate AGREEING with a setup did WORSE than
+disagreeing", and the conviction buckets. A quick script written to check them
+passed the expectancy where the reward ratio belonged — a positional-argument
+slip — which inflated every z by about three and turned all three into
+findings. The error ran in the direction the author was hoping for, which is the
+only direction this kind of error ever seems to run.
+
+The true values on that sample were z = +1.01, -0.78 and +0.03. All noise. The
+gate result only became real at five times the sample.
+
+So expectancies now carry a standard error everywhere, derived in CLOSED FORM
+from the win rate — backtested outcomes under this risk model are bimodal at
+exactly +reward/-1R, which `strategy_backtest` preserves on purpose, so the
+spread follows from the win rate rather than from a sample estimate and a
+35-trade cell's error bar is trustworthy even though its expectancy is not.
+`sample_std` covers the cases where that does not hold. `significant_after`
+applies a Bonferroni correction because a sweep makes five comparisons and two
+sigma on one of five is a 1-in-4 coincidence, not 1-in-20.
+
+AND THE "AGREEMENT IS WORSE" READING WAS CHASED DOWN RATHER THAN DISMISSED,
+because it contradicts the premise the Supervisor's direction check rests on. A
+separate probe scored `score_debate` against the forward move at 1h, 4h and 12h:
+hit rate 46-51%, mean move in the predicted direction +0.09% to +0.27%. Not
+inverted — just weak. Which is consistent with the gap being noise, and would
+have been the thing to know before weakening a safety gate on a coin flip.
+
+**`required_gap(n)` turns "we need more data" into a quantity.** At 300 trades
+nothing under 0.17R is visible; the gate's 0.11R gap needed ~1,400 per side, and
+getting there is why the final run used twelve instruments rather than five.
+
+### The full-system exercise, and the direction field that could invert a trade
+
+`scripts/full_system_exercise.py` drives the REAL bus and the REAL agents
+through eleven scenarios and asserts, at the end, that no database pool was ever
+opened. That last assertion is the licence for the rest: `DATABASE_URL` is
+pointed at TEST-NET-1 **before any backend import and again after `load_dotenv`**,
+because a `.env` carrying the live Supabase URL would otherwise overwrite it and
+this harness would repeat exactly what the previous one did — 11 rows in the
+operator's live `trades`, an orphaned watch row and a blended position.
+
+It covers bus delivery order, long and short opens, a stop firing, a short
+reaching target, the close-fill-price regression, equity arithmetic in both
+directions, invariant 4 under all three halt states, an unfundable open, the
+learning ledger and the session refusals. 11/11.
+
+**AND IT FOUND A REAL ONE ON ITS FIRST RUN.** Driving a `TarApprovedEvent` with
+`direction="long"` through the real executor produced a book row reading
+`{"symbol": "SOL/USDT", "qty": 1.0, "side": "sell"}`. A LONG opened as a SHORT.
+`execution_agent` derives the side with an exact, case-sensitive comparison --
+`side = "buy" if tar.direction == "LONG" else "sell"` -- so anything that is not
+exactly `"LONG"` falls to the else. That is not a failed trade, it is the
+OPPOSITE trade, with the stop above the entry where the target belongs.
+
+NO LIVE TRADE HAS EVER BEEN REVERSED BY THIS, and that matters as much as the
+fix: both producers emit uppercase (`execution_service` writes `"LONG" if
+event.side == "buy" else "SHORT"`, and `supervisor_agent` refuses outright
+unless the debate's direction is in `("LONG", "SHORT")`). `TarApprovedEvent.direction`
+was nonetheless a bare `str` while `TarSubmittedEvent.direction` one class up
+has always been `Literal['LONG','SHORT']` and `tab` inside the same class is a
+Literal. It is a Literal now, so a wrong value is a loud ValidationError at the
+boundary instead of a silently inverted position.
+
+The present exposure was in the SUITE. Seven test files built the event with
+lowercase — `test_partial_tp`, `test_profit_target`, `test_trailing_stop`,
+`test_excursion`, `test_resting_stop_mode`, `test_post_trade_chain`,
+`test_position_persistence` — so every one had been exercising the SELL branch
+whatever its fixture said, and the LONG path through `_execute_tar` was less
+covered than a green suite suggested. All 78 still pass uppercased, because they
+derived their expectations from the `side` they passed separately; they were
+internally consistent and building an event production cannot produce.
+`tests/test_tar_direction_literal.py` scans for the eighth.
 
 ## Safety invariants — never break these
 

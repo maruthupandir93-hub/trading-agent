@@ -1,0 +1,124 @@
+{
+  "generatedAt": "2026-10-09T16:21:26.778804+00:00",
+  "symbols": [
+    "XRP/USDT",
+    "SOL/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "SUI/USDT"
+  ],
+  "timeframe": "15m",
+  "candlesPerSeries": 1500,
+  "warmupBars": 200,
+  "minTradesToTrust": 60,
+  "riskModel": {
+    "stopMult": 2.5,
+    "targetMult": 5.0
+  },
+  "agrees": {
+    "trades": 266,
+    "winRate": 0.3534,
+    "expectancyR": -0.0378,
+    "totalR": -10.04
+  },
+  "disagrees": {
+    "trades": 312,
+    "winRate": 0.3974,
+    "expectancyR": 0.0569,
+    "totalR": 17.75
+  },
+  "noView": {
+    "trades": 221,
+    "winRate": 0.3394,
+    "expectancyR": -0.1277,
+    "totalR": -28.22
+  },
+  "byConfidenceBucket": {
+    "0.0-0.1": {
+      "trades": 0,
+      "winRate": 0.0,
+      "expectancyR": 0.0,
+      "totalR": 0.0
+    },
+    "0.1-0.2": {
+      "trades": 35,
+      "winRate": 0.1714,
+      "expectancyR": -0.5814,
+      "totalR": -20.35
+    },
+    "0.2-0.3": {
+      "trades": 71,
+      "winRate": 0.3803,
+      "expectancyR": 0.0703,
+      "totalR": 4.99
+    },
+    "0.3-0.4": {
+      "trades": 108,
+      "winRate": 0.3981,
+      "expectancyR": 0.0779,
+      "totalR": 8.41
+    },
+    "0.4-0.6": {
+      "trades": 52,
+      "winRate": 0.3462,
+      "expectancyR": -0.0596,
+      "totalR": -3.1
+    },
+    "0.6-1.0": {
+      "trades": 0,
+      "winRate": 0.0,
+      "expectancyR": 0.0,
+      "totalR": 0.0
+    }
+  },
+  "byThreshold": {
+    "0.00": {
+      "trades": 266,
+      "winRate": 0.3534,
+      "expectancyR": -0.0378,
+      "totalR": -10.04
+    },
+    "0.10": {
+      "trades": 266,
+      "winRate": 0.3534,
+      "expectancyR": -0.0378,
+      "totalR": -10.04
+    },
+    "0.15": {
+      "trades": 266,
+      "winRate": 0.3534,
+      "expectancyR": -0.0378,
+      "totalR": -10.04
+    },
+    "0.20": {
+      "trades": 231,
+      "winRate": 0.381,
+      "expectancyR": 0.0446,
+      "totalR": 10.31
+    },
+    "0.25": {
+      "trades": 193,
+      "winRate": 0.3679,
+      "expectancyR": 0.0028,
+      "totalR": 0.54
+    },
+    "0.30": {
+      "trades": 160,
+      "winRate": 0.3812,
+      "expectancyR": 0.0332,
+      "totalR": 5.31
+    },
+    "0.40": {
+      "trades": 52,
+      "winRate": 0.3462,
+      "expectancyR": -0.0596,
+      "totalR": -3.1
+    }
+  },
+  "caveats": [
+    "This is `algorithms.debate.score_debate` -- the EVENT path's five-leg debate, a PURE function of candles. It is NOT the graph's nine-specialist panel, which needs an order book, a tape and news and cannot be replayed. Absolute numbers do not transfer to the live per-regime thresholds; the SHAPE is what this measures.",
+    "Net of taker fees. No slippage, no funding.",
+    "Pools all eleven strategies; live, one is selected.",
+    "Scored on bars up to and INCLUDING the entry bar. No lookahead."
+  ]
+}

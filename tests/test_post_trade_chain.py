@@ -114,7 +114,7 @@ def approval(symbol="BTC/USDT", stop=68_000.0, tab="paper", tar_id=None):
     return TarApprovedEvent(
         tar_id=tar_id or uuid.uuid4(),
         symbol=symbol,
-        direction="long",
+        direction="LONG",
         approved_size=0.05,
         approved_leverage=2,
         cro_rationale="within all nine checks",

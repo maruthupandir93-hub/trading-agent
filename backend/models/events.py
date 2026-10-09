@@ -207,7 +207,35 @@ class TarApprovedEvent(BaseEvent):
     event_type: Literal['TAR_APPROVED'] = 'TAR_APPROVED'
     tar_id: UUID
     symbol: str
-    direction: str
+    # LITERAL, NOT `str`, AND THE DIFFERENCE IS A REVERSED TRADE.
+    #
+    # `execution_agent` derives the order side with an exact, case-sensitive
+    # comparison:
+    #
+    #     side = "buy" if tar.direction == "LONG" else "sell"
+    #
+    # so ANY value that is not exactly "LONG" -- "long", "Long", "BUY", a typo
+    # -- becomes a SELL. On a long thesis that is not a failed trade, it is the
+    # OPPOSITE trade: opened against the direction the panel approved, with the
+    # stop above the entry where the target should be.
+    #
+    # No live trade has ever been reversed by this, and that is worth stating
+    # plainly: both producers emit uppercase. `execution_service` writes
+    # `"LONG" if event.side == "buy" else "SHORT"`, and `supervisor_agent`
+    # refuses outright unless the debate's direction is in ("LONG", "SHORT").
+    # The exposure was a FUTURE producer, and a present one in the tests.
+    #
+    # SEVEN TEST FILES BUILT THIS EVENT WITH LOWERCASE -- test_partial_tp,
+    # test_profit_target, test_trailing_stop, test_excursion,
+    # test_resting_stop_mode, test_post_trade_chain, test_position_persistence.
+    # Every one of them has been exercising the SELL branch whatever the fixture
+    # said, so the long path through `_execute_tar` was less covered than a
+    # green suite suggested. A fixture that differs from production proves
+    # nothing about production.
+    #
+    # `TarSubmittedEvent` one class up has always been Literal['LONG','SHORT'],
+    # and `tab` in this very class is a Literal. This field was the odd one out.
+    direction: Literal['LONG', 'SHORT']
     approved_size: float
     approved_leverage: int
     cro_rationale: str
