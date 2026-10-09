@@ -2722,6 +2722,140 @@ panel picks the venue, and `POST /api/admin/testnet` sets it BEFORE checking
 credentials — checking Bybit's variables and then switching to Binance would
 refuse a correctly configured mirror, or accept one with no keys at all.
 
+### A $2 account is BELOW the venue's own floor, and that is why it barely traded
+
+The operator: *"24 hours only 2 trades ... improve it fully"*. Read from the
+live session before changing anything:
+
+    22.7 hours -> 4,270 polls -> 1,855 graph runs -> 27 APPROVED plans -> 2 fills
+    watch_symbols: []          panel confidence, last 50 decisions: median 0.125
+
+THREE SEPARATE CAUSES, and only the first is the one that gets guessed at.
+
+**1. 25 OF 27 APPROVED PLANS DIED SILENTLY AT THE VENUE'S MINIMUM.**
+`execution_service._handle` step 4 quantises every plan — paper included,
+deliberately, because a paper fill the real venue would reject is not a
+rehearsal — and returned with NO LOG LINE. `plans_approved` incremented,
+`trades_opened` did not, and nothing connected them.
+
+The cause is arithmetic rather than a fault. Broker-style sizing gives a
+notional ceiling of `fraction x equity x leverage` = $19.18, and the CRO's VaR
+budget then caps it at `equity x VAR / (stop% x 1.5)`:
+
+    equity $1.92, VaR 0.05        stop 1.0%  1.5%  2.0%  2.5%  3.0%
+    notional                          6.40  4.27  3.20  2.56  2.13
+    XRP/SOL/DOGE/ADA/SUI minimum      5.00 -- so only the tightest stop fits
+
+XRP's 2.5-ATR stop sits at 1.5-2.5%, so almost every ordinary decision produced
+an order the venue would refuse. The two that filled were the moments the stop
+happened to be tight. `MAX_PORTFOLIO_VAR_FRACTION=0.12` lifts the whole row to
+$5.12-$15.36 and clears it everywhere.
+
+**THE BETTER FIX IS MONEY, NOT A HIGHER VaR, and it is worth saying plainly.**
+At $5 of equity the SAFE 0.05 budget already clears every stop width
+($5.56-$16.67). Raising the VaR fraction buys the same unblocking by doubling
+the loss on every stop-out (~2.7% -> ~6.4% of the account, so the 30% drawdown
+limit tolerates ~5 consecutive losses instead of ~11). Funding the book past
+about $5 is strictly the safer of the two, and past ~$25 the venue minimum
+stops being a consideration at all. **This system has a practical account
+floor, set by the exchange and not by anything here.**
+
+**2. ONE COIN, AND ONE COIN IS FLAT MOST OF THE TIME.** `watch_symbols` was
+empty, so the rotation built for exactly this was deployed and unused. The 50
+most recent decisions were all XRP, all `the Grid setup is LONG but the
+specialist panel reads NEUTRAL/SHORT`, at a median confidence of 0.125 against
+a Range threshold of 0.75.
+
+**THE PANEL-DISAGREEMENT REFUSALS ARE A RED HERRING, and measuring that is what
+stopped a bad fix.** The obvious reading is that the scorer picks a LONG setup
+while the panel reads SHORT, so selecting a strategy that AGREES would trade.
+It would not: ZERO of those 50 cleared even the easiest regime threshold
+(0.60), so an aligned thesis would have been refused one step later at the
+confidence gate. Choosing whichever strategy matches the panel would also make
+the disagreement check vacuous — the panel would agree by construction — for no
+extra trade. The same arithmetic rules out swapping Grid for a directional
+family: 0.09 fails 0.75 whatever name is on it.
+
+So the lever is INSTRUMENTS, and it is the one lever that does not lower a bar.
+The session now runs XRP/SOL/DOGE/ADA/SUI. Within fifteen minutes it had
+produced a decision on all five, and the rotation is cost-neutral by design:
+one graph run per decision interval, pointed at the next coin in turn.
+
+**A QUIET COIN IS CHEAP, which is what makes a wide rotation affordable.**
+Measured on DOGE: the run ended at node 9 of 24 in 1.6s with ZERO LLM calls,
+because `strategy_scoring` found nothing above `MIN_SCORE_TO_SELECT`. A coin
+that reaches the full panel costs ~19s and two model calls. Adding instruments
+mostly adds the cheap kind.
+
+**3. A SESSION COULD BE STARTED ON A COIN THE ACCOUNT CAN NEVER OPEN.**
+`tradeable_universe` answers "may we open this?"; nothing answered "could we,
+at this account size?" — and a NO to the second is just as permanent and was
+just as silent. Measured against ccxt's parsed limits, cross-checked against
+the raw Binance filters in the same market object:
+
+    XRP  min order $5.00   SOL $5.00   DOGE $5.00   ADA $5.00   SUI $5.00
+    BNB  min order $7.39   (minQty 0.01 x $739)
+    AVAX min order $10.17  (minQty 1 x $10.17 — the MIN_NOTIONAL of $5 is NOT
+                            the binding number, so quoting $5 would send an
+                            operator to top up to a figure that still cannot trade)
+    ETH  min order $20.00  NEVER, against a $19.18 ceiling
+
+`trading_session._venue_minimum_refusal` refuses the session, for the primary
+symbol and every rotated one, at the LARGEST size the session could ever reach
+— if the biggest order is refused, every smaller one is too, so one call
+settles it for the session rather than for one moment's volatility. It goes
+through `Venue.check_size`, the same call that refuses at execution time,
+because a pre-check that re-derives the venue's rules is how
+`lib/riskManager.ts` and `core/risk_manager.py` drifted apart on the ATR
+multipliers.
+
+Two properties that keep it safe to add: an unreadable OR SLOW venue is **not**
+a refusal (it is deadlined at 8s — `start_session` runs inside an HTTP request,
+and a check whose only value is saving wasted analysis may not become the
+slowest thing in the path it guards), and a rotated symbol is REFUSED rather
+than dropped, so the operator is never told the session covers five coins while
+it scans four.
+
+A FIRST PASS OF THAT TABLE WAS WRONG — a hand-rolled read of `exchangeInfo` put
+LTC and LINK at $20; both are $5. The committed numbers come from the same pair
+of sources `check_size` itself reads. **A table measured one way and enforced
+another is how a pre-check starts disagreeing with the gate it stands in for.**
+
+### `NO_DECISION:` with nothing after the colon
+
+Within three minutes of the five-coin rotation going live, a third of it was
+answering the operator's standing question — *why does it only trade twice a
+day?* — with a blank line.
+
+`summarise_analysis` did not carry the graph's `unavailable` list, while
+`market_state`, `monitoring` and `reflection_graph` all carry theirs. TWO
+readers were already asking for it:
+
+  * `analysis.subscribe_to_triggers` logs
+    `"; ".join(result.get("unavailable") ...) or "no reason recorded"`, and so
+    printed *"no reason recorded"* on every no-thesis run
+  * `trading_session` fell back to `result["noDecisionReason"]`, a key only
+    `api/catalog` produces from a stored decision ROW and that an analysis
+    result has never had
+
+Same shape as the `TarApprovedEvent` fields that were passed but never
+declared: the reasons were computed the whole time — every node that cannot run
+appends one — and had nowhere to go, while a defensive `.get` on each side made
+the chain look like it was working. The last two entries are reported, because
+they are nearest to where the run stopped; the earlier ones are standing notes
+that are true on every cycle and explain nothing about this one. A run with no
+recorded reason says exactly that rather than rendering an empty string, which
+reads as a display fault instead of a gap in the graph's account of itself.
+
+`tests/sourceutil.py` came out of this. Three separate tests assert a property
+by reading this project's source, and all three first failed on the
+EXPLANATION rather than the code — `api.binance.com` in the docstring that
+records the mainnet host as the finding, `MIN_NOTIONAL` in the table of
+measured minimums, `noDecisionReason` in the comment saying why that key is
+dead. A mention is not a call and the comment has to keep naming what it warns
+about, so the answer is always to strip comments and strings with `tokenize`,
+never to water down the comment.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

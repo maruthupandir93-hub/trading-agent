@@ -716,6 +716,18 @@ async def _any_open_position(symbols: List[str], tab: str) -> bool:
     return False
 
 
+def _no_decision_reason(result: Dict[str, Any]) -> str:
+    """The graph's own account of why a run produced no decision.
+
+    Never an empty string: "no reason was recorded" is itself information, and
+    it points at the graph rather than leaving the operator with a bare colon.
+    """
+    reasons = [str(r) for r in (result.get("unavailable") or []) if r]
+    if not reasons:
+        return "no decision was reached and the run recorded no reason"
+    return "no decision: " + "; ".join(reasons[-2:])
+
+
 async def _decide_once(session: TradingSession, symbol: Optional[str] = None) -> None:
     """Run the full analysis graph once and let the existing chain act on it.
 
@@ -750,7 +762,22 @@ async def _decide_once(session: TradingSession, symbol: Optional[str] = None) ->
 
     decision = result.get("decision") or {}
     action = decision.get("action") or "NO_DECISION"
-    rationale = decision.get("rationale") or result.get("noDecisionReason") or ""
+    # A RUN THAT REACHED NO DECISION STILL HAS TO SAY WHY.
+    #
+    # This read `result.get("noDecisionReason")`, a key only `api/catalog`
+    # produces from a stored decision row — the analysis result has never
+    # carried it. So every no-thesis cycle logged `[SYM] NO_DECISION:` and
+    # stopped, which is the operator's question ("why did it not trade?")
+    # answered with a blank. Same shape as the `TarApprovedEvent` fields that
+    # were passed but never declared: a defensive read of something that does
+    # not arrive is indistinguishable from a legitimate absence.
+    #
+    # `unavailable` is where the graph records what it could not do, and
+    # `summarise_analysis` now carries it. The LAST two entries are taken
+    # because they are the nearest to the point the run stopped; the earlier
+    # ones are usually standing notes (an absent feed, a missing track record)
+    # that are true on every cycle and explain nothing about this one.
+    rationale = decision.get("rationale") or _no_decision_reason(result)
 
     session.last_decision = action
     session.last_rationale = rationale
@@ -843,6 +870,161 @@ async def set_paper_starting_amount(amount: float) -> float:
     await update_portfolio(portfolio)
     logger.warning("PAPER BOOK CASH SET TO %.2f by the operator for a new session.", amount)
     return float(amount)
+
+
+# ---------------------------------------------------------------------------
+# Can this instrument ever be opened at this account size?
+# ---------------------------------------------------------------------------
+
+# How long `start_session` will wait for the venue before starting anyway. Short
+# on purpose: the operator is holding an HTTP response open while it runs, and
+# an unreadable venue is explicitly not a refusal.
+_VENUE_PRECHECK_DEADLINE_S = float(os.getenv("VENUE_PRECHECK_DEADLINE_S") or 8.0)
+
+
+async def _venue_minimum_refusal(
+    symbol: str,
+    *,
+    equity: float,
+    leverage: int,
+    capital_fraction: float,
+) -> Optional[str]:
+    """None if the session could place an order in `symbol`, else why it cannot.
+
+    THE GAP THIS CLOSES IS THE SAME ONE THE UNTRADEABLE CHECK CLOSES, one level
+    down. `tradeable_universe` answers "may we open this?"; this answers "could
+    we, at this account size?" — and a NO to the second is just as permanent and
+    was just as silent.
+
+    Measured on the operator's live $1.92 account while choosing a rotation set,
+    read from ccxt's parsed limits and cross-checked against the raw Binance
+    filters in the same market object (2026-10-09). The last column is the
+    smallest order the venue will accept — whichever of the two binds:
+
+        XRP   minQty 0.1   = $0.14    min notional $5     -> $5.00
+        SOL   minQty 0.01  = $1.10    min notional $5     -> $5.00
+        DOGE  minQty 1     = $0.08    min notional $5     -> $5.00
+        ADA   minQty 1     = $0.24    min notional $5     -> $5.00
+        SUI   minQty 0.1   = $0.11    min notional $5     -> $5.00
+        BNB   minQty 0.01  = $7.39    min notional $5     -> $7.39
+        AVAX  minQty 1     = $10.17   min notional $5     -> $10.17
+        ETH   minQty 0.001 = $2.49    min notional $20    -> $20.00   NEVER
+
+    The whole account at 100% and 10x is $19.18 of notional, so ETH can never
+    be opened at this size. An ETH slot in a five-coin rotation is a fifth of
+    every cycle spent on a 24-node analysis whose order the venue would refuse
+    — the same waste as the 55 doomed BTC runs, and harder to see, because ETH
+    IS a tradeable instrument and nothing upstream of the venue objects to it.
+
+    TWO COLUMNS, NOT ONE, and AVAX is why: its minimum notional is $5 but one
+    contract costs $10.17, so quoting $5 would send an operator to top up to a
+    figure that still cannot trade.
+
+    THE TEST IS RUN AT THE LARGEST SIZE THE SESSION CAN EVER REACH. If the
+    biggest order it could place is refused, every smaller one is too, so this
+    is a statement about the session rather than about one moment's volatility.
+    It deliberately goes through `Venue.check_size` — the exact call that
+    refuses at execution time — rather than re-deriving the minimums here. Two
+    copies of a venue rule is how `lib/riskManager.ts` and
+    `core/risk_manager.py` drifted apart on the ATR multipliers.
+
+    A VENUE THAT CANNOT BE ASKED IS NOT A REFUSAL. An outage, a cold price cache
+    or a missing key must not stop an operator starting a session; the entry
+    path still refuses the order, which is the behaviour that existed before
+    this check. It logs and returns None.
+
+    AND IT IS DEADLINED, for the same reason `external_consultation` is. This is
+    the only I/O `start_session` does, and the operator is waiting on an HTTP
+    response while it runs. A venue that answers slowly must cost a few seconds
+    and then be treated as unreadable, not hold the request open -- a check
+    whose entire value is saving wasted analysis may not become the slowest
+    thing in the path it guards.
+    """
+    try:
+        return await asyncio.wait_for(
+            _venue_minimum_refusal_inner(
+                symbol, equity=equity, leverage=leverage, capital_fraction=capital_fraction
+            ),
+            timeout=_VENUE_PRECHECK_DEADLINE_S,
+        )
+    except asyncio.TimeoutError:
+        logger.info(
+            "Session pre-check for %s timed out after %.0fs; starting anyway. The "
+            "entry path still enforces the venue's minimums.",
+            symbol, _VENUE_PRECHECK_DEADLINE_S,
+        )
+        return None
+
+
+async def _venue_minimum_refusal_inner(
+    symbol: str,
+    *,
+    equity: float,
+    leverage: int,
+    capital_fraction: float,
+) -> Optional[str]:
+    """The body of `_venue_minimum_refusal`, split out so it can be deadlined."""
+    from backend.core.risk_manager import MARGIN_BUFFER_MULTIPLIER
+    from backend.services.market_data import get_price
+    from backend.services.venue import get_venue
+
+    try:
+        venue = get_venue()
+        resolved = await venue.resolve_symbol(symbol)
+        if resolved is None:
+            # Not a refusal from here. "No perpetual market" is a venue-identity
+            # question, and a paper session may legitimately be pointed at a
+            # venue whose markets have not loaded.
+            logger.info(
+                "Session pre-check skipped for %s: no linear perpetual resolved on %s.",
+                symbol, venue.id,
+            )
+            return None
+
+        # The cache is usually cold for a symbol the session has not scanned
+        # yet, which is exactly the case this check exists for, so fall back to
+        # the venue's own public ticker rather than skipping.
+        price = get_price(symbol)
+        if price <= 0:
+            ticker = await venue.public.fetch_ticker(resolved)
+            price = float((ticker or {}).get("last") or 0.0)
+        if price <= 0:
+            logger.info("Session pre-check skipped for %s: no price available.", symbol)
+            return None
+
+        # The ceiling the Risk Gateway's broker-style sizing works up to. The
+        # buffer divides it for the same reason it does there: margin has to
+        # stay coverable for the stop to be reachable before a margin call.
+        max_notional = (capital_fraction * equity * leverage) / max(
+            MARGIN_BUFFER_MULTIPLIER, 1.0
+        )
+        check = await venue.check_size(symbol, max_notional / price, price)
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "Session pre-check skipped for %s (%s: %s). The entry path still "
+            "enforces the venue's minimums.",
+            symbol, type(exc).__name__, exc,
+        )
+        return None
+
+    if check.ok:
+        return None
+
+    minimum = None
+    if check.min_notional is not None:
+        minimum = float(check.min_notional)
+    if check.min_qty is not None:
+        minimum = max(minimum or 0.0, float(check.min_qty) * price)
+
+    return (
+        f"{symbol} cannot be opened at this account size on {venue.id}: the most "
+        f"this session could ever stake is ${max_notional:.2f} "
+        f"({capital_fraction * 100:.0f}% of ${equity:.2f} at {leverage}x), and the "
+        f"venue's minimum order is "
+        + (f"${minimum:.2f}. " if minimum else "larger than that. ")
+        + f"({check.reason}) Every decision on it would run the full analysis and "
+        f"be refused at the last step."
+    )
 
 
 async def start_session(
@@ -972,6 +1154,21 @@ async def start_session(
         dt_pct = None
     if dt_pct is not None and not (0.0 < dt_pct <= 0.5):
         dt_pct = None
+
+    # CAN ANY OF THESE EVER BE OPENED AT THIS ACCOUNT SIZE? Checked last,
+    # because it needs the measured equity, the validated leverage and the
+    # clamped fraction — the three numbers that set the largest order the
+    # session can place.
+    #
+    # REFUSED, NOT DROPPED, for the same reason an untradeable symbol is: the
+    # operator would otherwise be told the session covers five coins while a
+    # fifth of every rotation was spent on one the venue will not accept.
+    for _candidate in [symbol.strip().upper()] + extra:
+        _why = await _venue_minimum_refusal(
+            _candidate, equity=equity, leverage=leverage, capital_fraction=cf
+        )
+        if _why is not None:
+            raise ValueError(_why)
 
     session = TradingSession(
         id=uuid.uuid4().hex[:12],

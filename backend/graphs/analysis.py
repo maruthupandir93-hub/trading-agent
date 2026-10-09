@@ -404,6 +404,24 @@ def summarise_analysis(state: TradingState) -> Dict[str, Any]:
 
     return {
         **summarise_opportunity(state),
+        # WHY NOTHING HAPPENED, and it was being dropped on the floor.
+        #
+        # `market_state`, `monitoring` and `reflection_graph` all return this;
+        # the analysis summary did not, and TWO readers were already asking for
+        # it. `subscribe_to_triggers` logs
+        # `"; ".join(result.get("unavailable") ...) or "no reason recorded"` and
+        # therefore printed "no reason recorded" on every no-thesis run, and
+        # `trading_session` fell back to `result["noDecisionReason"]` — a key
+        # only `api/catalog` ever produces — so a session's own log showed
+        # `[DOGE/USDT] NO_DECISION:` with nothing after the colon.
+        #
+        # Observed within three minutes of putting a five-coin rotation on the
+        # operator's live session, which is exactly when it matters: a coin the
+        # feed has not warmed up for yet produces no thesis, and "no decision,
+        # no reason" is indistinguishable from the agent being broken. The
+        # reasons were computed all along — every node that cannot run appends
+        # one — and simply had nowhere to go.
+        "unavailable": list(state.get("unavailable") or []),
         "specialists": [
             {
                 "name": f.specialist,

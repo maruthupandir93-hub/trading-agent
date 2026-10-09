@@ -74,22 +74,7 @@ def test_the_module_contains_exactly_one_host_and_it_is_the_sandbox():
     assert "getenv(\"BASE" not in code
 
 
-def _code_only(src: str) -> str:
-    """`src` with every comment and string literal removed.
-
-    `tokenize` rather than a regex, because the thing being guarded against is
-    a host appearing in CODE and the docstrings deliberately quote several.
-    """
-    import io as _io
-    import tokenize
-
-    out = []
-    for tok in tokenize.generate_tokens(_io.StringIO(src).readline):
-        if tok.type in (tokenize.COMMENT, tokenize.STRING):
-            continue
-        out.append(tok.string)
-    return " ".join(out)
-
+from tests.sourceutil import code_only as _code_only
 
 def test_the_base_url_is_assigned_exactly_once():
     """One constant, no sibling, no reassignment — the property the exception
