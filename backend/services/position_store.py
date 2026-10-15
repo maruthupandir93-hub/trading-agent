@@ -173,6 +173,16 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
     monitor it because the database is down would be strictly worse than
     monitoring it without durability.
     """
+    # F57: refuse to replace rows that were never read. See `load_watch_list`.
+    if _load_failed:
+        logger.error(
+            "Not persisting the watch list: the stored rows could not be READ at "
+            "startup, so a DELETE+INSERT here would forget positions that are still "
+            "open at the venue, along with the resting-stop ids that are the only "
+            "handle on them. Restart once the database is reachable."
+        )
+        return False
+
     pool = get_db_pool()
     if not pool:
         logger.debug(
@@ -210,6 +220,11 @@ async def save_watch_list(rows: List[Dict[str, Any]]) -> bool:
         return False
 
 
+# Set when the stored watch list could not be READ; blocks `save_watch_list`.
+# A failed read leaves the monitor empty, and persisting that deletes real
+# positions along with the resting-stop ids that are the only handle on them.
+_load_failed = False
+
 async def load_watch_list() -> List[Dict[str, Any]]:
     """Every stored row, or [] when there is nothing to read.
 
@@ -231,13 +246,28 @@ async def load_watch_list() -> List[Dict[str, Any]]:
         async with pool.acquire() as conn:
             records = await conn.fetch(_SELECT_SQL)
     except Exception as e:
+        # A FAILED READ MUST NOT BECOME AN EMPTY WRITE (F57).
+        #
+        # Returning [] left the monitor with no positions, and its next
+        # `save_watch_list` is a `DELETE FROM monitored_positions` followed by
+        # an INSERT of everything it holds — which is nothing. One Supabase
+        # blip at boot therefore FORGOT every real position, including the
+        # resting stops whose ids are the only handle on them.
+        #
+        # That is the worst outcome in this file: a forgotten position is still
+        # open at the venue, with an orphaned stop nobody can cancel.
+        global _load_failed
+        _load_failed = True
         logger.error(
-            "Failed to read the monitored-position watch list: %s. Treating it as EMPTY, "
-            "which means any position open before this restart is unwatched.",
+            "Failed to read the monitored-position watch list: %s. Treating it as EMPTY "
+            "for this process, which means any position open before this restart is "
+            "unwatched — and WRITES ARE NOW BLOCKED so this empty state cannot delete "
+            "the stored rows. Restart once the database is reachable.",
             e,
         )
         return []
 
+    _load_failed = False
     out: List[Dict[str, Any]] = []
     for r in records:
         out.append(

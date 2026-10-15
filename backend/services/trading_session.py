@@ -246,6 +246,19 @@ def _persist() -> None:
         logger.error("Could not persist trading sessions: %s", exc)
 
 
+def resume_sessions_on_restart() -> bool:
+    """Should a session that was running before a restart carry on?
+
+    DEFAULT ON, because the alternative is F54: every restart ends trading
+    until a human starts a new session, and nothing announces it. An operator
+    running the agent unattended has no way to find out.
+
+    Read at CALL time, never captured at import — the `simulation_mode` rule.
+    """
+    raw = (os.getenv("RESUME_SESSIONS_ON_RESTART") or "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def restore() -> int:
     """Reload sessions from disk. Returns how many were RUNNING when we stopped.
 
@@ -264,28 +277,61 @@ def restore() -> int:
         return 0
 
     interrupted = 0
+    resumed = 0
+    to_resume = []
     for row in rows or []:
         try:
             session = TradingSession(**row)
         except Exception:  # noqa: BLE001
             continue
         if session.status == "running":
-            session.status = "stopped"
-            session.stop_reason = (
-                "the backend restarted while this session was running. It was NOT "
-                "resumed automatically — start a new one if you still want it."
-            )
-            session.finished_at = time.time()
-            interrupted += 1
+            if resume_sessions_on_restart():
+                # RESUMED, BECAUSE A RESTART USED TO END TRADING SILENTLY (F54).
+                #
+                # Every running session was marked stopped here, and with
+                # `SESSION_ONLY_TRADING=true` `trade_scope` then refuses every
+                # entry with "no trading session is running". So a deploy, an
+                # OOM kill, a VM reboot — including systemd's own
+                # `Restart=always` recovery — ended trading until a human
+                # noticed. Telegram sends only fills and closes, so nothing
+                # announced it.
+                #
+                # WHAT RESUMING DOES NOT CLAIM: nothing traded while the
+                # process was down. The loop re-reads equity and re-checks the
+                # floor, the target and the daily lock before it opens
+                # anything, so a session whose floor was breached during the
+                # outage finishes on its first poll rather than entering. The
+                # watch list is restored separately, by
+                # `PositionMonitorAgent.restore`, and `main.py` does that
+                # BEFORE this — so a resumed session sees its open positions.
+                to_resume.append(session)
+                resumed += 1
+            else:
+                session.status = "stopped"
+                session.stop_reason = (
+                    "the backend restarted while this session was running, and "
+                    "RESUME_SESSIONS_ON_RESTART is off, so it was NOT resumed."
+                )
+                session.finished_at = time.time()
+                interrupted += 1
         _sessions[session.id] = session
 
     if interrupted:
         logger.warning(
             "%d autonomous session(s) were running when this process last stopped. "
-            "They are marked stopped and were NOT resumed.", interrupted,
+            "They are marked stopped and were NOT resumed "
+            "(RESUME_SESSIONS_ON_RESTART is off).", interrupted,
         )
+    for session in to_resume:
+        logger.warning(
+            "RESUMING session %s on %s after a restart. Nothing traded while the "
+            "process was down; the loop re-checks equity, the floor and the target "
+            "before it opens anything.",
+            session.id, session.symbol,
+        )
+        _tasks[session.id] = asyncio.create_task(_run_session(session.id))
     _persist()
-    return interrupted
+    return interrupted + resumed
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +541,50 @@ async def current_equity(tab: str) -> Optional[float]:
     result = book_equity({**book, "cash": cash}, marks)
     # None when any position could not be marked. Refused rather than valued at
     # cost, which would report a losing position as flat.
-    return result["equity"]
+    equity = result["equity"]
+
+    # THE REAL BOOK'S FREE BALANCE IS NOT ITS EQUITY, AND A SESSION ENDED ON
+    # THAT DIFFERENCE AFTER ITS FIRST FILL (F58).
+    #
+    # `real_account_balance()` is FREE USDT. Agent fills never write the local
+    # real book, so `book["positions"]` is empty and `book_equity` has no
+    # locked margin or unrealised P&L to add: $100 at 3x with $60 locked reads
+    # as equity 40, below a 50 floor, and the session finishes "floored" on a
+    # position that is perfectly healthy.
+    #
+    # The venue knows the whole answer. `open_positions()` carries the margin
+    # and the unrealised P&L it is holding, so free cash plus those is the
+    # account's real equity.
+    #
+    # IT ONLY EVER ADDS. If the venue cannot be asked, the figure stays the
+    # free balance it already was — understating equity ends a session early,
+    # which is the safe direction, while inventing margin would keep a session
+    # alive on money that is not there.
+    if tab == "real" and equity is not None and not (book.get("positions") or []):
+        try:
+            from backend.services.venue import get_venue
+
+            held = await get_venue().open_positions()
+        except Exception as exc:  # noqa: BLE001
+            held = None
+            logger.debug("Could not read venue positions for real equity: %s", exc)
+        if held:
+            locked = 0.0
+            unreal = 0.0
+            for row in held:
+                try:
+                    locked += abs(float(row.get("margin") or row.get("initialMargin") or 0.0))
+                    unreal += float(row.get("unrealizedPnl") or row.get("unrealised") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+            if locked or unreal:
+                logger.debug(
+                    "Real equity: free %.2f + locked %.2f + unrealised %.2f",
+                    equity, locked, unreal,
+                )
+                equity = equity + locked + unreal
+
+    return equity
 
 
 # ---------------------------------------------------------------------------
@@ -504,12 +593,28 @@ async def current_equity(tab: str) -> Optional[float]:
 
 async def _run_session(session_id: str) -> None:
     """Drive one session until it terminates. Never raises out of the task."""
-    from backend.core.system_state import is_emergency_stopped, is_system_paused
+    from backend.core.system_state import (
+        is_emergency_stopped,
+        is_in_observation_mode,
+        is_system_paused,
+        observation_reason,
+    )
 
     session = _sessions.get(session_id)
     if session is None:
         return
 
+    # READ AT THE TOP OF EVERY CYCLE, NOT ONCE (F30).
+    #
+    # `_tab_for_session()` answers "paper or real", from `LIVE_TRADING`. Capturing
+    # it here meant that turning live trading on mid-session left this loop
+    # measuring the PAPER book while the graph traded the REAL one:
+    #   * target and floor compared against paper equity, so the floor never
+    #     fired on real losses;
+    #   * `count_fill` counted only paper fills, so MAX_TRADES_PER_SESSION
+    #     never advanced.
+    # The same `simulation_mode` lesson, one layer up. `tab` is now assigned
+    # inside the loop; this line only reports what it was at startup.
     tab = _tab_for_session()
     logger.warning(
         "AUTONOMOUS SESSION %s STARTED: %s, %sx, from %.2f toward %.2f (floor %.2f) on the %s book.",
@@ -551,6 +656,22 @@ async def _run_session(session_id: str) -> None:
                 _finish(session, "expired", f"placed {MAX_TRADES_PER_SESSION} trades without reaching the target")
                 break
 
+            # F30: the book this session measures must follow LIVE_TRADING.
+            cycle_tab = _tab_for_session()
+            if cycle_tab != tab:
+                logger.warning(
+                    "SESSION %s SWITCHED BOOK: %s -> %s (LIVE_TRADING changed while it "
+                    "was running). Equity, the floor, the target and the fill count all "
+                    "now measure the %s book.",
+                    session.id, tab, cycle_tab, cycle_tab,
+                )
+                _note(
+                    session,
+                    f"book changed from {tab} to {cycle_tab} because live trading was "
+                    f"toggled; the floor and target now measure the {cycle_tab} book",
+                )
+                tab = cycle_tab
+
             equity = await current_equity(tab)
             if equity is None:
                 _note(session, "equity unmeasurable — an open position could not be marked; not acting this cycle")
@@ -571,6 +692,37 @@ async def _run_session(session_id: str) -> None:
                 _note(session, "system is paused — no new entries this cycle. Open positions stay monitored.")
                 continue
 
+            # OBSERVATION MODE WAS NOT CHECKED HERE, AND THAT COST A FULL
+            # 24-NODE GRAPH RUN EVERY 30 SECONDS, INDEFINITELY (F55).
+            #
+            # `may_open_new_position()` is false for THREE states — pause,
+            # emergency stop and observation mode — and this loop tested only
+            # the first two. So after the CEO's drawdown kill switch latched,
+            # the session kept deciding: full analysis, full LLM spend against
+            # a 40/min key budget, and the Risk Gateway refusing every result
+            # at the governance check. The panel showed "running" throughout.
+            #
+            # At MAX_DRAWDOWN_FROM_HWM=30% and VaR 0.12 (~8% per stop-out) that
+            # is roughly four losses in a row, about one run in six at a 36%
+            # win rate — so this is the ordinary case, not a rare one.
+            #
+            # It CONTINUES rather than finishing: observation mode is a brake
+            # the operator can release (`POST /api/admin/observation/resume`),
+            # and ending the session would also end it for the positions the
+            # monitor is still managing. The note is throttled because the poll
+            # is every 12 seconds and an unthrottled line pushes every real
+            # decision out of the 50-entry log.
+            if is_in_observation_mode():
+                _note_throttled(
+                    session,
+                    "observation",
+                    f"halted by the drawdown kill switch ({observation_reason()}). "
+                    f"No new entries; open positions stay monitored. Clear it with "
+                    f"POST /api/admin/observation/resume once you have decided to "
+                    f"carry on.",
+                )
+                continue
+
             # -- daily profit target: bank the day, resume tomorrow ----------
             if _daily_target_reached(session, equity):
                 continue
@@ -584,8 +736,18 @@ async def _run_session(session_id: str) -> None:
             # at the Risk Gateway costs a full 24-node run to reach a no.
             if await _any_open_position(session.scan_list(), tab):
                 was_holding = True
-                _note(session, "already holding a position; the monitor owns the exit. Waiting.")
+                # THROTTLED. Written once per holding spell rather than every
+                # 12 seconds: the log is 50 entries, and the frozen session's
+                # was fifty identical copies of this line with every real
+                # decision pushed out hours earlier (F1's most misleading
+                # symptom — it reads as a working agent that is simply busy).
+                _note_throttled(
+                    session, "holding",
+                    "already holding a position; the monitor owns the exit. Waiting.",
+                )
                 continue
+            # Flat again — so the next time a position opens, say so afresh.
+            _clear_throttle(session, "holding")
 
             # -- decide: on the interval while flat, or AT ONCE after a close -
             just_closed = was_holding
@@ -815,6 +977,38 @@ def _note(session: TradingSession, message: str, **extra: Any) -> None:
     _persist()
 
 
+# The last throttled note written per (session, key). Module level and
+# in-memory: a restart should say the thing once more, because the operator
+# reading the log after a restart has not seen it.
+_throttled_notes: Dict[str, str] = {}
+
+
+def _note_throttled(session: TradingSession, key: str, message: str, **extra: Any) -> None:
+    """Write `message` only when it CHANGES for this `(session, key)`.
+
+    THE LOG IS 50 ENTRIES AND THE POLL IS EVERY 12 SECONDS, so any message a
+    steady state produces evicts the entire decision history within about ten
+    minutes. That is not hypothetical: the frozen session's log was fifty
+    identical copies of "already holding a position; the monitor owns the exit.
+    Waiting." and the answer to "why did it not trade?" had been pushed out of
+    it hours earlier.
+
+    Keyed rather than deduplicated on the whole message so a figure inside it
+    changing — an equity, a reason — still writes a fresh line, while the
+    repetition of the same STATE does not.
+    """
+    token = f"{session.id}:{key}"
+    if _throttled_notes.get(token) == message:
+        return
+    _throttled_notes[token] = message
+    _note(session, message, **extra)
+
+
+def _clear_throttle(session: TradingSession, key: str) -> None:
+    """Forget a throttled note, so the next occurrence is written again."""
+    _throttled_notes.pop(f"{session.id}:{key}", None)
+
+
 def _finish(session: TradingSession, status: str, reason: str) -> None:
     session.status = status
     session.stop_reason = reason
@@ -869,6 +1063,33 @@ async def set_paper_starting_amount(amount: float) -> float:
     portfolio["paper"] = {**book, "cash": float(amount)}
     await update_portfolio(portfolio)
     logger.warning("PAPER BOOK CASH SET TO %.2f by the operator for a new session.", amount)
+
+    # RE-ANCHOR THE DRAWDOWN MARK, OR THE NEXT CLOSE HALTS THE ACCOUNT (F56).
+    #
+    # The CEO's kill switch measures drawdown from a MONTHLY high-water mark.
+    # If it last saw a $10,000 book and the operator then funds a $3 session,
+    # the first close computes a 99.97% drawdown and observation mode latches
+    # — on a book that has done nothing wrong. Reproduced offline:
+    # `halted True 99.97`.
+    #
+    # Re-funding the book is exactly the event that invalidates the old mark,
+    # so it is the right place to move it. Only the admin resume route did
+    # this, which meant recovering required knowing about a route whose
+    # existence the symptom gave no hint of.
+    try:
+        from backend.agents.ceo_agent import rearm_high_water_mark
+
+        rearm_high_water_mark(float(amount))
+    except Exception as exc:  # noqa: BLE001
+        # Never let this stop the funding it follows. A stale mark is a halt
+        # the operator can clear; a refused re-fund leaves them unable to start.
+        logger.warning(
+            "Paper cash was set to %.2f but the drawdown high-water mark could not be "
+            "re-anchored (%s). If the previous book was larger, the next close may "
+            "trip the drawdown kill switch — clear it with "
+            "POST /api/admin/observation/resume.",
+            amount, exc,
+        )
     return float(amount)
 
 
@@ -1089,19 +1310,21 @@ async def start_session(
         if candidate not in extra:
             extra.append(candidate)
 
-    if start_amount is not None:
-        if tab == "real":
-            raise ValueError(
-                "a starting amount cannot be set for a REAL session — it is the "
-                "exchange's own balance. Typing one would set the denominator of "
-                "every percentage this session reports while the venue held a "
-                "different number."
-            )
-        # Set BEFORE the "already running" check would be pointless, and AFTER
-        # equity is read would be too late — this has to land first so
-        # `current_equity` below measures the amount the operator chose.
-        await set_paper_starting_amount(start_amount)
+    if start_amount is not None and tab == "real":
+        raise ValueError(
+            "a starting amount cannot be set for a REAL session — it is the "
+            "exchange's own balance. Typing one would set the denominator of "
+            "every percentage this session reports while the venue held a "
+            "different number."
+        )
 
+    # EVERY REFUSAL THAT DOES NOT DEPEND ON THE NEW CASH COMES FIRST (F41).
+    #
+    # `set_paper_starting_amount` used to run here, above these checks, so a
+    # refused start still REWROTE THE BOOK: a second Start click with $2 set
+    # cash 10,000 -> 2 and then raised "a session is already running", and the
+    # session that WAS running then ended "floored" against a book it never
+    # agreed to. A refusal must leave the system exactly as it found it.
     for existing in _sessions.values():
         if existing.active:
             raise ValueError(
@@ -1116,6 +1339,13 @@ async def start_session(
             f"leverage {leverage}x is outside the 1x-{ceiling}x range for the "
             f"'{tab}' book. This ceiling is not operator-configurable."
         )
+
+    if start_amount is not None:
+        # NOW. It still has to land before `current_equity` below, so the
+        # session measures the amount the operator chose rather than the
+        # book's previous cash — that ordering was the original reason this
+        # call sat so early, and it is preserved.
+        await set_paper_starting_amount(start_amount)
 
     equity = await current_equity(tab)
     if equity is None:

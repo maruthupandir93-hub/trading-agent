@@ -171,8 +171,13 @@ def test_the_cap_is_reported_and_names_the_lever():
 
 @pytest.mark.parametrize("gate_phrase", [
     "no trading session is running",
-    # Wrapped across two source lines, so match the stable half.
-    "is on {session.symbol}, not {symbol}",
+    # The out-of-scope refusal. It names the whole SCAN LIST now, not just the
+    # primary symbol (F21): comparing `session.symbol` alone meant every
+    # rotated coin ran all 24 nodes and was then refused here, so the
+    # multi-coin rotation could never open a position on any coin but the
+    # first. The property under test is unchanged — this is still a REFUSAL
+    # and not a cap — only the set it is measured against.
+    "{', '.join(scanned)}, not {symbol}",
 ])
 def test_scope_refusals_are_still_refusals_not_caps(gate_phrase):
     """These are properties of the SESSION, not of size. Making one reachable by

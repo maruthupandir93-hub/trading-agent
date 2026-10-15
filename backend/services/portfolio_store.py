@@ -86,6 +86,17 @@ async def _persist() -> bool:
     if not pool:
         return False
 
+    # F57: refuse to write an in-memory book that was never loaded. See
+    # `load_portfolio`'s except branch — persisting here would DELETE the rows
+    # the read could not see.
+    if _load_failed:
+        logger.error(
+            "Not persisting the agent portfolio: the stored book could not be READ at "
+            "startup, so writing this one would delete positions and cash that are "
+            "still in the database. Restart once the database is reachable."
+        )
+        return False
+
     now = datetime.datetime.now(datetime.timezone.utc)
     try:
         async with pool.acquire() as conn:
@@ -143,6 +154,11 @@ async def _persist() -> bool:
         return False
 
 
+# Set when the stored book could not be READ, and it blocks `_persist`.
+# A failed read leaves the in-memory book at its defaults, and writing that
+# back is what turned one database blip into a wiped account (F57).
+_load_failed = False
+
 async def load_portfolio() -> bool:
     """Repopulate the in-memory book from Postgres at startup.
 
@@ -188,14 +204,30 @@ async def load_portfolio() -> bool:
                 "FROM agent_positions ORDER BY symbol"
             )
     except Exception as e:
+        # A FAILED READ MUST NOT BECOME AN EMPTY WRITE (F57).
+        #
+        # This returned False and left the in-memory book at its defaults —
+        # and the next `_persist()` then REPLACED the stored rows from that
+        # empty memory: `DELETE FROM agent_positions`, cash reset. One Supabase
+        # blip at boot and the operator's positions and cash were gone, with
+        # the only trace a single ERROR line in the log.
+        #
+        # "Could not read" and "there is nothing stored" are different facts,
+        # and the whole of this module already keeps that distinction elsewhere.
+        # The latch makes the writer honour it too.
+        global _load_failed
+        _load_failed = True
         logger.error(
             "Failed to read the stored agent portfolio: %s. Starting from %.2f cash with no "
-            "positions — any position held before this restart is NOT in this book.",
+            "positions — any position held before this restart is NOT in this book, and "
+            "WRITES ARE NOW BLOCKED so this empty state cannot overwrite the stored one. "
+            "Restart once the database is reachable.",
             e,
             PAPER_STARTING_CASH,
         )
         return False
 
+    _load_failed = False
     if cash_row is None and not position_rows:
         logger.info("No stored agent portfolio; starting at %.2f cash.", PAPER_STARTING_CASH)
         return False

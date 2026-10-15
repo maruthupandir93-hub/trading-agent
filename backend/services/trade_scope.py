@@ -144,10 +144,21 @@ def entry_refusal(
                 "no trading session is running, and SESSION_ONLY_TRADING is on, so no "
                 "new position may be opened. Start a session to trade."
             )
-        if normalise_symbol(session.symbol) != normalise_symbol(symbol):
+        # THE SCAN LIST, NOT THE PRIMARY SYMBOL (F21). The same fix is in
+        # `risk_gateway.gate`, and these two must agree — if one keeps the
+        # narrower test it silently becomes the real limit while the other
+        # looks like the one in force.
+        try:
+            scanned = [s for s in (session.scan_list() or []) if s]
+        except AttributeError:
+            # A session restored from before `watch_symbols` existed. Identical
+            # behaviour to the old single-symbol check.
+            scanned = []
+        if not scanned:
+            scanned = [session.symbol]
+        if normalise_symbol(symbol) not in {normalise_symbol(s) for s in scanned}:
             return (
-                f"the running session is on {session.symbol}, not {symbol}. A session "
-                f"trades one instrument."
+                f"the running session trades {', '.join(scanned)}, not {symbol}."
             )
 
     return None

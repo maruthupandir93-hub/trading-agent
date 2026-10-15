@@ -236,9 +236,7 @@ def test_a_finished_session_is_no_longer_active(monkeypatch, paper_equity):
 # Restore
 # ---------------------------------------------------------------------------
 
-def test_an_interrupted_session_is_restored_stopped_not_resumed(monkeypatch, tmp_path):
-    """Resuming real trading on process boot, unasked, would be the worst possible
-    reading of a restart — the operator may have restarted to make it stop."""
+def _interrupted_store(tmp_path):
     import json
 
     store = tmp_path / "trading_sessions.json"
@@ -249,11 +247,63 @@ def test_an_interrupted_session_is_restored_stopped_not_resumed(monkeypatch, tmp
         "stop_reason": None, "cycles_run": 7, "trades_opened": 2,
         "last_cycle_at": None, "last_decision": None, "last_rationale": None, "log": [],
     }]), encoding="utf-8")
+    return store
 
-    monkeypatch.setattr(ts, "_STORE_PATH", str(store))
-    interrupted = ts.restore()
 
-    assert interrupted == 1
+def test_an_interrupted_session_is_RESUMED_by_default(monkeypatch, tmp_path):
+    """THIS TEST ASSERTED THE OPPOSITE, AND THE BEHAVIOUR IT PINNED STOPPED
+    TRADING ON EVERY RESTART.
+
+    The old reasoning was that resuming real trading on boot, unasked, "would
+    be the worst possible reading of a restart — the operator may have
+    restarted to make it stop". The measured consequence of the alternative was
+    worse (F54): with `SESSION_ONLY_TRADING=true`, `trade_scope` refuses every
+    entry with "no trading session is running", so every deploy, OOM kill, VM
+    reboot and systemd `Restart=always` recovery ended trading silently —
+    Telegram sends only fills and closes, so nothing announced it.
+
+    An operator who restarts to make it stop has `POST /api/admin/pause`, the
+    emergency stop, and `RESUME_SESSIONS_ON_RESTART=false`. None of those were
+    needed to notice the old behaviour, which is the asymmetry that settles it.
+
+    Resuming claims nothing about the outage: the loop re-reads equity and
+    re-checks the floor, the target and the daily lock before opening anything.
+    """
+    monkeypatch.delenv("RESUME_SESSIONS_ON_RESTART", raising=False)
+    monkeypatch.setattr(ts, "_STORE_PATH", str(_interrupted_store(tmp_path)))
+
+    # `restore` schedules the loop with `create_task`, which needs a running
+    # loop. Driving it inside one and cancelling immediately keeps the test
+    # about the RESTORE decision rather than about the session loop.
+    import asyncio
+
+    async def _drive():
+        carried = ts.restore()
+        for task in list(ts._tasks.values()):
+            task.cancel()
+        await asyncio.gather(*ts._tasks.values(), return_exceptions=True)
+        ts._tasks.clear()
+        return carried
+
+    carried = asyncio.run(_drive())
+
+    assert carried == 1
+    restored = ts.get_session("old")
+    assert restored is not None
+    assert restored.status == "running", "a restart must not end the session"
+    assert restored.active is True
+
+
+def test_the_operator_can_still_opt_out_of_resuming(monkeypatch, tmp_path):
+    """`RESUME_SESSIONS_ON_RESTART=false` is the old behaviour, kept for an
+    operator who wants a restart to mean stop. Read at CALL time, so setting it
+    does not need another restart to take effect."""
+    monkeypatch.setenv("RESUME_SESSIONS_ON_RESTART", "false")
+    monkeypatch.setattr(ts, "_STORE_PATH", str(_interrupted_store(tmp_path)))
+
+    carried = ts.restore()
+
+    assert carried == 1
     restored = ts.get_session("old")
     assert restored is not None
     assert restored.status == "stopped"

@@ -275,6 +275,25 @@ async def reset_paper(req: ResetPaperRequest) -> Dict[str, Any]:
     report["positionsCleared"] = positions_before
     report["cash"] = float(req.startingCash)
 
+    # 2b. RE-ANCHOR THE DRAWDOWN MARK TO THE NEW BOOK (F56).
+    #
+    # The CEO's kill switch measures drawdown from a MONTHLY high-water mark.
+    # Resetting a $10,000 book to $3 without moving the mark means the first
+    # close computes a 99.97% drawdown and observation mode latches — halting
+    # a book that has not lost anything. The reset is precisely the event that
+    # invalidates the old mark.
+    #
+    # It does not fail the reset: a stale mark is a halt the operator can
+    # clear, while a refused reset leaves them stuck with the state they were
+    # trying to leave.
+    try:
+        from backend.agents.ceo_agent import rearm_high_water_mark
+
+        report["highWaterMark"] = rearm_high_water_mark(float(req.startingCash))
+    except Exception as exc:  # noqa: BLE001
+        report["highWaterMark"] = f"could not re-anchor: {exc}"
+        logger.warning("Paper book reset, but the drawdown mark was not re-anchored: %s", exc)
+
     # 3. The trade log, only if asked.
     report["tradesDeleted"] = None
     if req.clearTradeLog:

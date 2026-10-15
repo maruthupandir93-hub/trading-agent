@@ -666,10 +666,21 @@ def subscribe_to_triggers(checkpointer: Any = None) -> None:
             from backend.agents.position_monitor import get_position_monitor
 
             session = active_session()
-            in_scope = session is not None and (
-                str(session.symbol).split(":")[0].upper()
-                == str(event.symbol).split(":")[0].upper()
-            )
+            # THE WHOLE SCAN LIST (F21). This compared only the primary symbol,
+            # so a rotated coin was skipped here — or, with the gate's own
+            # narrower check, analysed in full and then refused. The three
+            # places that ask "is this symbol in scope?" must give one answer;
+            # see `risk_gateway._symbol_in_session` and `trade_scope`.
+            in_scope = False
+            if session is not None:
+                try:
+                    scanned = [s for s in (session.scan_list() or []) if s]
+                except AttributeError:
+                    scanned = []
+                if not scanned:
+                    scanned = [session.symbol]
+                want = str(event.symbol).split(":")[0].upper()
+                in_scope = any(str(s).split(":")[0].upper() == want for s in scanned)
             if not in_scope:
                 try:
                     held = any(

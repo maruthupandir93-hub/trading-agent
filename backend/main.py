@@ -120,18 +120,6 @@ async def lifespan(app: FastAPI):
     # `attach_execution` is above this for the same reason — a restored position
     # whose stop is ALREADY breached closes on the first tick, and a monitor with
     # no execution engine attached can only log that it cannot.
-    # Autonomous sessions are RESTORED but never RESUMED — a session that
-    # restarted real trading on boot, without anyone asking, would be the worst
-    # possible interpretation of a process restart.
-    from backend.services.trading_session import restore as restore_sessions
-
-    interrupted_sessions = restore_sessions()
-    if interrupted_sessions:
-        logger.warning(
-            "%d autonomous session(s) were interrupted by the last shutdown. They are "
-            "marked stopped and were NOT resumed.", interrupted_sessions,
-        )
-
     restored = await monitor.restore()
     if restored:
         logger.warning(
@@ -139,6 +127,31 @@ async def lifespan(app: FastAPI):
             "while this process was down; the first tick per symbol acts on the CURRENT "
             "price, which may already be through the stop.",
             restored,
+        )
+
+    # SESSIONS ARE RESTORED AFTER THE WATCH LIST, AND THAT ORDER MATTERS.
+    #
+    # A resumed session asks "am I already holding something?" on its first
+    # poll. Resuming before `monitor.restore()` would answer no, and the
+    # session would open a SECOND position in a coin it already holds.
+    #
+    # They are also RESUMED now, not merely restored. The old note here said a
+    # session restarting trade on boot "would be the worst possible
+    # interpretation of a process restart" — but the measured consequence of
+    # the opposite was worse: with `SESSION_ONLY_TRADING=true` every restart
+    # ended trading until a human noticed, and nothing announced it (F54). A
+    # resumed session re-reads equity and re-checks its floor, target and daily
+    # lock before it opens anything, so one whose floor broke during the outage
+    # finishes rather than trades. `RESUME_SESSIONS_ON_RESTART=false` restores
+    # the old behaviour for an operator who wants it.
+    from backend.services.trading_session import restore as restore_sessions
+
+    carried_sessions = restore_sessions()
+    if carried_sessions:
+        logger.warning(
+            "%d autonomous session(s) were running at the last shutdown and have been "
+            "handled (resumed, or stopped if RESUME_SESSIONS_ON_RESTART is off).",
+            carried_sessions,
         )
 
     # Closes spec Section 12's pipeline. REFLECTION_COMPLETED was published and

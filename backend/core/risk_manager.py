@@ -635,7 +635,12 @@ def check_max_drawdown() -> RiskCheck:
     )
 
 
-def check_daily_loss(equity: float, ledger: Optional[List[Dict[str, Any]]]) -> RiskCheck:
+def check_daily_loss(
+    equity: float,
+    ledger: Optional[List[Dict[str, Any]]],
+    *,
+    leverage: float = 1.0,
+) -> RiskCheck:
     """Spec Section 11's "Daily Loss Check".
 
     Sums realised P&L from today's ledger entries. `ai_memory`'s trade ledger
@@ -680,13 +685,38 @@ def check_daily_loss(equity: float, ledger: Optional[List[Dict[str, Any]]]) -> R
 
     loss_pct = (-realised / equity) * 100.0 if realised < 0 else 0.0
 
-    if loss_pct > MAX_DAILY_LOSS_PCT:
+    # THE LIMIT SCALES WITH LEVERAGE IN BROKER MODE, FOR THE SAME REASON THE
+    # OTHER SOFT CAPS DO — AND ONE ORDINARY STOP-OUT USED TO HALT THE DAY (F59).
+    #
+    # A flat 5% was written for 1x sizing, where a per-trade loss is a fraction
+    # of a percent. Broker-style sizing makes a stop-out cost roughly
+    # `leverage x stop%`: about 8% of equity at 10x with the VaR budget this
+    # project runs. So the FIRST loss of the day exceeded the whole day's
+    # allowance, entries were hard-rejected until 00:00 UTC, and the session
+    # kept running refused graphs in the meantime.
+    #
+    # The comment on `MAX_DAILY_LOSS_PCT` already states the principle this
+    # broke: it is set above the per-trade limit deliberately, because "at or
+    # below it, a single losing trade taken within the rules would halt
+    # trading, which would make the per-trade limit unusable in practice".
+    # Leverage had moved the per-trade limit and the daily one had not followed.
+    #
+    # THE INVARIANTS DO NOT SCALE — the leverage ceiling and the mandatory stop
+    # are untouched. This is a soft cap on a measured day, and at 1x it is
+    # byte-for-byte the original 5%.
+    effective_limit = MAX_DAILY_LOSS_PCT * max(1.0, float(leverage or 1.0))
+
+    if loss_pct > effective_limit:
+        scaled = (
+            "" if effective_limit == MAX_DAILY_LOSS_PCT
+            else f" ({MAX_DAILY_LOSS_PCT}% x {leverage:g}x leverage)"
+        )
         return RiskCheck(
             status="reject",
             detail=(
                 f"Today's realised loss is ${-realised:,.2f} ({loss_pct:.2f}% of "
-                f"${equity:,.2f} equity), exceeding the {MAX_DAILY_LOSS_PCT}% daily "
-                f"limit across {len(todays)} closed trade(s). Stop for the day."
+                f"${equity:,.2f} equity), exceeding the {effective_limit:.1f}% daily "
+                f"limit{scaled} across {len(todays)} closed trade(s). Stop for the day."
             ),
         )
 
@@ -694,7 +724,7 @@ def check_daily_loss(equity: float, ledger: Optional[List[Dict[str, Any]]]) -> R
         f"Today's realised P&L is ${realised:+,.2f} across {len(todays)} closed "
         f"trade(s)"
     )
-    if loss_pct > MAX_DAILY_LOSS_PCT * 0.6:
+    if loss_pct > effective_limit * 0.6:
         return RiskCheck(
             status="warn",
             detail=f"{detail} — {loss_pct:.2f}% of equity, approaching the "
@@ -1140,7 +1170,12 @@ def validate_trade(request: Dict[str, Any], strict: bool = False) -> RiskValidat
     checks["MaxDrawdown"] = check_max_drawdown()
 
     # 7. Daily loss.
-    checks["DailyLoss"] = check_daily_loss(equity, ledger)
+    # Broker-style sizing makes a stop-out cost ~leverage x stop%, so the
+    # day's allowance has to scale with it or the first loss halts the day
+    # (F59). At 1x / no session this is the original flat 5%.
+    checks["DailyLoss"] = check_daily_loss(
+        equity, ledger, leverage=exposure_leverage,
+    )
 
     # 8. Margin. Falls back to equity as free margin when no cash figure was
     #    supplied, and SAYS SO — on a book with open positions, equity overstates

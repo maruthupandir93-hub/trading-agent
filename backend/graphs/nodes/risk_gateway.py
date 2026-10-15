@@ -248,6 +248,27 @@ def build_entry_context(
     return " ".join(bits).rstrip(",")
 
 
+def _session_symbols(session) -> list:
+    """Every instrument the session may trade, normalised.
+
+    `scan_list()` is the session's own answer to "which instruments am I
+    trading?" and already includes the primary symbol. The `AttributeError`
+    fallback is for a session restored from before `watch_symbols` existed; it
+    behaves exactly as the old single-symbol check did.
+    """
+    try:
+        raw = list(session.scan_list() or [])
+    except AttributeError:
+        raw = []
+    if not raw:
+        raw = [session.symbol]
+    return [_norm_symbol(x) for x in raw if x]
+
+
+def _symbol_in_session(session, symbol: str) -> bool:
+    return _norm_symbol(symbol) in set(_session_symbols(session))
+
+
 def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     """Size, validate, and produce an inert execution plan. Deterministic."""
     decision = state.get("decision")
@@ -418,13 +439,26 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                     },
                 )
             }
-        if _norm_symbol(session.symbol) != _norm_symbol(symbol):
+        # THE SESSION'S WHOLE SCAN LIST, NOT JUST ITS PRIMARY SYMBOL.
+        #
+        # This compared `session.symbol` with the symbol under analysis, so with
+        # `SESSION_ONLY_TRADING=true` every ROTATED coin ran all 24 nodes and
+        # was then refused here with "the running session is on XRP/USDT, not
+        # SOL/USDT" (F21). Four of every five decisions, and their share of a
+        # 40/min LLM budget, were spent reaching a refusal that was settled
+        # before the run began — and the multi-coin rotation, which exists
+        # because one coin is flat most of the time, could never open anything
+        # on any coin but the first.
+        #
+        # `tests/test_session_symbol_rotation.py` never drove `gate()`, which is
+        # why the suite stayed green through all of it.
+        if not _symbol_in_session(session, symbol):
+            scanned = ", ".join(_session_symbols(session)) or session.symbol
             return {
                 "risk_assessment": RiskAssessment(
                     approved=False,
                     rejection_reasons=[
-                        f"the running session is on {session.symbol}, not {symbol}. "
-                        f"A session trades one instrument."
+                        f"the running session trades {scanned}, not {symbol}."
                     ],
                     checks={
                         "SessionScope": {
@@ -691,9 +725,34 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         # the whole balance would produce a position the book then declines — a
         # trade that passes every risk check and silently never opens. The reserve
         # is the fee itself plus a hair, not a fraction of the account.
+        # THE RESERVE WAS COMPUTED ON CASH AND THE FEE IS CHARGED ON NOTIONAL,
+        # SO AT 10x IT WAS ABOUT SEVEN TIMES TOO SMALL (F2).
+        #
+        # `apply_paper_fill` refuses when `margin + fee > free_cash`, and its
+        # fee is `notional x taker` = `margin x leverage x taker`. Reserving
+        # `cash x taker x 1.5` covers that only at 1x. Measured on the live $3
+        # book at 10x: margin 2.82 + fee ~0.014 against cash 2.83, so the book
+        # refused the fill — while the plan had already passed every risk check
+        # and a REAL demo order stood behind it. `_execute_tar` then published
+        # ORDER_FILLED anyway (the documented "mirrored -> publish and log
+        # CRITICAL" branch), leaving the watch list holding a position the book
+        # had never recorded. Equity, the dashboard and the session's progress
+        # toward its target were all computed from a book missing the position
+        # the agent was managing.
+        #
+        # Solve it exactly instead of guessing a fraction:
+        #
+        #     margin + margin x leverage x taker  <=  usable_cash
+        #     margin x (1 + leverage x taker)     <=  usable_cash
+        #     margin                              <=  usable_cash / (1 + L x t)
+        #
+        # The 1.5 hair stays on top of the fee term, for rounding and for a
+        # venue whose taker differs by a basis point from the modelled one.
         usable_cash = cash if cash is not None else account_capital
-        fee_reserve = usable_cash * taker_rate() * 1.5
-        per_trade_margin = min(available_margin, max(0.0, usable_cash - fee_reserve))
+        _lev = max(1.0, float(session_leverage or 1))
+        _fee_per_margin = _lev * taker_rate() * 1.5
+        affordable_margin = usable_cash / (1.0 + _fee_per_margin)
+        per_trade_margin = min(available_margin, max(0.0, affordable_margin))
 
         if per_trade_margin <= 0.0:
             return {

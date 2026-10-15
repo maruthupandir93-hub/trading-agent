@@ -91,6 +91,7 @@ from backend.models.events import (
 logger = logging.getLogger(__name__)
 
 import os
+import time
 
 # Fee arithmetic lives in ONE module so the paper book, the closing row and the
 # backtest cannot each carry their own idea of what a trade costs — which they
@@ -263,6 +264,14 @@ TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, be
 # cannot happen again. Not env-tunable on purpose: an operator lowering it to
 # zero would restore exactly the silence it exists to break.
 _CLOSE_FAILURE_ALERT = 10
+
+# HOW LONG AN APPROVED-BUT-UNFILLED TAR STAYS IN THE PENDING MAP.
+#
+# A fill follows its approval within milliseconds on every working path, so an
+# hour is generous by three orders of magnitude and still well short of a
+# restart cycle. Long enough that a slow venue cannot lose a legitimate entry;
+# short enough that a refused one does not accumulate for months (F65).
+_PENDING_TTL_S = 3600.0
 
 
 class _Tracked:
@@ -875,6 +884,12 @@ class PositionMonitorAgent(BaseAgent):
                 funding_rate=row.get("funding_rate"),
             )
             resumed += 1
+
+        # F65: a restored pending row may be months old. A restart between
+        # approval and fill is exactly how one gets there, and a restored
+        # stale approval would attach its stop to an unrelated later fill.
+        self._expire_stale_pending()
+        pending = len(self._pending)
 
         if resumed or pending:
             logger.warning(
@@ -1592,6 +1607,38 @@ class PositionMonitorAgent(BaseAgent):
         self._replace_resting_stop_soon(pos)
         return True, f"stop tightened {current:.8g} -> {new_stop:.8g}"
 
+    def _expire_stale_pending(self) -> None:
+        """Drop approvals that were never filled.
+
+        `_pending` was cleared only by a FILL or by `clear_all`, so every TAR
+        that was approved and then refused downstream -- below the venue's
+        minimum, unfundable, or interrupted by a restart -- stayed in the map
+        forever (F65). Each one is re-persisted on every watch-list write and
+        re-restored on every boot, and `_register_fill` would attach a stop
+        from a months-old approval to any later fill that happened to reuse
+        the id.
+
+        An approval that has not filled within `_PENDING_TTL_S` is not going
+        to. Dropping it loses nothing that is still true: a fill arriving after
+        that is handled as an UNPROTECTED POSITION and logged, which is the
+        correct, loud outcome for an entry nobody approved recently.
+        """
+        if not self._pending:
+            return
+        cutoff = time.time() - _PENDING_TTL_S
+        stale = [
+            tar_id for tar_id, row in self._pending.items()
+            if float(row.get("approved_at") or 0.0) and float(row["approved_at"]) < cutoff
+        ]
+        for tar_id in stale:
+            row = self._pending.pop(tar_id, {})
+            logger.warning(
+                "Approved TAR %s on %s was never filled within %.0f minutes and has been "
+                "dropped from the pending map. It was most likely refused after approval "
+                "(venue minimum, unfundable book, or a restart between approval and fill).",
+                tar_id, row.get("symbol", "?"), _PENDING_TTL_S / 60.0,
+            )
+
     async def handle_event(self, event: BaseEvent) -> None:
         if isinstance(event, TarApprovedEvent):
             self._pending[str(event.tar_id)] = {
@@ -1615,7 +1662,10 @@ class PositionMonitorAgent(BaseAgent):
                 # the leverage to know what price move satisfies it.
                 "leverage": getattr(event, "approved_leverage", None),
                 "entry_context": getattr(event, "entry_context", None),
+                # WHEN IT WAS APPROVED, so it can be expired (F65).
+                "approved_at": time.time(),
             }
+            self._expire_stale_pending()
             await self.persist_watch_list()
             return
 
