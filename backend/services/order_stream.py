@@ -100,16 +100,42 @@ class OrderEvent:
         return (self.status or "").lower() in ("closed", "filled") and bool(self.filled)
 
 
-def stream_enabled() -> bool:
-    """Whether to run at all. Live trading only, and opt-out via env.
+def venue_backed_book_exists() -> bool:
+    """Is there ANY book in this process with real orders standing behind it?
 
-    Mirrors `reconciliation`'s gating: a paper book has no venue orders to watch,
-    so an authenticated socket would be observing a book the exchange has never
-    heard of.
+    THE OLD ANSWER WAS "ONLY WITH LIVE_TRADING ON", AND IT COST FOUR DAYS.
+
+    The reasoning was sound when it was written: "a paper book has no venue
+    orders to watch, so an authenticated socket would be observing a book the
+    exchange has never heard of". The testnet mirror made that false. A
+    mirrored paper position holds a REAL resting stop and take-profit at the
+    demo exchange, and when one of them fires the exchange closes the position
+    and nothing in here finds out (F7).
+
+    That is not a cosmetic gap. It is the whole of F1: the stop filled, the
+    account went flat, and the monitor spent four days sending reduce-only
+    orders to an account with no position while the session refused to open
+    anything else because it believed it was holding.
+
+    So the question is no longer "is live trading on" but "does anything here
+    have orders at a venue" — which is true for live trading AND for an active
+    mirror.
     """
     from backend.core.config import settings
 
-    if not settings.LIVE_TRADING:
+    if settings.LIVE_TRADING:
+        return True
+    try:
+        from backend.services import paper_testnet
+
+        return bool(paper_testnet.active())
+    except Exception:  # noqa: BLE001 - never let an observer's import stop trading
+        return False
+
+
+def stream_enabled() -> bool:
+    """Whether to run at all, plus an opt-out via env."""
+    if not venue_backed_book_exists():
         return False
     raw = (os.getenv("ORDER_STREAM_ENABLED") or "true").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -138,7 +164,7 @@ class OrderStream:
             return
         if not stream_enabled():
             logger.info(
-                "Order stream not started (LIVE_TRADING off, or ORDER_STREAM_ENABLED=false). "
+                "Order stream not started (no venue-backed book — LIVE_TRADING is off and the testnet mirror is inactive — or ORDER_STREAM_ENABLED=false). "
                 "Venue order state will only be observed by the once-a-minute reconciliation."
             )
             return

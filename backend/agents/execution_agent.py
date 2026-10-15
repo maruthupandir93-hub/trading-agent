@@ -740,6 +740,12 @@ class ExecutionAgent(BaseAgent):
     async def close_position(
         self, symbol: str, entry_side: str, qty: float, tab: str, reason: str,
         observed_price: Optional[float] = None,
+        # The resting stop / take-profit ids the monitor holds, so a
+        # close that finds the venue already flat can read the fill those
+        # orders produced instead of inventing one. Optional: a caller
+        # that does not have them still gets the flat-account handling,
+        # just with a recency match instead of an exact one.
+        venue_order_ids: Optional[List[str]] = None,
     ) -> Optional[float]:
         """Close an open position. Returns the fill price, or None on failure.
 
@@ -847,8 +853,65 @@ class ExecutionAgent(BaseAgent):
                     close_exchange = f"{paper_testnet.venue_choice()}_testnet"
                     qty = min(qty, float(mirrored["filled_qty"]))
                 else:
-                    # Connected mode must never invent a successful demo exit.
-                    return None
+                    # THE EXCHANGE MAY HAVE CLOSED IT ALREADY, AND THAT IS NOT
+                    # AN ERROR -- IT IS WHAT A RESTING STOP DOING ITS JOB LOOKS
+                    # LIKE FROM IN HERE.
+                    #
+                    # This branch used to `return None` for every refusal, and
+                    # the caller reads None as "did not close, retry next
+                    # tick". The operator's session sat on that loop for FOUR
+                    # DAYS (F1): Binance's resting stop filled the XRP short at
+                    # 1.3985 for +0.089, the demo account went flat, and the
+                    # monitor then sent a reduce-only order to an account with
+                    # no position every twelve seconds. The session never
+                    # decided again, because it believed it was holding.
+                    #
+                    # Two closers exist -- the in-process monitor and the
+                    # orders resting at the venue -- and only one of them was
+                    # ever heard from. So ASK.
+                    flat = await paper_testnet.venue_flat(symbol)
+                    if flat is not True:
+                        # False = still holding, None = could not ask. Neither
+                        # licenses forgetting the position; a timeout that read
+                        # as "flat" would abandon a real order with no stop
+                        # behind it, which is worse than the retry.
+                        return None
+
+                    # It is genuinely flat. Prefer the venue's OWN fill: booking
+                    # the monitor's trigger price would invent a number, and the
+                    # gap is real money (the live incident's trigger price was
+                    # far past where it actually filled).
+                    venue_fill = await paper_testnet.exit_fill(
+                        symbol, order_ids=venue_order_ids or [],
+                    )
+                    close_exchange = f"{paper_testnet.venue_choice()}_testnet"
+                    if venue_fill and (venue_fill.get("price") or 0) > 0:
+                        fill_price = float(venue_fill["price"])
+                        if (venue_fill.get("qty") or 0) > 0:
+                            qty = min(qty, float(venue_fill["qty"]))
+                        logger.warning(
+                            "%s was ALREADY FLAT at %s -- its resting order closed it at "
+                            "%.8g across %d fill(s)%s. Settling the book at the venue's "
+                            "own price. This is the normal outcome of a stop or "
+                            "take-profit firing, not a failure.",
+                            symbol, close_exchange, fill_price,
+                            int(venue_fill.get("fills") or 1),
+                            "" if venue_fill.get("matched_order")
+                            else " (matched by recency, not by order id)",
+                        )
+                    else:
+                        # INVARIANT 6: say which price this is. The position
+                        # really did close -- the venue holds nothing -- but the
+                        # fill price is ours, not the exchange's, and a reader
+                        # comparing this row with the venue's statement must be
+                        # able to tell.
+                        logger.warning(
+                            "%s was ALREADY FLAT at %s and its exit fill could not be "
+                            "read, so the book is settled at the price the monitor "
+                            "decided on (%.8g). The realised P&L on this row is "
+                            "ours, not the exchange's.",
+                            symbol, close_exchange, fill_price,
+                        )
                 if mirrored:
                     logger.info(
                         "Testnet-mirrored close of %s %s %s at %s (%s) — the exchange's "

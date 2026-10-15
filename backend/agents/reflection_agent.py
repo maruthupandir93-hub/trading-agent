@@ -181,6 +181,25 @@ class ReflectionAgent(BaseAgent):
         return "Active"
 
 
+    _reflection_tasks: set = set()
+
+    async def _reflect_on_close_guarded(self, event) -> None:
+        """`_reflect_on_close`, with its failures visible.
+
+        A detached task's exception never reaches the bus's handler, and the
+        bus already logs a subscriber exception without a traceback -- which
+        this codebase has paid for three times. Reflection is off the critical
+        path, so a failure here costs a lesson, never a fill.
+        """
+        try:
+            await self._reflect_on_close(event)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Reflection on the closed %s position failed; the trade is still "
+                "counted, only the lesson is lost.",
+                getattr(event, "symbol", "?"),
+            )
+
     async def handle_event(self, event: BaseEvent) -> None:
         """Reflect on CLOSED positions only.
 
@@ -235,7 +254,25 @@ class ReflectionAgent(BaseAgent):
                 # this back, and neither may count the other book's outcomes.
                 tab=getattr(event, "tab", "paper"),
             )
-            await self._reflect_on_close(event)
+            # DETACHED, FOR THE SAME REASON THE ANALYSIS RUN IS (F22, path B).
+            #
+            # `_reflect_on_close` awaits `run_reflection_graph` on the REASONING
+            # tier -- a 300 s read timeout, plus rate-limiter and 429 waits. The
+            # bus drains a causal chain inside the ORIGINAL publisher's await, and
+            # the publisher here is `live_market_data`'s tick watcher: a tick
+            # closed the position, the close published POSITION_CLOSED, and this
+            # handler then held the whole tick feed for as long as a model took to
+            # answer. No `TICK_RECEIVED` for that symbol means `_check_price` does
+            # not run, so **a stop could be blind for minutes** -- and a session
+            # re-enters immediately after a close, often on the same coin whose
+            # feed is still stalled.
+            #
+            # The count above stays INLINE and awaited: it is a fact, it makes no
+            # model call, it never raises, and every reader of the win rate
+            # depends on it having happened before the next decision.
+            task = asyncio.create_task(self._reflect_on_close_guarded(event))
+            self._reflection_tasks.add(task)
+            task.add_done_callback(self._reflection_tasks.discard)
             return
 
         if event.event_type == "ORDER_FILLED" and isinstance(event, OrderFilledEvent):

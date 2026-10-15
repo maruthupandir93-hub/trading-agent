@@ -282,7 +282,13 @@ async def run_forever(interval_s: float = DEFAULT_INTERVAL_S) -> None:
     while True:
         try:
             await asyncio.sleep(interval_s)
-            if not settings.LIVE_TRADING:
+            # A MIRRORED PAPER POSITION HAS REAL ORDERS TOO (F7). The old
+            # `if not settings.LIVE_TRADING` skipped the one comparison that
+            # would have caught F1 on its first minute: the venue flat, the
+            # local book holding. See `order_stream.venue_backed_book_exists`.
+            from backend.services.order_stream import venue_backed_book_exists
+
+            if not venue_backed_book_exists():
                 continue
             _last_report = await reconcile()
         except asyncio.CancelledError:

@@ -154,7 +154,26 @@ def test_the_close_is_counted_before_the_reflection_and_without_a_model_call():
 
     handler = inspect.getsource(ReflectionAgent.handle_event)
     assert "record_closed_trade" in handler
-    assert handler.index("record_closed_trade(") < handler.index("_reflect_on_close(")
+    assert handler.index("record_closed_trade(") < handler.index("_reflect_on_close")
+
+    # AND THE TWO ARE NOW SHAPED DIFFERENTLY, WHICH IS THE STRONGER PROPERTY.
+    #
+    # The count is AWAITED inline; the reflection is DETACHED onto its own task
+    # (F22). The bus drains a causal chain inside the original publisher's
+    # await, and that publisher is the tick watcher -- so awaiting a 300 s
+    # REASONING-tier call here held the whole price feed, and no stop could
+    # fire for that symbol while it ran. Ordering alone would no longer catch a
+    # regression that re-inlined the reflection, so assert both.
+    assert "await record_closed_trade(" in handler, (
+        "the count must stay awaited inline: every reader of the win rate "
+        "depends on it having happened before the next decision"
+    )
+    assert "create_task(self._reflect_on_close_guarded(" in handler, (
+        "the reflection must stay OFF the tick's causal chain"
+    )
+    assert "await self._reflect_on_close(" not in handler, (
+        "re-inlining the reflection blinds the stop for as long as the model takes"
+    )
 
     # Matched as a CALL, not as a mention: the function's own docstring
     # explains why it does not call `analyze_mistake`, so a bare substring

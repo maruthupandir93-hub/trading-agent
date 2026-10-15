@@ -248,6 +248,72 @@ def status() -> Dict[str, Any]:
     }
 
 
+async def venue_flat(symbol: str) -> Optional[bool]:
+    """Does the mirror venue hold NOTHING in `symbol`?
+
+    True = flat, False = still holding, **None = could not ask**.
+
+    THE THREE-VALUED ANSWER IS THE WHOLE POINT, and collapsing it is how F1
+    becomes a different bug. A timeout that read as "flat" would make the
+    caller forget a position the venue still holds, abandoning a real order
+    with no stop behind it -- which is strictly worse than the retry loop this
+    exists to end.
+
+    `binance_testnet.open_position` already makes exactly this distinction
+    (`{}` flat, `None` unreadable); this is the venue-agnostic wrapper, because
+    `Venue.open_positions()` takes no symbol and answers for the whole account.
+    """
+    if not active():
+        return None
+    try:
+        venue = get_venue()
+        reader = getattr(venue, "open_positions", None)
+        if reader is None:
+            return None
+        try:
+            held = await reader(symbol)          # BinanceTestnetVenue: per symbol
+        except TypeError:
+            held = await reader()                # services.venue.Venue: whole account
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read the mirror's position in %s: %s", symbol, exc)
+        return None
+
+    if held is None:
+        return None
+    if isinstance(held, dict):
+        return not held
+    if isinstance(held, list):
+        target = (symbol or "").split(":")[0].upper()
+        for row in held:
+            if not isinstance(row, dict):
+                continue
+            got = str(row.get("symbol") or "").split(":")[0].upper()
+            if got == target and abs(float(row.get("qty") or 0.0)) > 0:
+                return False
+        return True
+    return None
+
+
+async def exit_fill(symbol: str, order_ids=None) -> Optional[Dict[str, Any]]:
+    """The venue's own fill for a close it executed without us, or None.
+
+    Only the Binance demo adapter can answer this today; a venue that cannot is
+    None rather than a guess, and the caller books the price it decided on and
+    says so in the log.
+    """
+    if not active():
+        return None
+    try:
+        venue = get_venue()
+        reader = getattr(venue, "recent_exit_fill", None)
+        if reader is None:
+            return None
+        return await reader(symbol, order_ids=list(order_ids or []))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read the mirror's exit fill for %s: %s", symbol, exc)
+        return None
+
+
 async def place(
     *,
     symbol: str,

@@ -410,7 +410,9 @@ class Venue:
 
     # -- sizing ----------------------------------------------------------
 
-    async def check_size(self, symbol: str, qty: float, price: float) -> SizingCheck:
+    async def check_size(
+        self, symbol: str, qty: float, price: float, *, reduce_only: bool = False,
+    ) -> SizingCheck:
         """Round `qty` to the venue's step and verify it clears the minimums.
 
         RETURNS A REFUSAL RATHER THAN A BUMPED-UP SIZE. If a position is below the
@@ -457,7 +459,28 @@ class Venue:
                 ok=False, qty=rounded, min_qty=min_qty, min_notional=min_cost,
                 reason=f"{rounded:g} is below {symbol}'s minimum quantity of {min_qty:g} on {self.id}",
             )
-        if min_cost is not None and price > 0 and rounded * price < float(min_cost):
+        # THE MINIMUM NOTIONAL DOES NOT APPLY TO A REDUCE-ONLY ORDER, AND
+        # APPLYING IT BROKE INVARIANT 4.
+        #
+        # Binance (and Bybit) exempt reduce-only orders from MIN_NOTIONAL,
+        # precisely because a position whose value has fallen below the minimum
+        # must still be closable. This pre-check did not, so on the $2-$5
+        # accounts this project actually runs (F23):
+        #
+        #     open 4.0 XRP at 1.28          notional $5.12, accepted
+        #     stop 2.5% away                notional $4.99 at the stop price
+        #     -> the resting stop is REFUSED at entry
+        #     -> when the stop fires, every close is refused, on every tick
+        #
+        # The position could not exit. "Closes are never blocked — not by
+        # pause, not by risk checks" is the invariant, and this was blocking
+        # them with a rule the venue itself would not have applied.
+        #
+        # The MINIMUM QUANTITY and the step size still apply: those are what
+        # the venue can represent at all, and an order below them is rejected
+        # reduce-only or not. Only the notional floor is lifted.
+        if (not reduce_only) and min_cost is not None and price > 0 \
+                and rounded * price < float(min_cost):
             return SizingCheck(
                 ok=False, qty=rounded, min_qty=min_qty, min_notional=min_cost,
                 reason=(
@@ -785,7 +808,12 @@ class Venue:
                 error=f"{symbol} has no linear perpetual market on {self.id}",
             )
 
-        check = await self.check_size(resolved, qty, expected_price)
+        # `reduce_only` forwarded so a CLOSE is not refused by the venue's
+        # minimum notional — a rule the venue exempts reduce-only orders from,
+        # and which was making small positions unexitable (F23, invariant 4).
+        check = await self.check_size(
+            resolved, qty, expected_price, reduce_only=reduce_only,
+        )
         if not check.ok:
             return OrderResult(ok=False, error=check.reason, requested_qty=qty)
 
@@ -851,7 +879,11 @@ class Venue:
                 error=f"{symbol} has no linear perpetual market on {self.id}",
             )
 
-        check = await self.check_size(resolved, qty, stop_price)
+        # A STOP IS REDUCE-ONLY BY CONSTRUCTION (the `_order_params` call
+        # below sets it), so the venue's minimum notional does not apply. It
+        # was applied here, and that refused the protective stop on exactly the
+        # small positions that most need one (F23).
+        check = await self.check_size(resolved, qty, stop_price, reduce_only=True)
         if not check.ok:
             return OrderResult(ok=False, error=check.reason, requested_qty=qty)
 
@@ -961,7 +993,10 @@ class Venue:
                 error=f"{symbol} has no linear perpetual market on {self.id}",
             )
 
-        check = await self.check_size(resolved, qty, take_profit_price)
+        # Reduce-only, same as the stop. See `place_stop_loss`.
+        check = await self.check_size(
+            resolved, qty, take_profit_price, reduce_only=True,
+        )
         if not check.ok:
             return OrderResult(ok=False, error=check.reason, requested_qty=qty)
 

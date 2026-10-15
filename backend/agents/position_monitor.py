@@ -256,6 +256,15 @@ TRAILING_STOP_R = _env_float("TRAILING_STOP_R", 1.0)        # distance behind pe
 TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, before it arms
 
 
+# HOW MANY CONSECUTIVE FAILED CLOSES BEFORE THIS BECOMES A CRITICAL.
+#
+# ~2 minutes at the 12s session poll, which is long enough that a single venue
+# hiccup does not page anyone and short enough that F1's four-day silence
+# cannot happen again. Not env-tunable on purpose: an operator lowering it to
+# zero would restore exactly the silence it exists to break.
+_CLOSE_FAILURE_ALERT = 10
+
+
 class _Tracked:
     """One open position being watched."""
 
@@ -292,6 +301,10 @@ class _Tracked:
         # the R multiple that gates a scale-out is 0 — which naturally prevents a
         # second scale-out without needing to persist this flag.
         "partial_done",
+        # HOW MANY TIMES IN A ROW THE CLOSE HAS FAILED. In-memory only: a
+        # restart re-reads the venue anyway, and a counter that survived one
+        # would suppress the alert on the very boot that could still act on it.
+        "close_failures",
         # ATTRIBUTION, carried from the approval so the CLOSING trade row can
         # record it.
         #
@@ -411,6 +424,12 @@ class PositionMonitorAgent(BaseAgent):
         # on the exchange is in flight, and without this the same position
         # would be closed twice.
         self._closing: set = set()
+        # F24: one venue-side stop replacement at a time per position, a fresh
+        # client id per placement, and a strong reference to the in-flight task.
+        self._stop_locks: Dict[str, asyncio.Lock] = {}
+        self._stop_replacing: set = set()
+        self._stop_tasks: set = set()
+        self._protective_seq: Dict[str, int] = {}
         super().__init__()
 
     # ---------------- contract ----------------
@@ -663,8 +682,55 @@ class PositionMonitorAgent(BaseAgent):
         """
         if not _venue_backed(pos) or pos.stop_loss is None:
             return
-        await self._cancel_resting_stop(pos, "stop tightened")
-        await self._place_resting_stop(pos)
+
+        # ONE REPLACEMENT AT A TIME, PER POSITION. Without this lock two ticks
+        # 20 ms apart interleave their cancel/place pairs, and the trailing stop
+        # calls `tighten_stop` on EVERY new peak (F24):
+        #
+        #   A cancel(old) -> B cancel(old, already gone) -> A place(new1)
+        #                 -> B place(new2) -> pos.stop_order_id = new2
+        #
+        # leaving new1 RESTING AT THE VENUE with nothing holding its id. A close
+        # cannot cancel it and a restart cannot find it; on a hedge-mode account
+        # it later opens a reversed position. Reproduced with three CRITICAL
+        # "NO RESTING STOP" logs before this lock existed.
+        lock = self._stop_locks.setdefault(pos.tar_id, asyncio.Lock())
+        async with lock:
+            # RE-READ THE LEVEL AFTER ACQUIRING. Callers coalesce onto one
+            # in-flight replacement, so by the time this runs `pos.stop_loss`
+            # may have tightened again — and the LATEST level is the one the
+            # operator was told about and the one the in-process monitor is
+            # enforcing. Using the level captured before the wait would place a
+            # stop the system has already moved past.
+            if pos.stop_loss is None:
+                return
+            await self._cancel_resting_stop(pos, "stop tightened")
+            await self._place_resting_stop(pos)
+
+    def _protective_id(self, kind: str, pos: "_Tracked") -> str:
+        """A client id that is UNIQUE TO THIS PLACEMENT, not to the position.
+
+        Every replacement used to reuse `sl_{tar_id}`, and the two venues break
+        differently on that (F24):
+
+          * **Bybit** requires `orderLinkId` to be unique across ALL orders
+            ever, not just open ones. So the first tighten cancelled the old
+            stop and had the new one REFUSED as a duplicate — leaving the
+            position with no resting stop at all, which is the failure the
+            resting stop exists to prevent.
+          * **Binance** requires it to be unique among OPEN orders, so a racing
+            replacement could place a second order that then outlived the id
+            the monitor was holding.
+
+        `sl_<24 hex of tar>_<nn>` stays inside Binance's 36-character limit and
+        inside Bybit's, and still greps back to the position it protects. The
+        counter is per position and in-memory; a restart starts at 00 again,
+        which is safe because the ids it would collide with were cancelled on
+        the way down or are cancelled by `stop_order_id` on restore.
+        """
+        n = self._protective_seq.get(pos.tar_id, 0) + 1
+        self._protective_seq[pos.tar_id] = n
+        return f"{kind}_{str(pos.tar_id)[:24]}_{n % 100:02d}"
 
     def _replace_resting_stop_soon(self, pos: "_Tracked") -> None:
         """Schedule `_replace_resting_stop` from a SYNCHRONOUS caller.
@@ -682,7 +748,28 @@ class PositionMonitorAgent(BaseAgent):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._replace_resting_stop(pos))
+
+        # COALESCE. The trail tightens on every new peak, so a fast move used to
+        # queue a replacement per tick; each one is a cancel and a place against
+        # the venue's rate budget, and they raced (F24). One in flight is enough
+        # — it re-reads `pos.stop_loss` after taking the lock, so it carries the
+        # newest level rather than the one that scheduled it.
+        if pos.tar_id in self._stop_replacing:
+            return
+        self._stop_replacing.add(pos.tar_id)
+
+        async def _run() -> None:
+            try:
+                await self._replace_resting_stop(pos)
+            finally:
+                self._stop_replacing.discard(pos.tar_id)
+
+        task = loop.create_task(_run())
+        # KEEP A REFERENCE. A bare `create_task` is only weakly held by the loop
+        # and can be garbage-collected mid-flight, which would abandon a
+        # cancel/place pair halfway and leave exactly the orphan this fixes.
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
 
     async def restore(self) -> int:
         """Reload the watch list at startup. Returns how many positions resumed.
@@ -1054,7 +1141,7 @@ class PositionMonitorAgent(BaseAgent):
             side=exit_side,
             qty=pos.qty,
             stop_price=pos.stop_loss,
-            client_order_id=f"sl_{pos.tar_id}"[:36],
+            client_order_id=self._protective_id("sl", pos),
         )
 
         if result.ok:
@@ -1166,7 +1253,7 @@ class PositionMonitorAgent(BaseAgent):
             side=exit_side,
             qty=pos.qty,
             take_profit_price=target,
-            client_order_id=f"tp_{pos.tar_id}"[:36],
+            client_order_id=self._protective_id("tp", pos),
         )
 
         if result.ok:
@@ -2052,18 +2139,55 @@ class PositionMonitorAgent(BaseAgent):
                 # and reports the venue's fill, which is why the P&L below is
                 # still computed from `fill_price` and not from `trigger_price`.
                 observed_price=trigger_price,
+                # SO A CLOSE THAT FINDS THE VENUE FLAT CAN READ THE FILL THAT
+                # MADE IT FLAT. These are the ids of the orders resting at the
+                # exchange; when one of them fires, the exchange closes the
+                # position and nothing tells us (F1). Handing them over lets
+                # `close_position` settle the book at the venue's own price
+                # instead of at the price this agent happened to be looking at.
+                venue_order_ids=[i for i in (pos.stop_order_id, pos.tp_order_id) if i],
             )
 
             if fill_price is None:
                 # Kept in the watch list on purpose — see
                 # failure_recovery_strategy. Dropping it would leave an open
                 # position with nothing watching it.
-                logger.error(
-                    "Close of %s failed (%s at %s). Position REMAINS TRACKED and will be "
-                    "retried on the next tick.",
-                    pos.symbol, reason, trigger_price,
-                )
+                #
+                # BUT A RETRY THAT NEVER SUCCEEDS MUST STOP BEING QUIET. This
+                # logged at ERROR on every tick and nothing escalated: the
+                # operator's session retried the same close every twelve
+                # seconds for FOUR DAYS (F1) while the dashboard showed a
+                # running session holding a position. Each retry was also a
+                # signed order to the venue.
+                #
+                # The position still stays tracked — forgetting it is the one
+                # thing that is worse — but after `_CLOSE_FAILURE_ALERT` in a
+                # row this is a CRITICAL that names the operator action, and
+                # the line is emitted ONCE per threshold crossing rather than
+                # on every tick, so it is findable instead of drowned.
+                pos.close_failures = int(pos.close_failures or 0) + 1
+                if pos.close_failures == _CLOSE_FAILURE_ALERT:
+                    logger.critical(
+                        "CLOSE OF %s HAS FAILED %d TIMES IN A ROW (%s at %s). The "
+                        "position is still tracked and still being retried, so nothing "
+                        "is unwatched — but it is not exiting. Check whether the venue "
+                        "already holds nothing (a resting stop may have closed it), "
+                        "whether the size is below the venue's reduce-only minimum, and "
+                        "whether the mirror credentials still work. A session will not "
+                        "open anything else while this position is believed open.",
+                        pos.symbol, pos.close_failures, reason, trigger_price,
+                    )
+                else:
+                    logger.error(
+                        "Close of %s failed (%s at %s), attempt %d. Position REMAINS "
+                        "TRACKED and will be retried on the next tick.",
+                        pos.symbol, reason, trigger_price, pos.close_failures,
+                    )
                 return
+
+            # A SUCCESS CLEARS THE COUNTER, so a later unrelated failure gets a
+            # fresh count rather than inheriting an old streak.
+            pos.close_failures = 0
 
             filled_qty = min(pos.qty, getattr(fill_price, "filled_qty", None) or pos.qty)
             if filled_qty < pos.qty - max(1e-10, pos.qty * 1e-10):

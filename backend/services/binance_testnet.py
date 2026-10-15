@@ -18,7 +18,7 @@ import os
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -213,6 +213,100 @@ async def open_position(symbol: str) -> Optional[Dict[str, Any]]:
                 "unrealizedPnl": float(row.get("unRealizedProfit") or 0.0),
             }
     return {}
+
+
+async def recent_exit_fill(
+    symbol: str,
+    *,
+    order_ids: Optional[List[str]] = None,
+    lookback_ms: int = 7 * 24 * 60 * 60 * 1000,
+) -> Optional[Dict[str, Any]]:
+    """The venue's OWN fill for a close it executed without us, or None.
+
+    THE GAP THIS FILLS. When a resting stop or take-profit does its job, the
+    exchange closes the position and nothing tells this process. The monitor
+    then tries to close a position the venue no longer holds, the reduce-only
+    order is refused, and `close_position` retries forever -- F1, which froze
+    the operator's session for four days and sent a signed order every tick.
+
+    Knowing the account is FLAT is enough to stop the loop. Knowing the PRICE
+    is what keeps the books honest: booking the close at the monitor's trigger
+    price would invent a fill that never happened, and the difference is real
+    money -- the live incident filled at 1.3985 for +0.089 while the monitor
+    was looking at a price far past the target.
+
+    `order_ids` are the `stop_order_id` / `tp_order_id` the monitor already
+    holds. They are matched when present; when they are not (an algo order's
+    fill is reported under its own id, and an operator may have closed by
+    hand) the most recent REDUCING fill is used instead, and the caller is
+    told which by `matched_order`.
+
+    Returns None when the history cannot be read. None is "could not ask",
+    never "nothing happened" -- the same rule `free_usdt` and `open_position`
+    follow, and the caller must not treat it as a flat account.
+    """
+    start = int(time.time() * 1000) - max(lookback_ms, 60_000)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        ok, body = await _signed(
+            client, "GET", "/fapi/v1/userTrades",
+            {"symbol": to_binance_symbol(symbol), "startTime": start, "limit": 100},
+        )
+    if not ok:
+        logger.warning("Binance testnet trade history unreadable for %s: %s", symbol, body)
+        return None
+    if not isinstance(body, list):
+        return None
+
+    wanted = {str(o) for o in (order_ids or []) if o}
+    rows: List[Dict[str, Any]] = [r for r in body if isinstance(r, dict)]
+
+    def _matching(rows_in: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not wanted:
+            return []
+        return [
+            r for r in rows_in
+            if str(r.get("orderId")) in wanted or str(r.get("clientOrderId") or "") in wanted
+        ]
+
+    chosen = _matching(rows)
+    matched = bool(chosen)
+    if not chosen:
+        # A REDUCING fill only. An opening fill in the window would otherwise be
+        # reported as the exit, which is the entry price wearing the exit's name.
+        chosen = [r for r in rows if str(r.get("realizedPnl") or "0") not in ("0", "0.0", "")]
+    if not chosen:
+        return None
+
+    # One close is several fills on a thin book -- the live incident was five.
+    # A quantity-weighted mean is the price that actually moved the money; the
+    # last fill alone is the tail of a sweep.
+    total_qty = 0.0
+    total_cost = 0.0
+    realized = 0.0
+    commission = 0.0
+    last_ms = 0
+    for r in chosen:
+        q = _f(r.get("qty")) or 0.0
+        px = _f(r.get("price")) or 0.0
+        if q <= 0 or px <= 0:
+            continue
+        total_qty += q
+        total_cost += q * px
+        realized += _f(r.get("realizedPnl")) or 0.0
+        commission += _f(r.get("commission")) or 0.0
+        last_ms = max(last_ms, int(r.get("time") or 0))
+    if total_qty <= 0:
+        return None
+
+    return {
+        "price": total_cost / total_qty,
+        "qty": total_qty,
+        "realizedPnl": realized,
+        "commission": commission,
+        "time_ms": last_ms,
+        "matched_order": matched,
+        "fills": len(chosen),
+    }
 
 
 async def _instrument_rules(client: httpx.AsyncClient, symbol: str) -> Dict[str, Any]:
@@ -620,6 +714,7 @@ class BinanceTestnetVenue:
     place_take_profit = staticmethod(place_take_profit)
     cancel_order = staticmethod(cancel_order)
     open_positions = staticmethod(open_position)
+    recent_exit_fill = staticmethod(recent_exit_fill)
 
 
 _demo_prices: Dict[str, tuple[float, float]] = {}

@@ -42,6 +42,7 @@ this system is built not to produce.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -576,6 +577,11 @@ def _decision_dict(decision: Any) -> Dict[str, Any]:
 # Trigger subscription
 # ---------------------------------------------------------------------------
 
+# F22: one detached analysis per symbol, with strong references to the tasks
+# so a run cannot be garbage-collected mid-flight.
+_running_analyses: set = set()
+_analysis_tasks: set = set()
+
 _subscribed = False
 
 
@@ -688,6 +694,60 @@ def subscribe_to_triggers(checkpointer: Any = None) -> None:
             observed_value=event.observed_value,
             threshold=event.threshold,
         )
+        # DETACHED FROM THE TICK THAT CAUSED IT, AND THAT IS A SAFETY FIX.
+        #
+        # `MessageBus.publish` queues a nested publish into the PUBLISHER's own
+        # await, so the whole causal chain drains before the publisher returns.
+        # `live_market_data`'s tick watcher is that publisher. While this
+        # handler awaited a full graph run, no further `TICK_RECEIVED` was
+        # published for the symbol -- so `position_monitor._check_price` never
+        # ran and, for the length of the run, **no stop could fire** (F22).
+        #
+        # Not a theoretical window: the stored 2026-10-15 02:28 trace took 39.2
+        # seconds, almost all of it in two LLM nodes that contribute nothing to
+        # the trade. Reproduced against the real bus -- ticks at 0, 0.25, 0.5
+        # and 0.75 s, then nothing until 5.01 s. A paper position has no
+        # resting stop at the venue, so the in-process monitor is the only
+        # thing enforcing it.
+        #
+        # Detaching also restores the streaming fix on this path: the plan is
+        # published from the runner the moment the gateway produces it (~4.8 s)
+        # rather than after the two explanation nodes finish.
+        #
+        # ONE RUN PER SYMBOL AT A TIME. Without this guard a burst of triggers
+        # starts a graph run per tick, multiplying LLM spend against a 40/min
+        # key budget and racing to the same decision. A trigger arriving while
+        # its symbol is already being analysed is DROPPED with a line, not
+        # queued: by the time the in-flight run ends, its own data is fresher
+        # than the queued trigger's.
+        key = str(event.symbol)
+        if key in _running_analyses:
+            logger.debug(
+                "Analysis already running for %s; this %s trigger is dropped rather "
+                "than queued (the in-flight run will see fresher data).",
+                key, event.kind,
+            )
+            return
+        _running_analyses.add(key)
+
+        async def _run() -> None:
+            try:
+                await _analyse(event, trigger)
+            except Exception:  # noqa: BLE001
+                # The bus swallows a subscriber exception and a detached task's
+                # would not even reach it. Logged with a traceback for the
+                # reason CLAUDE.md records three times over: the cost of this
+                # class of bug is finding the line, never reading the message.
+                logger.exception("Detached analysis run for %s failed", key)
+            finally:
+                _running_analyses.discard(key)
+
+        task = asyncio.create_task(_run())
+        _analysis_tasks.add(task)
+        task.add_done_callback(_analysis_tasks.discard)
+
+    async def _analyse(event, trigger) -> None:
+        """The body of one analysis, OFF the tick's causal chain. See `on_trigger`."""
         result = await run_analysis_graph(event.symbol, trigger, checkpointer=checkpointer)
         if not result.get("ok"):
             return
