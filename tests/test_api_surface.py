@@ -26,6 +26,27 @@ REQUIRED_PREFIXES = [
 ]
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _allow_writes_for_this_module():
+    """Writes FAIL CLOSED with no `TRADES_API_KEY` (F6), and this module tests
+    the SHAPE of write routes — their validation, their attribution rules —
+    rather than their auth, which `tests/test_api_auth.py` covers.
+
+    Opted in explicitly rather than by setting a key, so the tests still drive
+    the no-key path an operator would have locally and a 503 here would mean
+    the opt-out broke, not that auth is missing.
+    """
+    import os
+
+    previous = os.environ.get("ALLOW_UNAUTHENTICATED_WRITES")
+    os.environ["ALLOW_UNAUTHENTICATED_WRITES"] = "true"
+    yield
+    if previous is None:
+        os.environ.pop("ALLOW_UNAUTHENTICATED_WRITES", None)
+    else:
+        os.environ["ALLOW_UNAUTHENTICATED_WRITES"] = previous
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:

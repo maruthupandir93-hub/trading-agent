@@ -33,6 +33,7 @@ import {
   toEntry,
   type VolatilityHistoryEntry,
 } from '@/lib/volatilityHistoryStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 const COLLECT_TIMEOUT_MS = 5_000;
 
@@ -85,6 +86,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { readings?: Record<string, unknown>[]; readingId?: string; tradeId?: string };
   try {
     body = await req.json();

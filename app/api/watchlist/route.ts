@@ -1,5 +1,6 @@
 import { getWatchlist, saveWatchlist } from '@/lib/watchlistStore.server';
 import type { WatchItem } from '@/lib/types';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // The watchlist, server-backed. Same contract as /api/portfolio: `source: 'none'`
 // means there is no database and the client should keep its localStorage copy —
@@ -21,6 +22,11 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { watchlist?: WatchItem[] };
   try {
     body = await req.json();

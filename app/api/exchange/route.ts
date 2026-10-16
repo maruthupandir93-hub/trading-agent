@@ -1,4 +1,5 @@
 // Real Exchange Trading — the operator's own signed Binance/Bybit calls.
+import { writeAuthFailure } from '@/lib/apiAuth';
 //
 // THIS ROUTE NO LONGER SIGNS OR SENDS ANYTHING. It forwards to the backend,
 // which holds the exchange conversation. `backend/api/operator_exchange.py`.
@@ -70,6 +71,11 @@ const ACTION_PATHS: Record<ExchangeAction, string> = {
 };
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<RequestBody>;
   try {
     body = await req.json();

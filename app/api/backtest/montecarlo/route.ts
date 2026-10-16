@@ -1,5 +1,6 @@
 import { runMonteCarlo, type MonteCarloMode } from '@/lib/backtest/monteCarlo';
 import type { BacktestTrade } from '@/lib/backtest/engine';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,6 +12,11 @@ export const dynamic = 'force-dynamic';
 // simulation counts (thousands of resamples) don't block the UI thread.
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: {
     trades?: BacktestTrade[];
     initialCapitalUsd?: number;

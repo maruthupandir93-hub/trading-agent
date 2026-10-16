@@ -1,4 +1,5 @@
 import { getStoredRiskPreference, setStoredRiskPreference } from '@/lib/memoryStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Node runtime, not edge — this route uses the filesystem (see
 // lib/memoryStore.server.ts for the same ephemeral-on-Vercel caveat as
@@ -16,6 +17,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { riskPreference?: string | null };
   try {
     body = await req.json();

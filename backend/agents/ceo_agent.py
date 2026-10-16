@@ -49,6 +49,7 @@ is the operator's call.
 import os
 import datetime
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 from backend.core.agent_base import BaseAgent
@@ -368,7 +369,27 @@ def rearm_high_water_mark(equity: Optional[float] = None) -> Optional[float]:
     """
     agent = get_ceo_agent()
     if equity is not None:
-        agent._high_water_mark = float(equity)
+        # A NaN MARK TURNS THE KILL SWITCH OFF (F75).
+        #
+        # `POST /api/admin/observation/resume` with `{"equity": NaN}` returned
+        # 200 and set the mark to NaN. Every later comparison against NaN is
+        # False, so a 99% drawdown reported 0% and never halted — until the
+        # month rolled over. Infinity does the same from the other side.
+        #
+        # Refused rather than coerced: there is no honest number to substitute
+        # for "not a number", and silently using the last equity would tell the
+        # operator their value was accepted when it was not (invariant 6).
+        try:
+            candidate = float(equity)
+        except (TypeError, ValueError):
+            raise ValueError(f"equity must be a number, got {equity!r}")
+        if not math.isfinite(candidate) or candidate <= 0:
+            raise ValueError(
+                f"equity must be a finite positive number, got {equity!r}. A "
+                f"non-finite high-water mark disables the drawdown kill switch "
+                f"entirely: every comparison against it is false."
+            )
+        agent._high_water_mark = candidate
     elif agent._last_equity is not None:
         agent._high_water_mark = agent._last_equity
     else:

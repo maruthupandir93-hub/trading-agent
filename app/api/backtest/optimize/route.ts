@@ -4,6 +4,7 @@ import type { SizingMethod } from '@/lib/backtest/engine';
 import type { SearchAlgorithmName } from '@/lib/backtest/searchAlgorithms';
 import { fetchPrimaryAndMtf } from '@/lib/backtest/historyService.server';
 import { parseCandlesCsv } from '@/lib/candleProviders/csvImport';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,6 +15,11 @@ export const dynamic = 'force-dynamic';
 // trip per param combo.
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: {
     symbol?: string;
     type?: 'crypto' | 'equity';

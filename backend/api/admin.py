@@ -16,6 +16,7 @@ to the inverse case — the bot is very much awake and they want it to stop.
 """
 
 import logging
+import math
 import os
 from typing import Any, Dict
 
@@ -186,7 +187,12 @@ async def emergency_stop() -> Dict[str, Any]:
 class ResetPaperRequest(BaseModel):
     """Everything defaults to the safe thing; nothing is reset implicitly."""
 
-    startingCash: float = Field(10_000.0, gt=0)
+    # `gt=0` ADMITS INFINITY, because `inf > 0` is True (F80). An infinite
+    # starting cash or target makes every percentage, every progress bar and
+    # every floor comparison meaningless, and `1e400` parses to inf.
+    # `allow_inf_nan=False` is the Pydantic v2 switch that refuses both inf
+    # and NaN at the boundary, which is where a nonsense number costs least.
+    startingCash: float = Field(10_000.0, gt=0, allow_inf_nan=False)
     # Off by default. The trade log is the audit trail of what the agent did, and
     # wiping it is a separate decision from resetting the book.
     clearTradeLog: bool = False
@@ -589,8 +595,34 @@ async def resume_from_observation(body: Dict[str, Any] = {}) -> Dict[str, Any]:
     was = is_in_observation_mode()
     prior = observation_reason() or None
 
+    # VALIDATE BEFORE CLEARING THE HALT (F75).
+    #
+    # This cleared observation mode FIRST and then re-anchored, so a bad value
+    # left the system resumed with a mark it had refused — `"abc"` returned a
+    # 500 only after the halt was already gone. An input that cannot be used
+    # must change nothing.
+    requested = body.get("equity") if isinstance(body, dict) else None
+    if requested is not None:
+        try:
+            _candidate = float(requested)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"equity must be a number, got {requested!r}.",
+            )
+        if not math.isfinite(_candidate) or _candidate <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"equity must be a finite positive number, got {requested!r}. "
+                    f"A non-finite high-water mark disables the drawdown kill switch: "
+                    f"every comparison against it is false, so a 99% drawdown would "
+                    f"report 0% and never halt."
+                ),
+            )
+
     exit_observation_mode("operator acknowledgement via /api/admin/observation/resume")
-    new_mark = rearm_high_water_mark(body.get("equity") if isinstance(body, dict) else None)
+    new_mark = rearm_high_water_mark(requested)
 
     logger.warning(
         "OBSERVATION MODE CLEARED BY THE OPERATOR. Was halted: %s. Prior reason: %s. "

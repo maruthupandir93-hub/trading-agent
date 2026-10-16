@@ -1,4 +1,5 @@
 import { listHypotheses, getHypothesisByTradeId, saveHypothesis, updateHypothesisStatus, type HypothesisRecord, type HypothesisStatus } from '@/lib/hypothesisStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Node runtime, not edge — filesystem-backed, same as /api/reflections.
 export const runtime = 'nodejs';
@@ -18,6 +19,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<HypothesisRecord>;
   try {
     body = await req.json();
@@ -54,6 +60,11 @@ export async function POST(req: Request) {
 // components/HypothesisPanel.tsx after already changing the relevant
 // config themselves; this endpoint does not touch any config store.
 export async function PATCH(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { id?: string; status?: string; reviewNote?: string | null };
   try {
     body = await req.json();

@@ -1,6 +1,7 @@
 import os
 import asyncpg
 import logging
+from typing import Optional
 from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,10 +17,40 @@ async def _table_names(conn) -> set:
     return {r["table_name"] for r in rows}
 
 
+def _safe_dsn(dsn: Optional[str]) -> str:
+    """A DSN with its password replaced, for logging.
+
+    Keeps the host, port and database — which is what an operator reading a
+    startup line actually needs — and drops the credential, which is what must
+    never reach a log file.
+    """
+    if not dsn:
+        return "<unset>"
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(dsn)
+        if parts.password:
+            user = parts.username or ""
+            netloc = f"{user}:***@{parts.hostname or ''}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except Exception:  # noqa: BLE001 - a log line must never break startup
+        return "<unparseable DSN>"
+
+
+
 async def init_db() -> asyncpg.Pool:
     """Initialize the database connection pool and run schema migrations if necessary."""
     global _db_pool
-    logger.info(f"Connecting to database at {settings.DATABASE_URL}")
+    # REDACTED. This printed the full DSN — password included — to stdout and
+    # journald on every startup (F78), where it survives in log archives,
+    # screen shares and anything shipped to a log service. The error branch
+    # below already redacted it; this line did not, which is the worst of
+    # both: the secret leaks on the SUCCESS path, which runs every time.
+    logger.info("Connecting to database at %s", _safe_dsn(settings.DATABASE_URL))
     
     try:
         _db_pool = await asyncpg.create_pool(

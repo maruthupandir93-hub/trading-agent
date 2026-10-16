@@ -6,6 +6,7 @@ import {
   addDecision,
 } from '@/lib/decisionStore.server';
 import type { NewDecisionRecord } from '@/lib/decisionStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Complete Audit Trail (Production Readiness Review #9) — every
 // Supervisor decision, approved/rejected/pending, not just executed
@@ -50,6 +51,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<NewDecisionRecord>;
   try {
     body = await req.json();

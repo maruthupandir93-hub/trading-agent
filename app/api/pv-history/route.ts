@@ -1,5 +1,6 @@
 import { appendPvSample, listPvHistory, type PvSample } from '@/lib/pvHistoryStore.server';
 import type { TradeTab } from '@/lib/types';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Portfolio-value samples. `complete: false` marks a total computed while some
 // position had no price — a PARTIAL figure. It is returned as recorded rather than
@@ -31,6 +32,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<PvSample>;
   try {
     body = await req.json();

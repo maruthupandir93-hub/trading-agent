@@ -129,6 +129,37 @@ export function PortfolioProvider({ children }: { children: React.ReactNode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tab, symbol, side, qty, price, note, pnl, entryContext, debateId, originTag, exchangeOrderId }),
       });
+      // A REFUSED WRITE MUST NOT LOOK LIKE A SUCCESSFUL ONE (F35).
+      //
+      // `res.ok` was never checked, so a 401/503 fell through to `json.trade`
+      // being undefined and the function simply returned. The optimistic row
+      // stayed on screen until the next refresh, then vanished — and the
+      // closing P&L never reached `/api/stats`, so the win rate and expectancy
+      // were computed from a log missing trades the operator had watched
+      // happen.
+      //
+      // Marked on the row rather than thrown: the trade DID happen in the
+      // browser's book, and losing that fact is worse than showing it
+      // unsynced. The note is what tells the operator the server has not got
+      // it.
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error) detail = String(body.error);
+        } catch {
+          /* a non-JSON error body is still a refusal */
+        }
+        console.error('Trade log write refused:', detail);
+        setTradeLog((prev) =>
+          prev.map((t) =>
+            t.id === optimistic.id
+              ? { ...t, note: `${t.note ? `${t.note} — ` : ''}NOT SAVED TO SERVER: ${detail}` }
+              : t,
+          ),
+        );
+        return;
+      }
       const json = await res.json();
       if (json.trade) {
         setTradeLog((prev) => prev.map((t) => (t.id === optimistic.id ? json.trade : t)));

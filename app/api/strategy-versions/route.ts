@@ -1,5 +1,6 @@
 import { listStrategyVersions, addStrategyVersion } from '@/lib/strategyVersionStore.server';
 import type { NewStrategyVersion } from '@/lib/strategyVersionStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Strategy Versioning (Production Readiness Review #7) — append-only,
 // see lib/strategyVersionStore.server.ts's header for exactly what's
@@ -17,6 +18,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<NewStrategyVersion>;
   try {
     body = await req.json();

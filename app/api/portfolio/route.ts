@@ -1,5 +1,6 @@
 import { getBook, saveBook } from '@/lib/portfolioStore.server';
 import { DEFAULT_PORTFOLIO, type PortfolioState } from '@/lib/types';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // ---------------------------------------------------------------------
 // The portfolio, server-backed so it is not confined to one browser.
@@ -29,6 +30,11 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { portfolio?: PortfolioState };
   try {
     body = await req.json();
@@ -67,7 +73,12 @@ export async function PUT(req: Request) {
   return Response.json({ saved: true, source: 'postgres' });
 }
 
-export async function DELETE() {
+export async function DELETE(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   // Reset to the starting book. Same single starting-cash constant the rest of
   // the app uses, so a reset cannot reintroduce a second disagreeing figure.
   const ok = await saveBook(DEFAULT_PORTFOLIO);

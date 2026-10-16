@@ -65,11 +65,12 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.core.auth import require_write_auth
 from backend.core.db import get_db_pool
@@ -121,6 +122,56 @@ class PlaceOrderRequest(Credentials):
     # stop order at the exchange survives that, and this route does not place one.
     stopLoss: Optional[float] = None
     takeProfit: Optional[float] = None
+
+    # INVARIANT 3: A STOP THAT CANNOT FIRE IS NOT A STOP (F79).
+    #
+    # These were plain `Optional[float]`, so a NaN, a negative price or a stop
+    # on the WRONG SIDE of the entry was accepted and the response said the
+    # position was "enforced on every tick". A NaN stop never fires — every
+    # comparison against it is false — so the operator was told they had
+    # protection they did not have, which is worse than being told they had
+    # none.
+    #
+    # Refused at the boundary rather than silently dropped: the caller asked
+    # for a stop, and the honest answers are "placed" or "refused, here is
+    # why", never "accepted and ignored".
+    @field_validator("stopLoss", "takeProfit")
+    @classmethod
+    def _usable_price(cls, v, info):
+        if v is None:
+            return v
+        value = float(v)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                f"{info.field_name} must be a finite positive price, got {v!r}. "
+                f"A non-finite stop never fires: every comparison against it is false."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _stop_on_the_right_side(self):
+        """A long's stop must sit BELOW its entry, a short's above it.
+
+        A stop on the wrong side is either already triggered or unreachable,
+        and in both cases it is not protection. Checked against the limit price
+        when one is given; a market order has no entry price here, so the
+        monitor's own check is what catches it.
+        """
+        entry = getattr(self, "limitPrice", None) or getattr(self, "price", None)
+        if entry is None or self.stopLoss is None:
+            return self
+        entry = float(entry)
+        if self.side == "buy" and self.stopLoss >= entry:
+            raise ValueError(
+                f"a BUY's stop ({self.stopLoss}) must be BELOW its entry ({entry}); "
+                f"above it the stop is already triggered."
+            )
+        if self.side == "sell" and self.stopLoss <= entry:
+            raise ValueError(
+                f"a SELL's stop ({self.stopLoss}) must be ABOVE its entry ({entry}); "
+                f"below it the stop is already triggered."
+            )
+        return self
     # THE IDEMPOTENCY KEY. Sent as Binance's `newClientOrderId` / Bybit's
     # `orderLinkId`, both of which the venue REJECTS duplicates of. It must be
     # deterministic for one logical trade intent — built by

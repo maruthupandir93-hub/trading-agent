@@ -69,9 +69,17 @@ export function EmergencyStopModal({
     try {
       const res = await fetch(backendProxyPath(BACKEND_PATHS.emergencyStop), {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_TRADES_API_KEY || ''}`
-        }
+        // NO Authorization HEADER. Setting one stops the browser attaching its
+        // cached dashboard (Basic) credentials, and the proxy accepts only
+        // Basic when DASHBOARD_PASSWORD is set — so this button returned 401
+        // on every configuration (F20). The stop modal showed "NOT stopped";
+        // Pause swallowed the error and looked like nothing happened.
+        //
+        // DO NOT "FIX" IT BY SETTING NEXT_PUBLIC_TRADES_API_KEY. That compiles
+        // the backend's write key into the public JavaScript bundle, where
+        // anyone who loads the page can read it. `credentials: 'same-origin'`
+        // is what sends the credentials the browser already holds.
+        credentials: 'same-origin',
       });
       if (!res.ok) {
         // Stay open. A failed stop must not look like a successful one.

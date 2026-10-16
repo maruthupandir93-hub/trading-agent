@@ -1,23 +1,24 @@
 import { listTrades, addTrade } from '@/lib/tradeStore.server';
 import type { NewTrade } from '@/lib/tradeStore.server';
 import type { TradeTab, TradeSide } from '@/lib/types';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Node runtime, not edge — this route uses the filesystem (see
 // lib/tradeStore.server.ts for the persistence caveat).
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Optional shared-secret auth: if TRADES_API_KEY is set in the
-// environment, writes (POST/DELETE) require it. Reads (GET) stay open
-// so the in-app UI doesn't need to carry a secret around in the
-// browser. Unset by default, so local use needs zero setup — but if
-// you expose this server beyond your own machine, set this.
-function isAuthorized(req: Request): boolean {
-  const required = process.env.TRADES_API_KEY;
-  if (!required) return true;
-  const header = req.headers.get('authorization') || '';
-  return header === `Bearer ${required}`;
-}
+// AUTH LIVES IN `lib/apiAuth` NOW, AND THE BESPOKE CHECK HERE WAS HALF OF F35.
+//
+// It accepted ONLY `Bearer <TRADES_API_KEY>` — a value the browser never has.
+// So the moment that key was set (the F6 fix), every browser paper fill,
+// including Supervisor-approved AI trades, would have been silently refused:
+// `components/Portfolio.tsx` did not check `res.ok`, so the optimistic row
+// vanished on refresh and closing P&L never reached `/api/stats`. With the key
+// unset, anyone could POST fabricated closes.
+//
+// `writeAuthFailure` accepts EITHER the dashboard password the browser already
+// sends or that Bearer key, so both callers work and neither is open.
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -28,9 +29,10 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  if (!isAuthorized(req)) {
-    return Response.json({ error: 'Unauthorized — missing or wrong Authorization header' }, { status: 401 });
-  }
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
 
   let body: {
     tab?: string;

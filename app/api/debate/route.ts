@@ -1,5 +1,6 @@
 import { listDebateRecords, saveDebateRecord, linkDebateToTrade, updateDebateOutcomeByTradeId } from '@/lib/debateStore.server';
 import type { DebateRecord } from '@/lib/debate/types';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,6 +13,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<DebateRecord>;
   try {
     body = await req.json();
@@ -46,6 +52,11 @@ export async function POST(req: Request) {
 // fact, since retroactively changing what was "predicted" would corrupt
 // the calibration/reputation data that depends on it being untouched.
 export async function PATCH(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: { debateId?: string; tradeId?: string; outcome?: 'win' | 'loss'; outcomePnlUsd?: number };
   try {
     body = await req.json();

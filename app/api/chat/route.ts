@@ -28,6 +28,7 @@ import {
   withV1Inserted,
 } from '@/lib/chatUpstream';
 import { backendOrigin } from '@/lib/api/backendProxy.server';
+import { checkLlmBaseUrl } from '@/lib/ssrfGuard';
 
 // NODE RUNTIME. THIS USED TO BE `edge` AND THAT IS WHAT BROKE "Ask Agent".
 //
@@ -97,6 +98,24 @@ export async function POST(req: Request) {
   // that logic and has tests against the exact 404 signature — duplicating it in
   // Python would create a second, drifting copy of a fiddly heuristic.
   const resolvedBaseUrl = baseUrl || 'https://integrate.api.nvidia.com/v1';
+
+  // F36: THE CALLER CHOOSES `baseUrl`, AND THE BACKEND POSTS TO IT FROM THE VM.
+  //
+  // This route forwards the caller's base URL to `/api/ai/chat`, which then
+  // makes a POST to that address from inside our own network and streams the
+  // reply back. That is a POST relay into the network where the database, the
+  // admin API and the cloud metadata service live — strictly worse than the
+  // GET probe in `/api/mcp-status`, because it carries a body.
+  //
+  // Refused BEFORE the hop, so the backend never sees an address it would
+  // dial. The allow-list is optional (`LLM_BASE_URL_ALLOWLIST`) so an operator
+  // running their own gateway is not locked out; the private-address refusal
+  // applies either way.
+  const destination = checkLlmBaseUrl(resolvedBaseUrl);
+  if (!destination.ok) {
+    return Response.json({ error: destination.reason }, { status: 400 });
+  }
+
   const upstreamUrl = buildChatCompletionsUrl(resolvedBaseUrl);
 
   const backendUrl = `${backendOrigin()}/api/ai/chat`;

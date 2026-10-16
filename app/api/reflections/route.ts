@@ -1,5 +1,6 @@
 import { listReflections, getReflection, saveReflection } from '@/lib/reflectionStore.server';
 import type { ReflectionRecord } from '@/lib/reflectionStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Node runtime, not edge — filesystem-backed, same as /api/trades and
 // /api/memory.
@@ -18,6 +19,11 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<ReflectionRecord>;
   try {
     body = await req.json();

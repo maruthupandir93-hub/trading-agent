@@ -1,5 +1,6 @@
 import { getMissions, saveMission, deleteMission } from '@/lib/missionStore.server';
 import type { Mission } from '@/lib/missionPlanner';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,6 +11,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Mission;
   try {
     body = await req.json();
@@ -26,6 +32,11 @@ export async function POST(req: Request) {
 }
 
 export async function PATCH(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<Mission> & { id: string };
   try {
     body = await req.json();
@@ -49,6 +60,11 @@ export async function PATCH(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
   if (!id) {

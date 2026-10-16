@@ -100,16 +100,65 @@ def test_error_message_does_not_reveal_which_half_was_wrong(client, with_auth):
 
 
 # ---------------------------------------------------------------------------
-# The default: open, matching the Next.js side exactly
+# The default: writes FAIL CLOSED
 # ---------------------------------------------------------------------------
 
-def test_unset_key_leaves_routes_open(client, without_auth):
-    """Local development needs zero setup, and a different default here would
-    mean enabling auth on one server silently left the other open."""
+def test_unset_key_REFUSES_writes(client, without_auth, monkeypatch):
+    """THIS TEST ASSERTED THE OPPOSITE, AND THE BEHAVIOUR IT PINNED WAS F6.
+
+    The old reasoning was that "local development needs zero setup". The
+    measured consequence was a live backend reporting
+
+        "writeAuthEnabled": false,
+        "note": "TRADES_API_KEY is not set, so ALL endpoints are open."
+
+    on a VM whose port 8000 is reachable from the internet. Anyone who found it
+    could turn on live trading, switch venue, start or stop sessions, reset the
+    paper book, or place real orders through `/api/operator/exchange/order`.
+
+    An auth dependency that passes when it is not configured fails OPEN, which
+    is the wrong direction for a system that moves money. Reads stay open — see
+    the section below — because reading cannot spend anything.
+    """
+    monkeypatch.delenv("ALLOW_UNAUTHENTICATED_WRITES", raising=False)
     assert auth.auth_required() is False
+    r = client.post("/api/admin/pause")
+    assert r.status_code == 503
+    assert "TRADES_API_KEY" in r.json()["detail"]
+
+
+def test_an_operator_can_still_opt_into_open_writes(client, without_auth, monkeypatch):
+    """`ALLOW_UNAUTHENTICATED_WRITES=true` is the escape hatch for a genuinely
+    local, non-routable deployment. Deliberately verbose and deliberately not
+    the default: an operator who wants an open write surface on a trading
+    backend should have to say so."""
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_WRITES", "true")
     r = client.post("/api/admin/pause")
     assert r.status_code == 200
     client.post("/api/admin/resume")
+
+
+def test_a_non_ascii_token_is_unauthorized_not_a_server_error(with_auth):
+    """`hmac.compare_digest` raises TypeError on a non-ASCII str, which FastAPI
+    turns into a 500 rather than a 401 (F87).
+
+    DRIVEN AT THE DEPENDENCY, NOT OVER HTTP, and the reason is worth recording:
+    the HTTP layer refuses to send a non-ASCII header at all
+    (`UnicodeEncodeError` in the client), so this is not reachable from a
+    browser or curl. It IS reachable from any in-process caller, and a guard
+    that raises on malformed input is the wrong shape for an auth check
+    whatever the route to it.
+    """
+    import asyncio
+
+    from fastapi import HTTPException
+
+    try:
+        asyncio.run(auth.require_write_auth("Bearer ééé"))
+    except HTTPException as exc:
+        assert exc.status_code == 401
+    else:
+        raise AssertionError("a wrong token must be refused")
 
 
 def test_env_var_matches_the_next_js_convention():

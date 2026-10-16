@@ -75,15 +75,61 @@ def _matches(provided: str, required: str) -> bool:
     return hmac.compare_digest(provided, required)
 
 
+def open_writes_allowed() -> bool:
+    """May write routes run with NO key configured?
+
+    DEFAULT NO, AND THAT IS THE F6 FIX. `require_write_auth` used to be a
+    complete no-op when `TRADES_API_KEY` was unset, and the live backend
+    reported exactly that:
+
+        "writeAuthEnabled": false,
+        "note": "TRADES_API_KEY is not set, so ALL endpoints are open."
+
+    The VM's port 8000 is reachable from the internet, so anyone who found it
+    could turn on live trading, switch venue, start or stop sessions, reset the
+    paper book, or place real orders through `/api/operator/exchange/order`.
+
+    An auth dependency that passes when it is not configured fails OPEN, which
+    is the wrong direction for a system that moves money. It fails CLOSED now:
+    with no key, writes are refused and the refusal says what to set.
+
+    `ALLOW_UNAUTHENTICATED_WRITES=true` restores the old behaviour for a
+    genuinely local, non-routable deployment. It is deliberately verbose and
+    deliberately not the default: an operator who wants an open write surface
+    on a trading backend should have to say so.
+    """
+    raw = (os.getenv("ALLOW_UNAUTHENTICATED_WRITES") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 async def require_write_auth(authorization: Optional[str] = Header(default=None)) -> None:
     """FastAPI dependency guarding a state-changing route.
 
-    Raises 401 when a secret is configured and the header is missing or wrong.
-    No-op when unconfigured.
+    Raises 401 when the header is missing or wrong, and 503 when no key is
+    configured at all — see `open_writes_allowed` for why the unconfigured case
+    is a refusal rather than a pass.
     """
     required = os.getenv(ENV_VAR)
     if not required:
-        return
+        if open_writes_allowed():
+            return
+        logger.error(
+            "Refused a write: %s is not set. This backend changes real state — "
+            "live trading, venue, sessions, the paper book and real orders — so "
+            "writes fail CLOSED rather than open. Set %s, or set "
+            "ALLOW_UNAUTHENTICATED_WRITES=true if this process is genuinely "
+            "unreachable from anywhere but localhost.",
+            ENV_VAR, ENV_VAR,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"This endpoint changes state and {ENV_VAR} is not configured, so "
+                f"writes are refused. Set {ENV_VAR} on the backend (and in the "
+                f"dashboard's environment), or set ALLOW_UNAUTHENTICATED_WRITES=true "
+                f"if this process is only reachable from localhost."
+            ),
+        )
 
     if not authorization:
         raise HTTPException(
@@ -97,7 +143,15 @@ async def require_write_auth(authorization: Optional[str] = Header(default=None)
         )
 
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token or not _matches(token, required):
+    # `hmac.compare_digest` raises TypeError on a non-ASCII str, which FastAPI
+    # turns into a 500 — so a malformed token answered "server error" instead
+    # of "unauthorized", and told a prober that something unusual happened
+    # (F87). Treated as a failed comparison, which is what it is.
+    try:
+        ok = bool(token) and _matches(token, required)
+    except (TypeError, ValueError):
+        ok = False
+    if scheme.lower() != "bearer" or not ok:
         # The reason is deliberately not narrowed to "wrong key" vs "wrong
         # scheme" — distinguishing them tells an attacker which half to fix.
         logger.warning("Rejected an unauthorized write request.")

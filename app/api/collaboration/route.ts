@@ -1,4 +1,5 @@
 import { listCollaborationRecords, appendCollaborationRecord, type CollaborationRecord } from '@/lib/collaborationStore.server';
+import { writeAuthFailure } from '@/lib/apiAuth';
 
 // Node runtime, not edge — filesystem-backed, same as /api/reflections
 // and /api/hypotheses.
@@ -11,6 +12,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // F34: this route CHANGES STORED STATE, and `middleware.ts` excludes `/api`.
+  // Without this the public deployment accepted the write from anyone.
+  const unauthorized = writeAuthFailure(req);
+  if (unauthorized) return unauthorized;
+
   let body: Partial<CollaborationRecord>;
   try {
     body = await req.json();

@@ -52,11 +52,16 @@ class StartSessionRequest(BaseModel):
     # price target would be a different and much weaker instruction: it says
     # nothing about how much was staked, so the same price move could double the
     # account or barely move it.
-    targetEquity: float = Field(..., gt=0)
+    # `gt=0` ADMITS INFINITY, because `inf > 0` is True (F80). An infinite
+    # starting cash or target makes every percentage, every progress bar and
+    # every floor comparison meaningless, and `1e400` parses to inf.
+    # `allow_inf_nan=False` is the Pydantic v2 switch that refuses both inf
+    # and NaN at the boundary, which is where a nonsense number costs least.
+    targetEquity: float = Field(..., gt=0, allow_inf_nan=False)
     # PAPER ONLY. Sets the paper book's cash so the run genuinely happens at that
     # size — see `trading_session.set_paper_starting_amount`. Rejected for a real
     # session, where the starting amount is the exchange's own balance.
-    startAmount: Optional[float] = Field(None, gt=0)
+    startAmount: Optional[float] = Field(None, gt=0, allow_inf_nan=False)
     # Optional. Defaults to half the starting equity — see DEFAULT_FLOOR_FRACTION.
     floorEquity: Optional[float] = Field(None, ge=0)
     # How much of the account this session may trade with: 0.25 / 0.5 / 0.75 / 1.0

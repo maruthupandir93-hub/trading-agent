@@ -13,12 +13,42 @@ export function middleware(req: NextRequest) {
   const basicAuth = req.headers.get('authorization');
 
   if (basicAuth) {
-    const authValue = basicAuth.split(' ')[1];
-    const [user, pwd] = atob(authValue).split(':');
-
-    // We allow any username as long as the password matches.
-    if (pwd === requiredPassword) {
-      return NextResponse.next();
+    // THREE SMALL FAULTS, ALL IN THESE FOUR LINES.
+    //
+    // 1. `atob` THROWS on a malformed value, and an uncaught throw in
+    //    middleware is an HTTP 500 — so a junk header answered "server error"
+    //    instead of "unauthorized".
+    // 2. `.split(':')` DESTRUCTURED ONLY THE FIRST SEGMENT, so a password
+    //    containing a colon was silently truncated and the comparison was
+    //    against a prefix. The operator's password worked for a shorter
+    //    string than they set.
+    // 3. `===` on a secret returns early at the first differing byte.
+    const value = basicAuth.split(' ')[1];
+    let decoded: string | null = null;
+    if (basicAuth.toLowerCase().startsWith('basic ') && value) {
+      try {
+        decoded = atob(value);
+      } catch {
+        decoded = null;
+      }
+    }
+    if (decoded !== null) {
+      // Only the FIRST colon separates user from password; the rest belong to
+      // the password.
+      const sep = decoded.indexOf(':');
+      const pwd = sep === -1 ? '' : decoded.slice(sep + 1);
+      // Not constant time in the cryptographic sense — the Edge runtime has no
+      // `timingSafeEqual` — but it does not return early on the first
+      // mismatching byte, which is the practical leak.
+      if (pwd.length === requiredPassword.length) {
+        let diff = 0;
+        for (let i = 0; i < pwd.length; i += 1) {
+          diff |= pwd.charCodeAt(i) ^ requiredPassword.charCodeAt(i);
+        }
+        if (diff === 0) {
+          return NextResponse.next();
+        }
+      }
     }
   }
 
