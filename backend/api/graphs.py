@@ -536,7 +536,12 @@ async def excursion_study(limit: int = Query(2000, ge=1, le=20000)) -> Dict[str,
     understate every average here.
     """
     from backend.core.db import get_db_pool
-    from backend.agents.position_monitor import TRAILING_STOP_R
+    # A CALL, not a constant (F70): the exit rules are read at call time now,
+    # so a Settings change applies on the next tick instead of on the next
+    # restart. Bound once here so the whole report describes one value.
+    from backend.agents.position_monitor import TRAILING_STOP_R as _trailing_stop_r
+
+    trail_r = _trailing_stop_r()
 
     pool = get_db_pool()
     if pool is None:
@@ -572,7 +577,7 @@ async def excursion_study(limit: int = Query(2000, ge=1, le=20000)) -> Dict[str,
     # How often the peak ran far enough that a trail would have kept more than a
     # break-even exit. A trail only beats break-even when MFE exceeds the trail
     # distance — below that its stop sits at or under the entry.
-    beat = [m for m in mfes if m > TRAILING_STOP_R]
+    beat = [m for m in mfes if m > trail_r]
 
     def _avg(xs):
         return round(sum(xs) / len(xs), 4) if xs else None
@@ -580,7 +585,7 @@ async def excursion_study(limit: int = Query(2000, ge=1, le=20000)) -> Dict[str,
     return {
         "available": True,
         "sampleSize": len(rows),
-        "trailDistanceR": TRAILING_STOP_R,
+        "trailDistanceR": trail_r,
         "mfe": {
             "mean": _avg(mfes),
             "max": round(max(mfes), 4),
@@ -599,6 +604,6 @@ async def excursion_study(limit: int = Query(2000, ge=1, le=20000)) -> Dict[str,
         "trailWouldHaveBeatenBreakEven": {
             "count": len(beat),
             "fraction": round(len(beat) / len(rows), 4),
-            "meanCaptureR": _avg([m - TRAILING_STOP_R for m in beat]),
+            "meanCaptureR": _avg([m - trail_r for m in beat]),
         },
     }

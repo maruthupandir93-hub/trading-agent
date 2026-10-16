@@ -32,6 +32,23 @@ from backend.agents.position_monitor import (
 from backend.services.venue import OrderResult
 
 
+@pytest.fixture(autouse=True)
+def _pin_exit_rules(monkeypatch):
+    """PIN THE SETTINGS THIS FILE IS ABOUT, rather than inheriting defaults.
+
+    The exit rules are read at call time (F70), so a test that leaves them
+    unset is really testing whatever the default happens to be — and when
+    `TRAILING_STOP_R`'s default moved to 0 (F62, the live trail measured
+    -0.027R against a fixed 2:1) eight tests in this area failed, having
+    silently depended on it being 1.0.
+
+    Set through the ENVIRONMENT because that is the path production reads and
+    the path `POST /api/admin/exit-rules` writes.
+    """
+    monkeypatch.setenv("RESTING_STOP_MODE", "always")
+    monkeypatch.setenv("TRAILING_STOP_R", "0")
+
+
 class _FakeVenue:
     """Records what it was asked to do. No network, no account."""
 
@@ -258,7 +275,7 @@ async def test_a_real_position_gets_a_resting_take_profit_on_the_exit_side(monke
 
     # The ATR target is the only target when the percentage exit is off, which is
     # the arrangement this test was written for.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(0.0))
     await monitor._place_resting_tp(pos)
 
     assert len(venue.tps_placed) == 1
@@ -288,8 +305,8 @@ async def test_the_resting_tp_sits_where_this_monitor_WOULD_ACTUALLY_EXIT(monkey
     monitor = get_position_monitor()
     pos = tracked(monitor, side="buy")           # entry 70,000, ATR target 75,000
     pos.leverage = 2
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
 
     await monitor._place_resting_tp(pos)
 
@@ -311,8 +328,8 @@ async def test_the_resting_tp_never_sits_BEYOND_the_atr_target(monkeypatch, venu
     pos = tracked(monitor, side="buy")
     pos.leverage = 1
     pos.take_profit = 70_350.0                   # a 0.5% ATR target, tighter than 2%
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
 
     await monitor._place_resting_tp(pos)
     assert venue.tps_placed[0]["tp"] == pytest.approx(70_350.0)
@@ -325,8 +342,8 @@ async def test_a_short_resting_tp_takes_the_HIGHER_of_the_two(monkeypatch, venue
     pos = tracked(monitor, side="sell", stop=72_000.0)
     pos.take_profit = 65_000.0                   # ATR target, 7.1% away
     pos.leverage = 5
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
 
     await monitor._place_resting_tp(pos)
 

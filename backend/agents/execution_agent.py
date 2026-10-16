@@ -746,6 +746,10 @@ class ExecutionAgent(BaseAgent):
         # that does not have them still gets the flat-account handling,
         # just with a recency match instead of an exact one.
         venue_order_ids: Optional[List[str]] = None,
+        # The watched position's own id, so a close key cannot be inherited
+        # by a LATER position of the same size (F26). Optional: a caller
+        # without one keeps the old, position-agnostic key.
+        position_id: Optional[str] = None,
     ) -> Optional[float]:
         """Close an open position. Returns the fill price, or None on failure.
 
@@ -801,8 +805,28 @@ class ExecutionAgent(BaseAgent):
         price (invariant 6).
         """
         exit_side = "sell" if entry_side == "buy" else "buy"
+        # THE IDEMPOTENCY KEY MUST NOT OUTLIVE THE POSITION IT BELONGS TO (F26).
+        #
+        # The key is `(tab, symbol, side, qty, reason)` and the entry was popped
+        # only on SUCCESS. So a take-profit close that failed left its id behind,
+        # and when the position then exited by stop-loss instead, the
+        # take-profit key stayed in the map forever. A LATER position with the
+        # same quantity — likely on a minimum-size account, where every position
+        # is the same size — then reused that id:
+        #
+        #   * Bybit rejects it as a duplicate `orderLinkId`.
+        #   * On the Binance demo mirror an "unknown" error looks the id up and
+        #     can return THE PREVIOUS POSITION'S FILL as this one's.
+        #
+        # Scoping the key to the position's own identity fixes it at the root:
+        # two different positions can no longer collide however they exit, and
+        # a genuine retry of THE SAME close still gets the same id, which is
+        # what the key is for.
         requests = self.__dict__.setdefault("_close_request_ids", {})
-        request_key = (tab, symbol, entry_side, float(qty), reason)
+        request_key = (
+            str(position_id) if position_id else None,
+            tab, symbol, entry_side, float(qty), reason,
+        )
         close_id = requests.setdefault(request_key, f"close_{uuid.uuid4().hex[:28]}")
         # BY THE POSITION'S BOOK, not the global flag. A paper position closed
         # through the live branch sends a reduce-only order to MAINNET, which

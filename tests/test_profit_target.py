@@ -121,8 +121,8 @@ def test_it_defaults_to_OFF_and_the_scale_out_is_off_with_it(monkeypatch):
     """
     import backend.agents.position_monitor as pm
 
-    assert pm.PROFIT_TARGET_PCT == 0.0
-    assert pm.PARTIAL_TP_FRACTION == 0.0, (
+    assert pm.PROFIT_TARGET_PCT() == 0.0
+    assert pm.PARTIAL_TP_FRACTION() == 0.0, (
         "the scale-out must be off too, or turning the target off reintroduces "
         "the break-even runner"
     )
@@ -153,8 +153,8 @@ def test_the_whole_position_closes_at_the_target(monkeypatch, monitor):
     # move, so the tick sequence below would fire earlier and this would be
     # measuring the wrong thing. The account maths has its own tests at the
     # bottom of this file.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "price")
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "price")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
     ex = FakeExecution(fill=102.0)
     monitor.attach_execution(ex)
 
@@ -172,8 +172,8 @@ def test_a_short_reaches_the_target_on_a_FALL(monkeypatch, monitor):
     """This agent shorts perpetuals. A long-only target would leave every short
     running to its ATR target while longs banked at 2%."""
     # PRICE basis: this is about DIRECTION, not the leverage arithmetic.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "price")
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "price")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
     ex = FakeExecution(fill=98.0)
     monitor.attach_execution(ex)
 
@@ -192,8 +192,8 @@ def test_an_adverse_move_never_triggers_it(monkeypatch, monitor):
     # move, so the tick sequence below would fire earlier and this would be
     # measuring the wrong thing. The account maths has its own tests at the
     # bottom of this file.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_BASIS", "price")
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "price")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
     ex = FakeExecution(fill=98.0)
     monitor.attach_execution(ex)
 
@@ -213,8 +213,8 @@ def test_the_scale_out_is_bypassed_while_the_target_is_on(monkeypatch, monitor):
     Entry 100, stop 97.5 -> 1R = 2.5, so +1R is 102.5. A 2% target fires at 102.0
     FIRST, closing everything, so no runner is ever left at break-even.
     """
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.5)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", str(0.5))
     ex = FakeExecution(fill=102.0)
     monitor.attach_execution(ex)
 
@@ -229,9 +229,9 @@ def test_the_scale_out_is_bypassed_while_the_target_is_on(monkeypatch, monitor):
 def test_with_the_target_off_the_scale_out_still_runs(monkeypatch, monitor):
     """Turning the target off must restore the old behaviour completely, not
     leave the partial disabled as a side effect."""
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.5)
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_R", 1.0)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(0.0))
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", str(0.5))
+    monkeypatch.setenv("PARTIAL_TP_R", str(1.0))
     ex = FakeExecution(fill=102.5)
     monitor.attach_execution(ex)
 
@@ -244,7 +244,7 @@ def test_with_the_target_off_the_scale_out_still_runs(monkeypatch, monitor):
 def test_the_stop_still_wins_a_tick_that_spans_both(monkeypatch, monitor):
     """Invariant: a candle through the stop AND the target is assumed to have hit
     the stop first. Assuming the favourable one would overstate performance."""
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
     ex = FakeExecution(fill=97.5)
     monitor.attach_execution(ex)
 
@@ -284,8 +284,8 @@ def _pos(leverage, symbol="SOL/USDT"):
 def test_an_account_target_needs_less_price_move_at_higher_leverage(lev, expected_move, monkeypatch):
     import backend.agents.position_monitor as pm
 
-    monkeypatch.setattr(pm, "PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr(pm, "PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
     got = pm.PositionMonitorAgent._target_move_pct(_pos(lev))
     assert got == pytest.approx(expected_move)
     # and the account effect is the SAME at every leverage — the point of it
@@ -296,8 +296,8 @@ def test_a_price_basis_ignores_leverage(monkeypatch):
     """The old behaviour, still available for an operator who wants it."""
     import backend.agents.position_monitor as pm
 
-    monkeypatch.setattr(pm, "PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr(pm, "PROFIT_TARGET_BASIS", "price")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "price")
     for lev in (1, 5, 10):
         assert pm.PositionMonitorAgent._target_move_pct(_pos(lev)) == pytest.approx(2.0)
 
@@ -307,7 +307,7 @@ def test_account_is_the_default_basis():
     as the session's leverage changes."""
     import backend.agents.position_monitor as pm
 
-    assert pm.PROFIT_TARGET_BASIS == "account"
+    assert pm.PROFIT_TARGET_BASIS() == "account"
 
 
 def test_unknown_leverage_falls_back_to_the_most_demanding_reading(monkeypatch):
@@ -316,8 +316,8 @@ def test_unknown_leverage_falls_back_to_the_most_demanding_reading(monkeypatch):
     invents profit."""
     import backend.agents.position_monitor as pm
 
-    monkeypatch.setattr(pm, "PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr(pm, "PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
     for bad in (None, 0, "", "abc"):
         assert pm.PositionMonitorAgent._target_move_pct(_pos(bad)) == pytest.approx(2.0)
 
@@ -328,8 +328,8 @@ def test_a_target_below_the_round_trip_cost_is_refused(monkeypatch):
     pays the venue to close, recorded as a win."""
     import backend.agents.position_monitor as pm
 
-    monkeypatch.setattr(pm, "PROFIT_TARGET_PCT", 2.0)
-    monkeypatch.setattr(pm, "PROFIT_TARGET_BASIS", "account")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
+    monkeypatch.setenv("PROFIT_TARGET_BASIS", "account")
     # 2% / 20x = 0.1% move, under the 0.15% floor
     assert pm.PositionMonitorAgent._target_move_pct(_pos(20)) is None
     # the stop, trail and ATR target still govern — the position is not unmanaged
@@ -339,6 +339,6 @@ def test_a_target_below_the_round_trip_cost_is_refused(monkeypatch):
 def test_the_leverage_is_carried_from_the_approval(monkeypatch, monitor):
     """Without it the monitor can only measure price, and an operator asking for
     2% at 10x silently gets 20%."""
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 2.0)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(2.0))
     pos = _open(monitor, entry=100.0, stop=97.5)
     assert pos.leverage == 3, "approved_leverage must reach the tracked position"

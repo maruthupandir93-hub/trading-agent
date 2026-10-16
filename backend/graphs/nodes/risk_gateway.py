@@ -66,6 +66,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.core.risk_manager import (
     ATR_STOP_MULTIPLIER,
+    ATR_TARGET_MULTIPLIER,
     MARGIN_BUFFER_MULTIPLIER,
     calculate_position_size,
     kelly_risk_fraction,
@@ -248,6 +249,33 @@ def build_entry_context(
     return " ".join(bits).rstrip(",")
 
 
+def max_fee_fraction_of_r() -> float:
+    """The most of 1R this system will spend on the round trip (F61).
+
+    DEFAULT 0.12R, which is a stop of about 0.83% at a 0.05% taker. Below that
+    the break-even win rate climbs past 37.4% and keeps going — 43.8% at a
+    0.32% stop — while the measured rate is 34-36%.
+
+    Read at CALL time so an operator can tune it without a restart (the
+    `simulation_mode` rule), and 0 disables the gate entirely for anyone who
+    wants the old behaviour back. It is deliberately NOT in the UI: loosening
+    it re-admits trades that cannot pay for themselves, which is a decision
+    that should be made on purpose and in a file.
+    """
+    raw = os.getenv("MAX_FEE_FRACTION_OF_R")
+    if raw is None or not str(raw).strip():
+        return 0.12
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("MAX_FEE_FRACTION_OF_R=%r is not a number; using 0.12.", raw)
+        return 0.12
+    if value < 0:
+        logger.warning("MAX_FEE_FRACTION_OF_R=%r is negative; using 0.12.", raw)
+        return 0.12
+    return value
+
+
 def _session_symbols(session) -> list:
     """Every instrument the session may trade, normalised.
 
@@ -341,6 +369,60 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                 },
             )
         }
+
+    # ---- THE FEE MUST NOT EAT THE EDGE (F61) ------------------------------
+    #
+    # NOTHING WEIGHED THE ROUND-TRIP FEE AGAINST THE STOP DISTANCE, and on a
+    # 2:1 payoff that decides whether a trade can win at all.
+    #
+    # The fee is paid in PRICE and the outcome is measured in R, so the cost of
+    # a trade in R is `2 x taker / stop%` — it rises as the stop tightens. At
+    # this venue's 0.05% taker:
+    #
+    #     stop 0.32%  ->  0.31R of fees  ->  break-even win rate 43.8%
+    #     stop 0.48%  ->  0.21R          ->  40.3%
+    #     stop 0.82%  ->  0.12R          ->  37.4%
+    #     stop 2.50%  ->  0.04R          ->  34.7%
+    #
+    # Measured win rate on this system is 34-36%. So SEVEN OF THE LAST TEN
+    # CRO-approved plans needed a win rate it has never demonstrated just to
+    # break even — not because the signal was wrong, but because the stop was
+    # too tight to pay for the trade.
+    #
+    # Placed among the ENTRY checks, after the exit branch, and before sizing:
+    # like the tradeable-instrument gate above, this is a property of the
+    # proposed trade's GEOMETRY and must not be reachable by making it smaller.
+    # Invariant 4 is untouched — a close never reaches here.
+    if thesis is not None and thesis.entry_price and thesis.stop_loss:
+        stop_fraction = abs(thesis.entry_price - thesis.stop_loss) / thesis.entry_price
+        fee_r = (2.0 * taker_rate() / stop_fraction) if stop_fraction > 0 else float("inf")
+        max_fee_r = max_fee_fraction_of_r()
+        if max_fee_r > 0 and fee_r > max_fee_r:
+            payoff = ATR_TARGET_MULTIPLIER / ATR_STOP_MULTIPLIER
+            breakeven = (1.0 + fee_r) / (1.0 + payoff)
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        f"the round trip costs {fee_r:.2f}R in fees on a "
+                        f"{stop_fraction * 100:.2f}% stop, above the {max_fee_r:.2f}R "
+                        f"limit. At a {payoff:.0f}:1 payoff this trade needs a "
+                        f"{breakeven * 100:.1f}% win rate just to break even, and the "
+                        f"measured rate is 34-36%. A wider stop, not a smaller size, "
+                        f"is what fixes this."
+                    ],
+                    checks={
+                        "FeeToRisk": {
+                            "status": "reject",
+                            "detail": (
+                                f"fees {fee_r:.3f}R vs limit {max_fee_r:.3f}R "
+                                f"(stop {stop_fraction * 100:.2f}%, taker "
+                                f"{taker_rate() * 100:.3f}% per side)"
+                            ),
+                        }
+                    },
+                )
+            }
 
     # ---- ONE POSITION AT A TIME ------------------------------------------
     #
@@ -674,6 +756,39 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                 leverage, liq_capped, symbol, stop_fraction * 100, leverage,
             )
         leverage = liq_capped
+
+    # ---- AND THE VOLATILITY REGIME'S OWN CEILING (F28) ---------------------
+    #
+    # `algorithms/volatility.MAX_LEVERAGE_BY_REGIME` has always set HIGH 2x,
+    # NORMAL 4x, EXTREME 1x. The value landed on `VolatilityState.max_leverage`
+    # and NOTHING READ IT — while the docstrings and the evidence text this
+    # node emits both said the Risk Gateway applied it. A 10x session in a
+    # HIGH-volatility regime traded at 10x, and the trace said it was capped.
+    #
+    # Same class as F66 below and as the two CLAUDE.md already records: a value
+    # carried all the way to the decision point and then not used. Reproduced
+    # offline with `VolatilityState(regime="HIGH", max_leverage=2)`, which
+    # produced a plan at leverage=10.
+    #
+    # A CAP, by min(), exactly like the two above: it can only ever lower the
+    # operator's chosen leverage, never raise it (invariant 2). Reported rather
+    # than applied silently, for the same reason the liquidation cap is — an
+    # operator who chose 10x and got 2x has to be able to see why.
+    vol_state = state.get("volatility")
+    vol_cap = getattr(vol_state, "max_leverage", None)
+    if vol_cap:
+        try:
+            vol_cap = int(vol_cap)
+        except (TypeError, ValueError):
+            vol_cap = None
+    if vol_cap and vol_cap < leverage:
+        logger.warning(
+            "Leverage reduced %dx -> %dx on %s: the %s volatility regime caps leverage "
+            "at %dx.",
+            leverage, vol_cap, symbol,
+            getattr(vol_state, "regime", "?"), vol_cap,
+        )
+        leverage = max(1, vol_cap)
 
     # ---- SIZING ------------------------------------------------------------
     #
@@ -1052,15 +1167,44 @@ def _exit_plan(
     validation = validate_trade({"intent": "close", "symbol": symbol}, strict=False)
 
     held = 0.0
+    # THE DIRECTION COMES FROM `side`, NOT FROM THE SIGN OF `qty` (F27).
+    #
+    # The book stores a POSITIVE quantity plus an explicit `side` — the field
+    # was added precisely because it could not represent a short otherwise. So
+    # `"sell" if held > 0 else "buy"` reads every SHORT as a long, and the exit
+    # plan for a held short came out as a SELL. On the fallback close path
+    # (`execution_service._close`, used when the monitor is not tracking the
+    # position) that order ADDS TO THE SHORT instead of closing it.
+    #
+    # CLAUDE.md records this exact bug being fixed in the Supervisor. This copy
+    # was missed, and it is one-sided and therefore invisible from the winning
+    # side: longs exit correctly and always did.
+    held_side = None
     base = str(symbol).split("/")[0].upper()
     unreadable: List[str] = []
     for pos in (portfolio.open_positions if portfolio else []) or []:
         if str(pos.get("symbol", "")).split("/")[0].upper() != base:
             continue
         try:
-            held += float(pos["qty"])
+            raw_qty = float(pos["qty"])
+            held += abs(raw_qty)
+            # BOTH REPRESENTATIONS, PREFERRING THE EXPLICIT ONE.
+            #
+            # The book stores a POSITIVE quantity plus `side` — the field was
+            # added because a short could not be represented otherwise. An
+            # older row (and several test fixtures) carries a SIGNED quantity
+            # and no side. Reading only the sign was F27; reading only `side`
+            # would silently turn every legacy short into a long, which is the
+            # same bug wearing the fix's clothes.
+            explicit = pos.get("side")
+            if explicit:
+                held_side = str(explicit).lower()
+            elif held_side is None:
+                held_side = "sell" if raw_qty < 0 else "buy"
         except (KeyError, TypeError, ValueError):
             unreadable.append(str(pos.get("symbol")))
+    if held_side is None:
+        held_side = "buy"
 
     caution = list(validation.caution_notes)
     if unreadable:
@@ -1084,8 +1228,10 @@ def _exit_plan(
         },
     )
 
-    # Opposite side to the held direction: closing a long is a sell.
-    side = "sell" if held > 0 else "buy"
+    # Opposite side to the held direction: closing a long is a sell, and
+    # closing a SHORT is a buy. Derived from the stored `side`, never from the
+    # sign of the quantity — see the note above.
+    side = "sell" if held_side == "buy" else "buy"
 
     logger.info(
         "Risk gateway APPROVED EXIT on %s (%s %s) — risk checks NOT applied, "

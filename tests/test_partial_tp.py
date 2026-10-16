@@ -21,6 +21,25 @@ from backend.core.message_bus import MessageBus
 from backend.models.events import OrderFilledEvent, TarApprovedEvent, TickReceivedEvent
 
 
+@pytest.fixture(autouse=True)
+def _pin_exit_rules(monkeypatch):
+    """PIN THE SETTINGS THIS FILE IS ABOUT, rather than inheriting defaults.
+
+    The exit rules are read at call time (F70), so a test that leaves them
+    unset is really testing whatever the default happens to be — and when
+    `TRAILING_STOP_R`'s default moved to 0 (F62, the live trail measured
+    -0.027R against a fixed 2:1) eight tests in this area failed, having
+    silently depended on it being 1.0.
+
+    Set through the ENVIRONMENT because that is the path production reads and
+    the path `POST /api/admin/exit-rules` writes.
+    """
+    monkeypatch.setenv("PROFIT_TARGET_PCT", "0")
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", "0.5")
+    monkeypatch.setenv("PARTIAL_TP_R", "1.0")
+    monkeypatch.setenv("TRAILING_STOP_R", "0")
+
+
 @pytest.fixture
 def bus(monkeypatch):
     private = MessageBus()
@@ -72,8 +91,8 @@ def monitor(bus, monkeypatch):
     # working for anyone who opts back into it. A test of a feature that reads
     # its own enablement from a default is really a test of the default, and it
     # breaks the moment an operator changes their mind — which is what happened.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.5)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(0.0))
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", str(0.5))
     return agent
 
 

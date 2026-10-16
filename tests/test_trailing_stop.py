@@ -32,6 +32,25 @@ from backend.core.message_bus import MessageBus
 from backend.models.events import OrderFilledEvent, TarApprovedEvent
 
 
+@pytest.fixture(autouse=True)
+def _pin_exit_rules(monkeypatch):
+    """PIN THE SETTINGS THIS FILE IS ABOUT, rather than inheriting defaults.
+
+    The exit rules are read at call time (F70), so a test that leaves them
+    unset is really testing whatever the default happens to be — and when
+    `TRAILING_STOP_R`'s default moved to 0 (F62, the live trail measured
+    -0.027R against a fixed 2:1) eight tests in this area failed, having
+    silently depended on it being 1.0.
+
+    Set through the ENVIRONMENT because that is the path production reads and
+    the path `POST /api/admin/exit-rules` writes.
+    """
+    monkeypatch.setenv("TRAILING_STOP_R", "1.0")
+    monkeypatch.setenv("TRAILING_ACTIVATE_R", "1.0")
+    monkeypatch.setenv("PROFIT_TARGET_PCT", "0")
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", "0")
+
+
 @pytest.fixture
 def bus(monkeypatch):
     private = MessageBus()
@@ -56,12 +75,12 @@ def monitor(bus, monkeypatch):
     agent.rebind_bus(bus)
     # The scale-out is a separate feature with its own tests, and letting it fire
     # here would move the stop to break-even for reasons unrelated to the trail.
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.0)
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", str(0.0))
     # AND THE FIXED PROFIT TARGET, which now defaults to 2% and BYPASSES the trail
     # by design — a target closes the whole position, so there is no runner left
     # for a stop to follow. Without pinning it to 0 these tests would be measuring
     # the target's exit and calling it the trail's.
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(0.0))
     return agent
 
 
@@ -195,27 +214,23 @@ def test_a_position_without_an_initial_risk_keeps_its_fixed_stop(monitor):
 
 def test_setting_the_trail_to_zero_disables_it(monkeypatch, monitor):
     """Fully opt-out, back to a fixed stop and target."""
-    monkeypatch.setattr("backend.agents.position_monitor.TRAILING_STOP_R", 0.0)
+    monkeypatch.setenv("TRAILING_STOP_R", str(0.0))
     _, pos = _open(monitor, entry=100.0, stop=98.0)
     _tick(monitor, 108.0)
     assert pos.stop_loss == pytest.approx(98.0)
 
 
-def test_the_trail_never_fires_the_stop_it_just_set(monitor):
+def test_the_trail_never_fires_the_stop_it_just_set(monitor, monkeypatch):
     """A stop at or through the peak would close on the next tick.
 
     `tighten_stop` refuses that case and asks for an EXIT instead, so a trail
     distance of zero cannot turn into a market exit disguised as a stop-out.
     """
-    monitor_stop_r = 0.0
-    import backend.agents.position_monitor as pm
-
-    original = pm.TRAILING_STOP_R
-    pm.TRAILING_STOP_R = monitor_stop_r
-    try:
-        _, pos = _open(monitor, entry=100.0, stop=98.0)
-        pm.TRAILING_STOP_R = 0.000001   # effectively at the peak
-        _tick(monitor, 104.0)
-        assert pos.stop_loss < 104.0, "a stop at the peak would fire immediately"
-    finally:
-        pm.TRAILING_STOP_R = original
+    # Through the ENVIRONMENT, because the setting is read at call time now
+    # (F70) -- the same path `POST /api/admin/exit-rules` writes. `monkeypatch`
+    # restores it, so the manual save/restore is gone.
+    monkeypatch.setenv("TRAILING_STOP_R", "0")
+    _, pos = _open(monitor, entry=100.0, stop=98.0)
+    monkeypatch.setenv("TRAILING_STOP_R", "0.000001")   # effectively at the peak
+    _tick(monitor, 104.0)
+    assert pos.stop_loss < 104.0, "a stop at the peak would fire immediately"

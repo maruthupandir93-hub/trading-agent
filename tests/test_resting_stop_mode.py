@@ -30,6 +30,22 @@ from backend.core.message_bus import MessageBus
 from backend.models.events import OrderFilledEvent, TarApprovedEvent
 
 
+@pytest.fixture(autouse=True)
+def _pin_exit_rules(monkeypatch):
+    """PIN THE SETTINGS THIS FILE IS ABOUT, rather than inheriting defaults.
+
+    The exit rules are read at call time (F70), so a test that leaves them
+    unset is really testing whatever the default happens to be — and when
+    `TRAILING_STOP_R`'s default moved to 0 (F62, the live trail measured
+    -0.027R against a fixed 2:1) eight tests in this area failed, having
+    silently depended on it being 1.0.
+
+    Set through the ENVIRONMENT because that is the path production reads and
+    the path `POST /api/admin/exit-rules` writes.
+    """
+    monkeypatch.setenv("TRAILING_STOP_R", "0")
+
+
 class R:
     ok = True
     order_id = "venue-stop-1"
@@ -97,9 +113,9 @@ def monitor(bus, monkeypatch):
 
     agent = PositionMonitorAgent()
     agent.rebind_bus(bus)
-    monkeypatch.setattr("backend.agents.position_monitor.PARTIAL_TP_FRACTION", 0.0)
-    monkeypatch.setattr("backend.agents.position_monitor.TRAILING_STOP_R", 0.0)
-    monkeypatch.setattr("backend.agents.position_monitor.PROFIT_TARGET_PCT", 0.0)
+    monkeypatch.setenv("PARTIAL_TP_FRACTION", str(0.0))
+    monkeypatch.setenv("TRAILING_STOP_R", str(0.0))
+    monkeypatch.setenv("PROFIT_TARGET_PCT", str(0.0))
     return agent
 
 
@@ -129,7 +145,7 @@ def _tick(monitor, price):
 
 def test_on_adverse_places_ONLY_the_take_profit_at_entry(monkeypatch, monitor, venue):
     """The operator's requirement, in one assertion."""
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
     pos = _open(monitor)
     kinds = [c[0] for c in venue]
     assert "tp" in kinds, "the take-profit must rest from entry"
@@ -139,8 +155,8 @@ def test_on_adverse_places_ONLY_the_take_profit_at_entry(monkeypatch, monitor, v
 
 
 def test_the_stop_appears_once_the_trade_moves_against_us(monkeypatch, monitor, venue):
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_ARM_R", 0.5)
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_ARM_R", str(0.5))
     pos = _open(monitor, entry=100.0, stop=98.0)      # 1R = 2.0
     venue.clear()
 
@@ -154,7 +170,7 @@ def test_the_stop_appears_once_the_trade_moves_against_us(monkeypatch, monitor, 
 
 
 def test_a_winning_position_never_spends_the_api_call(monkeypatch, monitor, venue):
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
     pos = _open(monitor, entry=100.0, stop=98.0)
     venue.clear()
     for px in (100.5, 101.0, 102.0, 103.0):
@@ -167,8 +183,8 @@ def test_arming_is_idempotent(monkeypatch, monitor, venue):
     """Without this a losing position places a new stop on EVERY tick — dozens of
     live reduce-only orders, and after the first fires the rest are orders to OPEN
     the opposite position."""
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_ARM_R", 0.5)
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_ARM_R", str(0.5))
     _open(monitor, entry=100.0, stop=98.0)
     venue.clear()
     for px in (99.0, 98.9, 98.8, 98.7):
@@ -179,8 +195,8 @@ def test_arming_is_idempotent(monkeypatch, monitor, venue):
 def test_a_short_arms_when_price_RISES(monkeypatch, monitor, venue):
     """Direction comes from `mae_r`, so it is inherited rather than re-derived —
     a long arms on a fall, a short on a rise."""
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_ARM_R", 0.5)
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_ARM_R", str(0.5))
     pos = _open(monitor, entry=100.0, stop=102.0, side="sell")    # 1R = 2.0
     venue.clear()
     _tick(monitor, 99.0)                                          # winning for a short
@@ -197,8 +213,8 @@ def test_always_is_the_default_and_places_both_at_entry(monkeypatch, monitor, ve
     """The safe default is unchanged: an operator who sets nothing keeps both legs."""
     import backend.agents.position_monitor as pm
 
-    assert pm.RESTING_STOP_MODE == "always"
-    monkeypatch.setattr(pm, "RESTING_STOP_MODE", "always")
+    assert pm.RESTING_STOP_MODE() == "always"
+    monkeypatch.setenv("RESTING_STOP_MODE", "always")
     pos = _open(monitor)
     kinds = [c[0] for c in venue]
     assert "stop" in kinds and "tp" in kinds
@@ -207,8 +223,8 @@ def test_always_is_the_default_and_places_both_at_entry(monkeypatch, monitor, ve
 
 def test_paper_never_places_venue_orders_in_any_mode(monkeypatch, monitor, venue):
     """A paper fill has no venue order behind it to protect."""
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "on_adverse")
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_ARM_R", 0.5)
+    monkeypatch.setenv("RESTING_STOP_MODE", "on_adverse")
+    monkeypatch.setenv("RESTING_STOP_ARM_R", str(0.5))
     pos = _open(monitor, tab="paper")
     venue.clear()
     _tick(monitor, 99.0)
@@ -219,7 +235,7 @@ def test_paper_never_places_venue_orders_in_any_mode(monkeypatch, monitor, venue
 def test_the_in_process_stop_still_fires_in_every_mode(monkeypatch, monitor, venue):
     """INVARIANT 3. The venue copy is a backup for when this process is down; the
     computed stop is enforced on every tick regardless of mode."""
-    monkeypatch.setattr("backend.agents.position_monitor.RESTING_STOP_MODE", "never")
+    monkeypatch.setenv("RESTING_STOP_MODE", "never")
 
     closes = []
 

@@ -123,6 +123,11 @@ RISK_MULTIPLIER = {
 # Leverage ceiling per regime. A CAP, combined with the absolute ceiling by min()
 # — it can only ever lower it. `ABSOLUTE_MAX_LEVERAGE` stays the hard limit and
 # nothing here can raise it (CLAUDE.md invariant 2).
+#
+# APPLIED SINCE F28, and it was not before: this landed on
+# `VolatilityState.max_leverage` and nothing read it, so a 10x session in a
+# HIGH-volatility regime traded at 10x while the trace said it was capped at
+# 2x. `risk_gateway.gate` applies it now, beside the liquidation cap.
 MAX_LEVERAGE_BY_REGIME = {
     "VERY_LOW": 5,
     "LOW": 5,
@@ -132,6 +137,26 @@ MAX_LEVERAGE_BY_REGIME = {
 }
 
 # Stop distance in ATR multiples, per regime.
+#
+# **NOT APPLIED. ADVISORY ONLY, AND SAYING SO IS THE FIX (F66).**
+#
+# This is read into `VolatilityState.stop_atr_multiple` and reported in the
+# trace, and NOTHING SIZES A STOP FROM IT: `opportunity.detect_opportunity`
+# calls `compute_stop_loss_take_profit`, which uses the single
+# `ATR_STOP_MULTIPLIER = 2.5` from `core/risk_manager`. The evidence line used
+# to read "stop 1.5x ATR" on a position whose stop was 2.5x.
+#
+# IT IS LEFT UNAPPLIED DELIBERATELY, which is why this is a documentation fix
+# and not a wiring one. CLAUDE.md's nine-trade finding moved the stop from 1.5x
+# to 2.5x precisely because five of six losses were stop-outs of 0.45-0.79%
+# against a 0.43% ATR — inside the noise band. Switching NORMAL and HIGH back
+# to 1.5 here would restore the exact failure that evidence removed.
+#
+# The numbers are kept because the RANKING in them is the useful part (quiet
+# markets want a wider multiple, for the reason below) and because a future
+# change should start from a measurement, not from re-deriving this table. A
+# single multiplier that two files must agree on already exists; see
+# `lib/riskManager.ts` and `core/risk_manager.py`.
 #
 # Wider in quiet markets is deliberate and counter-intuitive: in a low-ATR market
 # the ATR itself is small, so a 1.5x stop can sit inside ordinary noise. The
@@ -524,8 +549,18 @@ def analyse_volatility(
             "size halved on the shock: the expansion is measured, its resolution is not"
         )
 
+    # THE EVIDENCE LINE MUST NOT CLAIM A STOP THIS SYSTEM DOES NOT PLACE.
+    #
+    # It read "stop 1.5x ATR" while every stop was 2.5x (F66). The risk
+    # multiplier and the leverage cap ARE applied — the leverage cap only since
+    # F28 — so they are stated plainly; the stop multiple is advisory and is
+    # now labelled as such rather than quietly reported alongside two figures
+    # that are enforced.
+    from backend.core.risk_manager import ATR_STOP_MULTIPLIER
+
     reading.evidence.append(
-        f"policy: risk x{reading.risk_multiplier}, leverage cap {reading.max_leverage}x, "
-        f"stop {reading.stop_atr_multiple}x ATR"
+        f"policy: risk x{reading.risk_multiplier}, leverage cap {reading.max_leverage}x; "
+        f"stop is {ATR_STOP_MULTIPLIER}x ATR (this regime would suggest "
+        f"{reading.stop_atr_multiple}x, which is ADVISORY and not applied)"
     )
     return reading

@@ -105,8 +105,8 @@ from backend.services.funding import estimate_funding
 #
 # This is the fix for the operator's exact complaint: a position goes +1-2%, the
 # trailing rule moves the stop to break-even, price drifts back to entry, and it
-# closes at 0.0 — the gain evaporates. With scale-out, at +PARTIAL_TP_R the monitor
-# CLOSES PARTIAL_TP_FRACTION of the position (banking a real, realised profit) and
+# closes at 0.0 — the gain evaporates. With scale-out, at +PARTIAL_TP_R() the monitor
+# CLOSES PARTIAL_TP_FRACTION() of the position (banking a real, realised profit) and
 # moves the stop on the RUNNER to break-even. So the worst case becomes "banked
 # ~1% and the runner scratched", not "gave it all back to zero", and the best case
 # still rides the runner to the full target.
@@ -122,8 +122,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-PARTIAL_TP_R = _env_float("PARTIAL_TP_R", 1.0)          # profit, in R, to scale out at
-PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.0)  # how much to bank (0 disables)
+def PARTIAL_TP_R() -> float:
+    """Profit, in R, to scale out at. READ AT CALL TIME (F70)."""
+    return _env_float("PARTIAL_TP_R", 1.0)
+
+
+def PARTIAL_TP_FRACTION() -> float:
+    """How much of the position to bank at +PARTIAL_TP_R; 0 disables."""
+    return _env_float("PARTIAL_TP_FRACTION", 0.0)
 
 # TRAILING STOP — what turns a trending window into a large win instead of a +2R cap.
 #
@@ -151,7 +157,7 @@ PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.0)  # how much to bank
 # the best price seen. At +2R the stop sits at +1R, so the target is no longer a
 # ceiling — the position can run while giving back at most 1R from its peak.
 #
-# TRAILING_STOP_R = 0 disables the trail entirely (back to fixed stop + target).
+# TRAILING_STOP_R() = 0 disables the trail entirely (back to fixed stop + target).
 # FIXED PROFIT TARGET, as a percentage of the ENTRY PRICE. 0 disables it.
 #
 # Added because 53.4% of this system's closed trades realised essentially nothing:
@@ -176,7 +182,9 @@ PARTIAL_TP_FRACTION = _env_float("PARTIAL_TP_FRACTION", 0.0)  # how much to bank
 # 2% of the margin deployed whatever leverage the session uses — a 2% price move
 # at 1x, 0.667% at 3x, 0.2% at 10x. Set it to 0 to go back to the ATR target plus
 # scale-out.
-PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.0)
+def PROFIT_TARGET_PCT() -> float:
+    """The operator's fixed profit target; 0 hands the exit to the ATR pair."""
+    return _env_float("PROFIT_TARGET_PCT", 0.0)
 
 # WHAT THE PROFIT TARGET PERCENTAGE IS A PERCENTAGE *OF*.
 #
@@ -200,7 +208,9 @@ PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.0)
 # very small, and a move that small is inside the spread and the fees on many
 # instruments. `_check_price` refuses a target it cannot clear costs on rather
 # than banking a "profit" that is really a loss — see MIN_TARGET_MOVE_PCT.
-PROFIT_TARGET_BASIS = (os.getenv("PROFIT_TARGET_BASIS") or "account").strip().lower()
+def PROFIT_TARGET_BASIS() -> str:
+    """"account" or "price" — what the fixed target is a percentage OF."""
+    return (os.getenv("PROFIT_TARGET_BASIS") or "account").strip().lower()
 
 # The smallest price move a profit target may be reduced to.
 #
@@ -224,7 +234,7 @@ MIN_TARGET_MOVE_PCT = 0.15
 #   "on_adverse"  THE OPERATOR'S ARRANGEMENT. Only the TP rests at entry. The
 #                 monitor holds the stop in memory and places it at the venue the
 #                 moment the position has moved against us by
-#                 `RESTING_STOP_ARM_R`. Protection appears exactly on the trades
+#                 `RESTING_STOP_ARM_R()`. Protection appears exactly on the trades
 #                 that turn out to need it.
 #
 #   "never"       No stop ever rests. The in-process monitor is the only stop.
@@ -243,7 +253,9 @@ MIN_TARGET_MOVE_PCT = 0.15
 # stop — `risk_gateway` refuses a trade without one, and the monitor enforces it
 # on every tick. This setting only decides whether a copy of it also sits at the
 # exchange.
-RESTING_STOP_MODE = (os.getenv("RESTING_STOP_MODE") or "always").strip().lower()
+def RESTING_STOP_MODE() -> str:
+    """"always" | "on_adverse" | "never" — when to place the venue stop."""
+    return (os.getenv("RESTING_STOP_MODE") or "always").strip().lower()
 
 # How far against us the position must move before "on_adverse" places the stop.
 #
@@ -251,10 +263,38 @@ RESTING_STOP_MODE = (os.getenv("RESTING_STOP_MODE") or "always").strip().lower()
 # place well before the stop could be reached, late enough that a winning trade
 # never spends the API call. Below ~0.2R ordinary noise would arm it on almost
 # every position and the mode would collapse into "always" with extra latency.
-RESTING_STOP_ARM_R = _env_float("RESTING_STOP_ARM_R", 0.5)
+def RESTING_STOP_ARM_R() -> float:
+    """How far against us before "on_adverse" places the venue stop."""
+    return _env_float("RESTING_STOP_ARM_R", 0.5)
 
-TRAILING_STOP_R = _env_float("TRAILING_STOP_R", 1.0)        # distance behind peak, in R
-TRAILING_ACTIVATE_R = _env_float("TRAILING_ACTIVATE_R", 1.0)  # profit, in R, before it arms
+def TRAILING_STOP_R() -> float:
+    """Distance behind the peak, in R. 0 disables the trail.
+
+    DEFAULT 0 SINCE F62, AND THE OLD DEFAULT OF 1.0 WAS MEASURABLY WORSE
+    THAN NO TRAIL AT ALL. A paired test on 7,591 identical entries, net of
+    fees, after the HTF gate (n = 3,724):
+
+        fixed 2:1, no trail          +0.003 +/- 0.023 R
+        LIVE trail (arm 1R, 1R)      -0.025 R   (delta -0.027, z -2.1)
+        no target, arm 2R, trail 1.5R  delta +0.020 (z +1.4)
+        fixed 3R, no trail             delta +0.026 (z +1.7)
+
+    Arming at +1R turns the 1-2R excursions that would have paid 2R into
+    small scratches: 417 exits at about 0R and 770 at about +0.25R.
+
+    Off is the only option that is BOTH better than the live setting and
+    does not need a second window to justify. The 2R/1.5R variant looks
+    stronger pooled (+0.052R, z 4.9) but is not significant after the
+    gate, and adopting an unconfirmed winner is how a sweep becomes a
+    curve fit -- see `scripts/sweep_risk_model.py` for the same lesson at
+    larger scale.
+    """
+    return _env_float("TRAILING_STOP_R", 0.0)
+
+
+def TRAILING_ACTIVATE_R() -> float:
+    """Profit, in R, before the trail arms."""
+    return _env_float("TRAILING_ACTIVATE_R", 1.0)
 
 
 # HOW MANY CONSECUTIVE FAILED CLOSES BEFORE THIS BECOMES A CRITICAL.
@@ -304,7 +344,7 @@ class _Tracked:
         # Both rest reduce-only, so if one fires while the process is down the
         # other cannot reverse the position — see `Venue.place_take_profit`.
         "tp_order_id",
-        # Set once the position has scaled out at +PARTIAL_TP_R, so it banks only
+        # Set once the position has scaled out at +PARTIAL_TP_R(), so it banks only
         # ONCE. In-memory only (not a DB column): after a scale-out the stop is
         # moved to break-even, so on a restart the restored stop sits AT entry and
         # the R multiple that gates a scale-out is 0 — which naturally prevents a
@@ -922,7 +962,7 @@ class PositionMonitorAgent(BaseAgent):
         without the path two questions are unanswerable from history:
 
           * Would a TRAILING stop have beaten a fixed target? A trail sits at
-            `peak - TRAILING_STOP_R`, so the answer depends entirely on where the
+            `peak - TRAILING_STOP_R()`, so the answer depends entirely on where the
             peak was. Replaying a trail against five days of real fills was
             impossible for exactly this reason.
           * Was the stop too TIGHT? A trade that dipped to -0.9R and then reached
@@ -1066,7 +1106,7 @@ class PositionMonitorAgent(BaseAgent):
         tracks, so this needs no new measurement and inherits its direction
         handling — a short arms when price rises, a long when it falls.
         """
-        if RESTING_STOP_MODE != "on_adverse":
+        if RESTING_STOP_MODE() != "on_adverse":
             return
         if not _venue_backed(pos) or pos.stop_order_id is not None:
             return
@@ -1074,12 +1114,12 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         _, mae = self._excursions(pos)
-        if mae is None or mae < RESTING_STOP_ARM_R:
+        if mae is None or mae < RESTING_STOP_ARM_R():
             return
 
         logger.warning(
             "%s has moved %.2fR against us and has no resting stop. Placing one at "
-            "the venue now (RESTING_STOP_MODE=on_adverse).",
+            "the venue now (RESTING_STOP_MODE()=on_adverse).",
             pos.symbol, mae,
         )
         await self._place_resting_stop(pos)
@@ -1245,7 +1285,7 @@ class PositionMonitorAgent(BaseAgent):
         # real money.
         #
         # `pos.take_profit` is the Risk Gateway's 5x-ATR target. But since
-        # PROFIT_TARGET_PCT became the default exit, the in-process monitor
+        # PROFIT_TARGET_PCT() became the default exit, the in-process monitor
         # closes at a FIXED PERCENTAGE instead, and that is much nearer. Measured
         # on a live 3x SOL/USDT short: entry 121.37, the 2%-of-margin target is a
         # 0.667% move -> 120.56, while the ATR target sat at 116.96 — 5.4x
@@ -1680,7 +1720,7 @@ class PositionMonitorAgent(BaseAgent):
                 # Under "on_adverse" the stop is deliberately NOT placed here —
                 # `_arm_resting_stop_if_adverse` places it on the first tick that
                 # goes against the position. Under "always" this is unchanged.
-                if RESTING_STOP_MODE == "always":
+                if RESTING_STOP_MODE() == "always":
                     await self._place_resting_stop(tracked)
                 # The take-profit rests beside the stop — see `_place_resting_tp`.
                 # Placed AFTER the stop deliberately: the stop is the
@@ -1818,7 +1858,7 @@ class PositionMonitorAgent(BaseAgent):
                 # into profit, pull back, and close at 0.00, over and over.
                 #
                 # A fixed percentage target closes the WHOLE position in one go.
-                # Every trade then ends as a clean win at +PROFIT_TARGET_PCT or a
+                # Every trade then ends as a clean win at +PROFIT_TARGET_PCT() or a
                 # clean loss at the stop — there is no runner left sitting at
                 # break-even, which is the only thing that produced the scratches.
                 #
@@ -1832,7 +1872,7 @@ class PositionMonitorAgent(BaseAgent):
                 # scale out at +1R, move the stop to break-even, and reintroduce
                 # exactly the scratch this exists to remove. Off (0) restores the
                 # previous ATR-target + scale-out behaviour completely.
-                if PROFIT_TARGET_PCT > 0 and pos.entry_price:
+                if PROFIT_TARGET_PCT() > 0 and pos.entry_price:
                     move_pct = (
                         (price - pos.entry_price) / pos.entry_price * 100.0
                         * (1.0 if pos.side == "buy" else -1.0)
@@ -1843,12 +1883,12 @@ class PositionMonitorAgent(BaseAgent):
                         continue
 
                 # PARTIAL PROFIT-TAKING, before the plain HOLD. If the position has
-                # reached +PARTIAL_TP_R and has not yet scaled out, bank part of it
+                # reached +PARTIAL_TP_R() and has not yet scaled out, bank part of it
                 # and move the runner's stop to break-even. This is what stops a
                 # +1-2% gain from dying at 0.0 on a pullback.
-                if PROFIT_TARGET_PCT <= 0 and PARTIAL_TP_FRACTION > 0 and not pos.partial_done:
+                if PROFIT_TARGET_PCT() <= 0 and PARTIAL_TP_FRACTION() > 0 and not pos.partial_done:
                     r = self._r_multiple(pos, price)
-                    if r is not None and r >= PARTIAL_TP_R:
+                    if r is not None and r >= PARTIAL_TP_R():
                         await self._take_partial(pos, price)
 
                 # ARM THE VENUE STOP IF THIS IS GOING WRONG.
@@ -1900,7 +1940,7 @@ class PositionMonitorAgent(BaseAgent):
 
           * `pos.take_profit` — the Risk Gateway's ATR-derived level, carried on
             the TAR.
-          * PROFIT_TARGET_PCT — the operator's fixed percentage, which is what
+          * PROFIT_TARGET_PCT() — the operator's fixed percentage, which is what
             `_check_price` actually tests once it is set (and it is, by default).
 
         Returns whichever is closer to entry in the direction of the trade, so a
@@ -1933,7 +1973,7 @@ class PositionMonitorAgent(BaseAgent):
     def _target_move_pct(pos: "_Tracked") -> Optional[float]:
         """The PRICE move that satisfies the profit target for this position.
 
-        Under `PROFIT_TARGET_BASIS="account"` the operator's percentage is a share
+        Under `PROFIT_TARGET_BASIS()="account"` the operator's percentage is a share
         of the MARGIN DEPLOYED, so the price only has to move that much divided by
         the leverage: a 2% account target is a 2% move at 1x and a 0.2% move at
         10x. That is the arithmetic an operator means by "take 2% per trade", and
@@ -1952,10 +1992,10 @@ class PositionMonitorAgent(BaseAgent):
         the stop, the trail and the ATR target, all of which are cost-aware
         because they are derived from volatility rather than from a fixed number.
         """
-        if PROFIT_TARGET_PCT <= 0:
+        if PROFIT_TARGET_PCT() <= 0:
             return None
-        if PROFIT_TARGET_BASIS == "price":
-            return PROFIT_TARGET_PCT
+        if PROFIT_TARGET_BASIS() == "price":
+            return PROFIT_TARGET_PCT()
 
         try:
             lev = float(pos.leverage or 1.0)
@@ -1963,13 +2003,13 @@ class PositionMonitorAgent(BaseAgent):
             lev = 1.0
         lev = max(1.0, lev)
 
-        needed = PROFIT_TARGET_PCT / lev
+        needed = PROFIT_TARGET_PCT() / lev
         if needed < MIN_TARGET_MOVE_PCT:
             logger.warning(
                 "%s: a %.2f%% ACCOUNT target at %gx needs only a %.3f%% price move, "
                 "which is below the %.2f%% round-trip cost floor. The fixed target is "
                 "SKIPPED for this position; its stop, trail and ATR target still apply.",
-                pos.symbol, PROFIT_TARGET_PCT, lev, needed, MIN_TARGET_MOVE_PCT,
+                pos.symbol, PROFIT_TARGET_PCT(), lev, needed, MIN_TARGET_MOVE_PCT,
             )
             return None
         return needed
@@ -1996,7 +2036,7 @@ class PositionMonitorAgent(BaseAgent):
         return move / pos.initial_risk
 
     def _apply_trailing_stop(self, pos: "_Tracked", price: float) -> None:
-        """Ratchet the stop to TRAILING_STOP_R behind the best price seen. Never raises.
+        """Ratchet the stop to TRAILING_STOP_R() behind the best price seen. Never raises.
 
         WHY THIS IS SYNCHRONOUS AND GOES THROUGH `tighten_stop`
         ------------------------------------------------------
@@ -2018,7 +2058,7 @@ class PositionMonitorAgent(BaseAgent):
         is worse than the current stop and `tighten_stop` declines. That is the
         ratchet working, so it is logged at debug and nothing else happens.
         """
-        if TRAILING_STOP_R <= 0:
+        if TRAILING_STOP_R() <= 0:
             return  # trail disabled by configuration
         if pos.entry_price is None or not pos.initial_risk or pos.initial_risk <= 0:
             # No scale to measure against. Positions opened before `initial_risk`
@@ -2027,14 +2067,14 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         progress = self._r_from_initial_risk(pos, price)
-        if progress is None or progress < TRAILING_ACTIVATE_R:
+        if progress is None or progress < TRAILING_ACTIVATE_R():
             # Not yet proved enough to protect. Below the activation point the
             # original ATR stop is the correct protection — trailing here would
             # turn the noise this system widened its stop to survive back into
             # stop-outs, which is the failure the 1.5 -> 2.5 ATR change fixed.
             return
 
-        distance = TRAILING_STOP_R * pos.initial_risk
+        distance = TRAILING_STOP_R() * pos.initial_risk
         # `peak_price` is the best price SEEN, maintained by the caller on every
         # tick. Trailing from the peak rather than from the current price is what
         # makes this a ratchet at all: from the current price the stop would
@@ -2048,13 +2088,13 @@ class PositionMonitorAgent(BaseAgent):
             logger.info(
                 "Trailing stop on %s %s: +%.2fR reached, stop now %.8g "
                 "(%.2fR behind peak %.8g).",
-                pos.side, pos.symbol, progress, candidate, TRAILING_STOP_R, anchor,
+                pos.side, pos.symbol, progress, candidate, TRAILING_STOP_R(), anchor,
             )
         else:
             logger.debug("Trail on %s not applied: %s", pos.symbol, why)
 
     async def _take_partial(self, pos: "_Tracked", price: float) -> None:
-        """Bank PARTIAL_TP_FRACTION of the position at +PARTIAL_TP_R, ONCE.
+        """Bank PARTIAL_TP_FRACTION() of the position at +PARTIAL_TP_R(), ONCE.
 
         Closes part of the position down the same ungated close path a stop uses
         (reduce-only for real), records the realised P&L as a trade row so the win
@@ -2070,7 +2110,7 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         full_qty = abs(pos.qty)
-        partial_qty = full_qty * PARTIAL_TP_FRACTION
+        partial_qty = full_qty * PARTIAL_TP_FRACTION()
         if partial_qty <= 0:
             return
 
@@ -2078,7 +2118,7 @@ class PositionMonitorAgent(BaseAgent):
         try:
             fill_price = await self._execution.close_position(
                 symbol=pos.symbol, entry_side=pos.side, qty=partial_qty,
-                tab=pos.tab, reason="partial-tp",
+                tab=pos.tab, reason="partial-tp", position_id=pos.tar_id,
                 # Same reason as the full close — the scale-out is triggered by a
                 # price this agent observed, and a simulated fill must use it.
                 observed_price=price,
@@ -2140,13 +2180,13 @@ class PositionMonitorAgent(BaseAgent):
             logger.info(
                 "Partial TP on %s: banked %.10g (%.0f%%) at %s, realized %+.2f — "
                 "runner %.10g left, moving its stop to break-even.",
-                pos.symbol, partial_qty, PARTIAL_TP_FRACTION * 100, fill_price,
+                pos.symbol, partial_qty, PARTIAL_TP_FRACTION() * 100, fill_price,
                 realized, pos.qty,
             )
             self.record_decision(
                 "partial-take-profit",
-                f"{pos.symbol} banked {PARTIAL_TP_FRACTION * 100:.0f}% at {fill_price} "
-                f"(+{PARTIAL_TP_R:g}R), realized {realized:+.2f}; runner to break-even.",
+                f"{pos.symbol} banked {PARTIAL_TP_FRACTION() * 100:.0f}% at {fill_price} "
+                f"(+{PARTIAL_TP_R():g}R), realized {realized:+.2f}; runner to break-even.",
                 {"partialQty": partial_qty, "exitPrice": fill_price, "realizedPnl": realized},
                 acted=True,
             )
@@ -2196,6 +2236,10 @@ class PositionMonitorAgent(BaseAgent):
                 # `close_position` settle the book at the venue's own price
                 # instead of at the price this agent happened to be looking at.
                 venue_order_ids=[i for i in (pos.stop_order_id, pos.tp_order_id) if i],
+                # F26: scope the close's idempotency key to THIS position, so a
+                # failed take-profit id cannot be inherited by a later position
+                # that happens to be the same size.
+                position_id=pos.tar_id,
             )
 
             if fill_price is None:

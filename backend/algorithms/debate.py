@@ -275,6 +275,7 @@ def score_debate(klines: List[Dict[str, Any]]) -> DebateResult:
 
     # --- 5. Volatility regime -------------------------------------------
     from backend.agents.regime_agent import detect_market_regime
+    from backend.algorithms.strategy_profiles import canonical_regime
 
     regime = detect_market_regime(klines)
     if regime == "Unknown":
@@ -284,13 +285,33 @@ def score_debate(klines: List[Dict[str, Any]]) -> DebateResult:
         # contributes a negative score to whichever side is currently ahead
         # rather than a direction of its own.
         prelim = sum(a.score for a in args)
-        if regime == "High Volatility":
+        # TRANSLATED, BECAUSE THIS LEG NEVER FIRED IN A TREND (F29).
+        #
+        # `detect_market_regime` returns the Section 21 vocabulary — "Bull
+        # Trend", "Bear Trend", "Panic", "Liquidity Crisis" — and this compared
+        # against the PROFILE vocabulary, "Trending Bullish" / "Trending
+        # Bearish". So in every trend the leg fell to the `else` and scored 0.0
+        # while its 1.0 weight stayed in the denominator, diluting conviction;
+        # and Panic, Euphoria and Liquidity Crisis were never treated as high
+        # volatility at all.
+        #
+        # Measured on a synthetic uptrend: LONG 0.179 as written, 0.248 with
+        # the names matched. Against a 0.18 bar, that is the difference between
+        # trading and not.
+        #
+        # `canonical_regime` is the project's single translation point — the
+        # same one `strategy_profiles` uses — rather than a second copy of the
+        # mapping here. An unrecognised name passes through unchanged and lands
+        # in the `else`, which is the honest outcome for a vocabulary this does
+        # not know.
+        canonical = canonical_regime(regime) or regime
+        if canonical == "High Volatility":
             score = -WEIGHT_VOLATILITY if prelim > 0 else WEIGHT_VOLATILITY
             detail = "high-volatility regime — reduces conviction in the leading side"
-        elif regime == "Trending Bullish":
+        elif canonical == "Trending Bullish":
             score = WEIGHT_VOLATILITY
             detail = "regime: trending bullish"
-        elif regime == "Trending Bearish":
+        elif canonical == "Trending Bearish":
             score = -WEIGHT_VOLATILITY
             detail = "regime: trending bearish"
         else:

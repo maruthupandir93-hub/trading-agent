@@ -225,16 +225,45 @@ def test_the_gateway_node_approves_an_exit_unconditionally():
     assert out["execution_plan"].stop_loss is None, "a close IS the exit"
 
 
-def test_closing_a_short_is_a_buy():
+@pytest.mark.parametrize("position", [
+    # The LEGACY shape: a signed quantity and no `side`.
+    {"symbol": "BTC/USDT", "qty": -0.5, "avgCost": 100.0},
+    # What the book actually stores today: a POSITIVE quantity plus an
+    # explicit `side`. The field exists because a short cannot be represented
+    # without it, and reading direction from the sign therefore turned every
+    # stored short into a long (F27) — on the fallback close path that ADDS to
+    # the short instead of closing it.
+    {"symbol": "BTC/USDT", "qty": 0.5, "side": "sell", "avgCost": 100.0},
+])
+def test_closing_a_short_is_a_buy(position):
+    """Both representations, because both reach this code.
+
+    Reading only the sign was the bug; reading only `side` would silently turn
+    every legacy row into a long, which is the same bug wearing the fix's
+    clothes.
+    """
     out = gate(_state(
         decision=TradeDecision(action="EXIT", direction="SHORT", probability=None),
         portfolio_state=PortfolioStateSnapshot(
             tab="paper", equity=10_000.0, cash=5_000.0,
-            open_positions=[{"symbol": "BTC/USDT", "qty": -0.5, "avgCost": 100.0}],
+            open_positions=[position],
         ),
     ))
     assert out["execution_plan"].side == "buy"
     assert out["execution_plan"].size == pytest.approx(0.5)
+
+
+def test_closing_a_long_is_still_a_sell():
+    """The half that always worked, and therefore hid the other one."""
+    out = gate(_state(
+        decision=TradeDecision(action="EXIT", direction="LONG", probability=None),
+        portfolio_state=PortfolioStateSnapshot(
+            tab="paper", equity=10_000.0, cash=5_000.0,
+            open_positions=[{"symbol": "BTC/USDT", "qty": 0.5, "side": "buy",
+                             "avgCost": 100.0}],
+        ),
+    ))
+    assert out["execution_plan"].side == "sell"
 
 
 def test_an_exit_with_an_unreadable_quantity_still_produces_a_plan():
