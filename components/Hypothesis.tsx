@@ -123,6 +123,11 @@ export function HypothesisProvider({ children }: { children: React.ReactNode }) 
   // Auto-trigger once a reflection exists with an actual lesson and no
   // hypothesis has been attempted yet this session. Polling on an
   // interval rather than watching a live reflections object directly —
+  // Refreshed EVERY RENDER so the interval below never calls a stale
+  // closure. See the note at the call site (F46).
+  const generateRef = useRef(generate);
+  generateRef.current = generate;
+
   // useReflection() only exposes a getter, not a change-subscribable
   // list, so a short interval is the simplest correct way to notice a
   // newly-generated reflection without threading a new subscription
@@ -138,7 +143,18 @@ export function HypothesisProvider({ children }: { children: React.ReactNode }) 
           continue;
         }
         if (!reflection.sections?.lesson && !reflection.content.trim()) continue; // nothing to build a hypothesis from yet
-        generate(tradeId);
+        // THROUGH A REF (F46). The interval is created once — its deps are
+        // `[loaded]` — so calling `generate` directly meant calling the
+        // MOUNT-TIME closure forever, holding a stale `getReflection` and a
+        // stale `resolvedApiKey`. A reflection that arrived after mount was
+        // scanned on every tick and then dropped by `generate`'s own early
+        // return, so the browser produced ZERO hypotheses: `hypotheses` had 0
+        // rows on the live deployment.
+        //
+        // This is the ref-in-interval rule CLAUDE.md records, and the two
+        // values beside it (`getAllReflectionsRef`, `hypothesesRef`) already
+        // follow it — `generate` was the one that did not.
+        generateRef.current(tradeId);
       }
     };
     scan();

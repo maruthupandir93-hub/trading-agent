@@ -4,6 +4,7 @@ import { useMarketData } from './MarketData';
 import { useCandles } from './Candles';
 import { usePortfolio } from './Portfolio';
 import { computeCorrelationMatrix, computeVolatilities, getCorrelation, tagCategory, findConcentrationRisk, suggestRiskParityWeights } from '@/lib/portfolioIntelligence';
+import { equity } from '@/lib/api/portfolio';
 
 export function PortfolioIntelligencePanel() {
   const { watchlist, ticks } = useMarketData();
@@ -20,7 +21,17 @@ export function PortfolioIntelligencePanel() {
     if (c && c.candles.length > 0) priceHistories[item.symbol] = c.candles.map((k) => k.c);
   }
   const matrix = computeCorrelationMatrix(priceHistories);
-  const equityUsd = portfolio.paper.cash + portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (ticks[p.symbol]?.price ?? p.avgCost), 0);
+  // F32: the 1x-only formula. `buyPaper` deducts MARGIN from cash, so
+  // adding the whole notional back double-counts the leveraged part — at
+  // 10x a $7,000 position funded by $700 shows $6,300 of equity that does
+  // not exist — and it ignores direction, so a losing short reads as
+  // equity going UP. `equity()` is the corrected implementation; calling
+  // it rather than restating it is why this copy survived the first fix.
+  const equityPrices: Record<string, number> = {};
+  for (const [symbol, tick] of Object.entries(ticks)) {
+    if (typeof tick?.price === 'number') equityPrices[symbol] = tick.price;
+  }
+  const equityUsd = equity(portfolio.paper, equityPrices).value ?? portfolio.paper.cash;
   const positions = portfolio.paper.positions.map((p) => ({ symbol: p.symbol, valueUsd: p.qty * (ticks[p.symbol]?.price ?? p.avgCost) }));
   const flags = findConcentrationRisk(matrix, positions, equityUsd);
   const riskParity = suggestRiskParityWeights(computeVolatilities(priceHistories));

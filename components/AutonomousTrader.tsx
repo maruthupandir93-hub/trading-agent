@@ -20,6 +20,7 @@ import { useMissionPlanner } from './MissionPlanner';
 import { useTradingControls } from './TradingControls';
 import { useAgent } from './Agent';
 import type { TradeTab, WatchItem } from '@/lib/types';
+import { equity } from '@/lib/api/portfolio';
 
 // =====================================================================
 // Autonomous Trader — the "AI never sleeps" loop (spec Sections 13-14).
@@ -239,7 +240,17 @@ export function AutonomousTraderProvider({ children }: { children: React.ReactNo
     const d = depsRef.current;
     const portfolio = d.getPortfolioSnapshot();
     if (tab === 'paper') {
-      return portfolio.paper.cash + portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (d.ticks[p.symbol]?.price ?? p.avgCost), 0);
+      // F32: the 1x-only formula. `buyPaper` deducts MARGIN from cash, so
+      // adding the whole notional back double-counts the leveraged part — at
+      // 10x a $7,000 position funded by $700 shows $6,300 of equity that does
+      // not exist — and it ignores direction, so a losing short reads as
+      // equity going UP. `equity()` is the corrected implementation; calling
+      // it rather than restating it is why this copy survived the first fix.
+      const prices: Record<string, number> = {};
+      for (const [symbol, tick] of Object.entries(d.ticks)) {
+        if (typeof tick?.price === 'number') prices[symbol] = tick.price;
+      }
+      return equity(portfolio.paper, prices).value ?? portfolio.paper.cash;
     }
     // Real tab has no tracked cash — reconstruct from the user-declared
     // starting capital, same approach as components/Supervisor.tsx's

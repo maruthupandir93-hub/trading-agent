@@ -50,12 +50,50 @@ export function serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
+// F38: A READ-ONLY FILESYSTEM MADE EVEN A **GET** RETURN 500.
+//
+// `ensureFile` creates the file on first READ, so on Vercel — where the
+// filesystem is read-only — `fs.mkdir`/`fs.writeFile` throws EROFS and the
+// exception propagates out of the route handler. Live, `GET /api/collaboration`
+// and `GET /api/volatility-history` both answered 500 for this reason, even
+// though neither caller was writing anything.
+//
+// The module docstring above already said the JSON path "is NOT durable on
+// serverless". It being non-durable is fine; it THROWING is not.
+//
+// Degraded to an in-memory store for the life of the process, and the reason
+// is readable through `storageNote()` rather than swallowed — a caller that
+// gets an empty list deserves to know whether that means "nothing stored" or
+// "nothing can be stored here".
+const memory = new Map<string, unknown>();
+let readOnlyReason: string | null = null;
+
+/** Why the JSON fallback is not durable in this process, or null. */
+export function storageNote(): string | null {
+  return readOnlyReason;
+}
+
+function markReadOnly(e: unknown): void {
+  if (readOnlyReason !== null) return;
+  readOnlyReason =
+    `this deployment's filesystem is not writable (${
+      e instanceof Error ? e.message : String(e)
+    }), so JSON-backed stores are held in memory for this process only and are ` +
+    `NOT durable. Configure DATABASE_URL for durable storage.`;
+  console.warn(`[jsonFallback] ${readOnlyReason}`);
+}
+
 async function ensureFile(file: string, empty: string): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  if (readOnlyReason !== null) return;
   try {
-    await fs.access(file);
-  } catch {
-    await fs.writeFile(file, empty, 'utf8');
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    try {
+      await fs.access(file);
+    } catch {
+      await fs.writeFile(file, empty, 'utf8');
+    }
+  } catch (e) {
+    markReadOnly(e);
   }
 }
 
@@ -67,12 +105,16 @@ export function dataFile(name: string): string {
 export async function readJson<T>(name: string, fallback: T): Promise<T> {
   const file = dataFile(name);
   await ensureFile(file, Array.isArray(fallback) ? '[]' : '{}');
+  if (readOnlyReason !== null) {
+    return (memory.has(name) ? (memory.get(name) as T) : fallback);
+  }
   try {
     const raw = await fs.readFile(file, 'utf8');
     return JSON.parse(raw) as T;
   } catch {
-    // A corrupt file returns the fallback rather than throwing: the caller's job
-    // is to serve a page, and a parse error should not 500 the whole route.
+    // A corrupt or missing file returns the fallback rather than throwing: the
+    // caller's job is to serve a page, and a parse error should not 500 the
+    // whole route.
     return fallback;
   }
 }
@@ -87,11 +129,23 @@ export async function readJson<T>(name: string, fallback: T): Promise<T> {
  * or the complete new one.
  */
 export async function writeJson<T>(name: string, value: T): Promise<void> {
+  if (readOnlyReason !== null) {
+    memory.set(name, value);
+    return;
+  }
   const file = dataFile(name);
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
-  await fs.rename(tmp, file);
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
+    await fs.rename(tmp, file);
+  } catch (e) {
+    // The write is kept in memory so the rest of THIS request behaves
+    // consistently, and the reason is recorded so a reader is not told an
+    // empty store means nothing happened.
+    markReadOnly(e);
+    memory.set(name, value);
+  }
 }
 
 /**

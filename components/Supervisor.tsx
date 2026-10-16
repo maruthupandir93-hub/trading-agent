@@ -24,6 +24,8 @@ import { buildClientOrderId, computeExecutionQuality, describeExecutionQuality, 
 import { uid } from '@/lib/storage';
 import type { CorrelationInputs } from '@/lib/riskManager';
 import type { DecisionOutcome, TradeTab, TradeSide, WatchItem, TradeLogEntry } from '@/lib/types';
+import { tradeablePrice } from '@/lib/tradeablePrice';
+import { equity } from '@/lib/api/portfolio';
 
 // ---------------------------------------------------------------------
 // The single execution gate for AI-agent-initiated trades (see
@@ -142,14 +144,42 @@ export function SupervisorProvider({ children }: { children: React.ReactNode }) 
   // last render, not ones executed earlier in the SAME batch. Using the
   // snapshot means the second trade's exposure/correlation check sees
   // the first trade's effect instead of stale pre-batch headroom.
+  // THE 1x-ONLY FORMULA SURVIVED HERE (F32).
+  //
+  // `cash + qty * price` is correct only at 1x. `buyPaper` deducts MARGIN from
+  // cash, so cash is FREE cash, and adding the whole notional back
+  // double-counts the leveraged part: at 10x a $7,000 position funded by $700
+  // reports $6,300 of equity that does not exist. It also ignores DIRECTION,
+  // so a short moving against the operator reads as equity going UP.
+  //
+  // CLAUDE.md records this formula being removed from `book_equity` and from
+  // `lib/api/portfolio.ts`. This copy — which feeds the SUPERVISOR'S SIZING
+  // INPUTS, so it decides how large an AI trade may be — was missed. It calls
+  // the corrected implementation now rather than restating it; two copies of
+  // this arithmetic is how it survived the first removal.
   function paperEquityUsd(): number {
     const portfolio = getPortfolioSnapshot();
-    return portfolio.paper.cash + portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (ticks[p.symbol]?.price ?? p.avgCost), 0);
+    const prices: Record<string, number> = {};
+    for (const [symbol, tick] of Object.entries(ticks)) {
+      if (typeof tick?.price === 'number') prices[symbol] = tick.price;
+    }
+    const measured = equity(portfolio.paper, prices);
+    // `value` is null when a position cannot be marked. Falling back to cash
+    // alone UNDERSTATES equity, which caps the next trade smaller — the safe
+    // direction, and the same choice `current_equity` makes on the real book.
+    return measured.value ?? portfolio.paper.cash;
   }
 
   function paperExistingExposureUsd(): number {
     const portfolio = getPortfolioSnapshot();
-    return portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (ticks[p.symbol]?.price ?? p.avgCost), 0);
+    // EXPOSURE IS NOTIONAL, and here that is deliberate and different from
+    // equity above: this feeds the portfolio-exposure check, which asks "how
+    // much market am I facing?", not "how much capital do I have?". A 10x
+    // position faces ten times its margin in market.
+    return portfolio.paper.positions.reduce(
+      (sum, p) => sum + Math.abs(p.qty) * (ticks[p.symbol]?.price ?? p.avgCost),
+      0,
+    );
   }
 
   // The 'real' tab has no tracked cash balance the way paper does (it's
@@ -444,6 +474,38 @@ export function SupervisorProvider({ children }: { children: React.ReactNode }) 
   }
 
   function reviewAndExecute(params: SupervisorExecuteParams): SupervisorExecuteResult {
+    // A FABRICATED PRICE MAY NOT REACH A TRADE (F25, invariant 6).
+    //
+    // `MarketData` writes a random walk into the shared `ticks` map for any
+    // symbol whose price is older than 12 seconds, tagged `sim-fallback`.
+    // Nothing read that tag, so a backend feed stall produced paper fills and
+    // realised P&L at invented prices — and this function is invariant 1's
+    // single execution path for every AI-originated trade, which makes it the
+    // right place to refuse.
+    //
+    // CLOSES ARE EXEMPT (invariant 4). Refusing to let the system out of a
+    // position because its price feed is stale is the harmful direction: the
+    // position is already open, and the close books at whatever the executor
+    // fills at, not at this number.
+    if (params.side === 'buy') {
+      const quote = tradeablePrice(ticks[params.symbol]);
+      if (!quote.ok) {
+        console.warn(`Supervisor refused ${params.symbol}: ${quote.reason}`);
+        return {
+          decision: {
+            approved: false,
+            urgency: 'normal',
+            reasons: [`No usable price: ${quote.reason}`],
+            conflictNotes: [],
+            cautionNotes: [],
+            explainable: null,
+            riskValidation: null,
+          },
+          executed: false,
+        };
+      }
+    }
+
     const item: WatchItem = watchlist.find((w) => w.symbol === params.symbol) ?? { symbol: params.symbol, type: params.symbol.includes('/') ? 'crypto' : 'equity' };
     const ctx = getStrategyContextFor(item);
 

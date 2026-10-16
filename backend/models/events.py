@@ -1,6 +1,6 @@
 from typing import Literal, Dict, Any, List, Optional
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 EventType = Literal[
@@ -69,9 +69,25 @@ EventType = Literal[
     'GRAPH_NODE_FAILED',
 ]
 
+def _utc_now() -> datetime:
+    """An AWARE UTC timestamp.
+
+    `datetime.utcnow()` returns a NAIVE datetime, which Pydantic serialises
+    without a `Z` or an offset — and the browser's `new Date(...)` then parses
+    that as LOCAL time (F85). In India the event stream's age started at about
+    19,800 seconds and every event time was shifted by 5.5 hours; west of UTC
+    the error runs the other way, so a dead stream never looks stale.
+
+    The whole backend is naive-UTC by convention, and that convention is kept
+    INSIDE the process — this changes only what crosses the wire, which is
+    where the ambiguity actually costs something.
+    """
+    return datetime.now(timezone.utc)
+
+
 class BaseEvent(BaseModel):
     event_id: UUID = Field(default_factory=uuid4)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
     event_type: EventType
 
 # 1. TICK_RECEIVED

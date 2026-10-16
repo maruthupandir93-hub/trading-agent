@@ -256,9 +256,30 @@ export function PortfolioProvider({ children }: { children: React.ReactNode }) {
     portfolioRef.current = next;
     setPortfolio(next);
     if (existing) {
-      const price = exitPrice ?? existing.avgCost;
-      const pnl = (price - existing.avgCost) * existing.qty;
-      logTrade('real', symbol, 'sell', existing.qty, price, exchangeOrderId ? `filled by real order ${exchangeOrderId}` : 'ledger entry removed', pnl, undefined, undefined, undefined, exchangeOrderId);
+      // NO EXIT PRICE IS NOT A BREAK-EVEN (F48, invariant 6).
+      //
+      // `exitPrice ?? existing.avgCost` books the close AT THE ENTRY, so the
+      // P&L computes to exactly 0.00 and the row enters the log as a
+      // completed, scratched trade. The win rate and expectancy then count a
+      // trade that HAS NO MEASURED RESULT — and a run of them drags the
+      // measured edge toward zero with fabricated data.
+      //
+      // The row is still written, because the position really did leave the
+      // ledger and losing that is worse. It carries NO pnl, which this
+      // codebase already treats as "an open leg, no result yet" — the same
+      // rule the backend's four `trades` writers follow — and the note says
+      // why, so a reader is not left with a dash they have to interpret.
+      if (typeof exitPrice === 'number' && Number.isFinite(exitPrice) && exitPrice > 0) {
+        const pnl = (exitPrice - existing.avgCost) * existing.qty;
+        logTrade('real', symbol, 'sell', existing.qty, exitPrice, exchangeOrderId ? `filled by real order ${exchangeOrderId}` : 'ledger entry removed', pnl, undefined, undefined, undefined, exchangeOrderId);
+      } else {
+        logTrade(
+          'real', symbol, 'sell', existing.qty, existing.avgCost,
+          'ledger entry removed with NO exit price — P&L is unknown, not zero. '
+          + 'Edit this row with the real fill to count it.',
+          undefined, undefined, undefined, undefined, exchangeOrderId,
+        );
+      }
     }
   }
 

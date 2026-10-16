@@ -115,7 +115,21 @@ type Status = {
   stopMeaning: string;
 };
 
-const SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'] as const;
+// THE PANEL COULD NOT BUILD A WORKING ROTATION (F49).
+//
+// Two faults in one list. BTC/USDT was FIRST and the default, and
+// `start_session` REFUSES it — BTC is the benchmark every alt decision reads,
+// deliberately untradeable (`tradeable_universe`), so the operator's first
+// click was always rejected. And the list lacked DOGE/ADA/SUI, which are the
+// coins this account can actually open: ETH's minimum order is $20 against a
+// ~$19 ceiling at this book size, and BNB needs $7.39 (see
+// `trading_session._venue_minimum_refusal`).
+//
+// Ordered cheapest-minimum first, so the default is a coin that works.
+const SYMBOLS = [
+  'XRP/USDT', 'SOL/USDT', 'DOGE/USDT', 'ADA/USDT', 'SUI/USDT',
+  'LINK/USDT', 'LTC/USDT', 'AVAX/USDT', 'BNB/USDT', 'ETH/USDT',
+] as const;
 
 const STATUS_BADGE: Record<string, string> = {
   running: 'RUNNING',
@@ -131,7 +145,7 @@ export function AutonomousSessionPanel() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const [symbol, setSymbol] = useState<string>('BTC/USDT');
+  const [symbol, setSymbol] = useState<string>('XRP/USDT');
   // EXTRA COINS THE SESSION ROTATES OVER WHILE FLAT.
   //
   // One coin ranges most of the time. Measured on a live XRP/USDT session:

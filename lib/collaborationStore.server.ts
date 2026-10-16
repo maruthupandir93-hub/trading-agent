@@ -24,12 +24,43 @@ export type CollaborationRecord = {
   error: string | null;
 };
 
+
+// F38: VERCEL'S FILESYSTEM IS READ-ONLY, AND EVEN A GET 500'd.
+//
+// `ensureFile` creates the file on first READ, so `fs.mkdir`/`fs.writeFile`
+// throws EROFS on a serverless deployment and the exception propagates out of
+// the route handler as an HTTP 500. Live, `GET /api/collaboration` and
+// `GET /api/volatility-history` both returned 500 for this reason.
+//
+// Degraded to an IN-MEMORY store for the life of the process, with the reason
+// surfaced rather than swallowed: a reader gets an empty list and is told the
+// records are not durable here, which is the truth. Silently pretending to
+// persist would be worse than the 500 — the operator would believe a record
+// existed.
+let readOnlyReason: string | null = null;
+let memory: any[] | null = null;
+
+export function storageNote(): string | null {
+  return readOnlyReason;
+}
+
 async function ensureFile(): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  if (readOnlyReason !== null) return;
   try {
-    await fs.access(DATA_FILE);
-  } catch {
-    await fs.writeFile(DATA_FILE, '[]', 'utf8');
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    try {
+      await fs.access(DATA_FILE);
+    } catch {
+      await fs.writeFile(DATA_FILE, '[]', 'utf8');
+    }
+  } catch (e) {
+    readOnlyReason =
+      `this deployment's filesystem is not writable (${
+        e instanceof Error ? e.message : String(e)
+      }), so collaboration records are held in memory for this process only ` +
+      `and are NOT durable`;
+    memory = memory ?? [];
+    console.warn(`[collaboration] ${readOnlyReason}`);
   }
 }
 
@@ -42,16 +73,33 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 async function readAll(): Promise<CollaborationRecord[]> {
   await ensureFile();
-  const raw = await fs.readFile(DATA_FILE, 'utf8');
+  if (readOnlyReason !== null) return (memory ?? []) as CollaborationRecord[];
   try {
+    const raw = await fs.readFile(DATA_FILE, 'utf8');
     return JSON.parse(raw) as CollaborationRecord[];
   } catch {
+    // A missing or malformed file is an empty list, never a 500 — the route
+    // that reads this is a page load.
     return [];
   }
 }
 
 async function writeAll(records: CollaborationRecord[]): Promise<void> {
-  await fs.writeFile(DATA_FILE, JSON.stringify(records, null, 2), 'utf8');
+  await ensureFile();
+  if (readOnlyReason !== null) {
+    memory = records.slice();
+    return;
+  }
+  try {
+    await fs.writeFile(DATA_FILE, JSON.stringify(records, null, 2), 'utf8');
+  } catch (e) {
+    readOnlyReason =
+      `could not write collaboration records (${
+        e instanceof Error ? e.message : String(e)
+      }); they are held in memory for this process only`;
+    memory = records.slice();
+    console.warn(`[collaboration] ${readOnlyReason}`);
+  }
 }
 
 export async function listCollaborationRecords(): Promise<CollaborationRecord[]> {

@@ -61,7 +61,7 @@ export default function SettingsPage() {
         '⚠️ ENABLE REAL-MONEY TRADING?\n\n' +
         'This will route orders to a REAL exchange with REAL funds.\n\n' +
         '• Ensure your Binance API keys are configured\n' +
-        '• Ensure you understand the risk limits (3× leverage, 3% per trade)\n' +
+        '• Ensure you understand the risk limits (10× leverage, 3% per trade)\n' +
         '• The stop-loss only exists while the backend process is alive\n\n' +
         'Click OK to enable live trading.'
       );
@@ -76,6 +76,28 @@ export default function SettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: live ? '{}' : JSON.stringify({ confirm: 'I understand this uses real funds' }),
       });
+      // `res.ok` WAS NEVER CHECKED (F33). A 401 or 403 from the proxy, or a
+      // 409 from the backend, answers `{detail: ...}` rather than
+      // `{status: 'error'}` — so a REFUSED toggle showed no message at all and
+      // the badge kept its previous state. The operator was told nothing and
+      // had every reason to believe live trading had switched.
+      //
+      // A safety control that reports success while doing nothing is the
+      // `simulation_mode` failure, and this is that control's own switch.
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          detail = body?.detail || body?.message || body?.error || detail;
+        } catch {
+          /* a non-JSON refusal is still a refusal */
+        }
+        setToggleError(`Refused: ${detail}`);
+        // Re-read the real state rather than assuming the old one is still
+        // right — the refusal may have come after a partial change.
+        tradingMode.reload();
+        return;
+      }
       const data = await res.json();
       if (data.status === 'error') {
         setToggleError(data.message);

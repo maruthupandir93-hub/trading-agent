@@ -213,7 +213,20 @@ export function MarketDataProvider({ children }: { children: React.ReactNode }) 
           const t = prev[w.symbol];
           const stale = !t || Date.now() - t.ts > 12000;
           if (stale && (w.type !== 'equity' || quoteApiError)) {
-            const base = t?.price ?? (w.type === 'crypto' ? 50000 : 100);
+            // NEVER INVENT A STARTING POINT (F25, invariant 6).
+            //
+            // This read `t?.price ?? (w.type === 'crypto' ? 50000 : 100)`, so a
+            // symbol with no tick at all began a random walk from a HARDCODED
+            // $50,000 — a number with no relationship to any market. Combined
+            // with the consumers below, which did not filter on `source`, a
+            // 12-second feed stall produced AI paper trades and P&L at prices
+            // that were fabricated outright.
+            //
+            // With no prior price there is nothing honest to walk FROM, so the
+            // symbol stays blank. A blank price is readable as "no data"; an
+            // invented one is not.
+            if (!t?.price) continue;
+            const base = t.price;
             const walk = base * (1 + (Math.random() - 0.5) * 0.002);
             next[w.symbol] = { price: walk, prevClose: t?.prevClose ?? base, ts: Date.now(), source: 'sim-fallback' };
             changed = true;

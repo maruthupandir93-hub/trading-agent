@@ -66,9 +66,28 @@ export function ReflectionProvider({ children }: { children: React.ReactNode }) 
     processedRef.current.add(trade.id);
     setGenerating((prev) => ({ ...prev, [trade.id]: true }));
     try {
-      const entryPrice = trade.price - trade.pnl / trade.qty;
+      // THE SIGN DEPENDS ON THE DIRECTION (F47).
+      //
+      // `price - pnl/qty` is the entry of a LONG: it closed at `price` and
+      // made `pnl`, so it opened lower. A SHORT closes by BUYING, and its P&L
+      // is `(entry - exit) * qty` — so its entry is `price + pnl/qty`. Using
+      // the long form on a short put the entry on the wrong side of the exit
+      // by twice the move, and the reflection then reasoned about a trade that
+      // never happened.
+      //
+      // The closing leg's side tells us which: a close with `side === 'buy'`
+      // closed a SHORT.
+      const closedAShort = trade.side === 'buy';
+      const entryPrice = closedAShort
+        ? trade.price + trade.pnl / trade.qty
+        : trade.price - trade.pnl / trade.qty;
+
+      // AND THE OPENING LEG IS ON THE OPPOSITE SIDE. This searched only
+      // `side === 'buy'`, so for a short — whose opening leg is a SELL — it
+      // never found one, and every short's reflection lost its entry context.
+      const openingSide = closedAShort ? 'sell' : 'buy';
       const priorBuy = [...tradeLog]
-        .filter((t) => t.symbol === trade.symbol && t.tab === trade.tab && t.side === 'buy' && t.ts <= trade.ts && !!t.entryContext)
+        .filter((t) => t.symbol === trade.symbol && t.tab === trade.tab && t.side === openingSide && t.ts <= trade.ts && !!t.entryContext)
         .sort((a, b) => b.ts - a.ts)[0];
 
       const exitContext = captureContextSnapshot(trade.symbol, getCandles);

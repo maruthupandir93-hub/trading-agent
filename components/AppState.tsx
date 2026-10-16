@@ -49,6 +49,7 @@ import { useAutonomousResearch } from './AutonomousResearch';
 import { captureContextSnapshot } from '@/lib/reflectionAgent';
 import type { Config, Conversation, Message, WatchItem, TradeTab } from '@/lib/types';
 import { DEFAULT_CONFIG } from '@/lib/types';
+import { equity } from '@/lib/api/portfolio';
 
 type AppStateValue = {
   config: Config;
@@ -121,7 +122,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     return buildStrategyContext(item, primary.candles, getCandles, getOrderFlow(item.symbol));
   }
   function paperEquityUsd(): number {
-    return portfolio.paper.cash + portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (ticks[p.symbol]?.price ?? p.avgCost), 0);
+    // F32: the 1x-only formula. `buyPaper` deducts MARGIN from cash, so
+    // adding the whole notional back double-counts the leveraged part — at
+    // 10x a $7,000 position funded by $700 shows $6,300 of equity that does
+    // not exist — and it ignores direction, so a losing short reads as
+    // equity going UP. `equity()` is the corrected implementation; calling
+    // it rather than restating it is why this copy survived the first fix.
+    const prices: Record<string, number> = {};
+    for (const [symbol, tick] of Object.entries(ticks)) {
+      if (typeof tick?.price === 'number') prices[symbol] = tick.price;
+    }
+    return equity(portfolio.paper, prices).value ?? portfolio.paper.cash;
   }
   function paperExistingExposureUsd(): number {
     return portfolio.paper.positions.reduce((sum, p) => sum + p.qty * (ticks[p.symbol]?.price ?? p.avgCost), 0);

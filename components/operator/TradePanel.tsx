@@ -70,6 +70,13 @@ type Context = {
   openPositions: { symbol: string; qty: number; avgCost: number }[];
   credentialsConfigured: boolean;
   balanceCacheSeconds: number;
+  // F31. `venue` so a Bybit deployment's manual order does not go to Binance,
+  // and `realOrderMaxLeverage` because the real path is a SPOT order and has
+  // no leverage at all. Optional so an older backend still renders.
+  venue?: string;
+  realOrderMarket?: string;
+  realOrderMaxLeverage?: number;
+  realOrderNote?: string;
 };
 
 // The symbols the backend's tick stream and agent actually watch. Offering a
@@ -128,7 +135,18 @@ export function TradePanel() {
         setCtxError(null);
         // Clamp rather than reset: an operator who chose 5x and switched symbol
         // keeps 5x unless the new tab's ceiling is lower.
-        setLeverage((l) => Math.min(l, data.leverageCeiling));
+        //
+        // ON THE REAL TAB THE CEILING IS 1 (F31). `/api/operator/exchange/order`
+        // builds a SPOT client on purpose, and a spot order carries no
+        // leverage — so a slider at 5x sized `qty = budget * 5 / price` and
+        // submitted a 5x-balance spot order while showing 1x of margin. The
+        // backend reports the real path's own limit; the fallback keeps the
+        // old behaviour for a backend that does not send it yet.
+        const ceiling =
+          data.tab === 'real'
+            ? Math.min(data.leverageCeiling, data.realOrderMaxLeverage ?? 1)
+            : data.leverageCeiling;
+        setLeverage((l) => Math.min(l, ceiling));
       } catch (e) {
         setCtxError(e instanceof Error ? e.message : 'could not load trade context');
       }
@@ -211,7 +229,10 @@ export function TradePanel() {
       const path = isReal ? '/api/operator/exchange/order' : '/api/operator/trade/paper';
       const body = isReal
         ? {
-            exchange: 'binance',
+            // THE DEPLOYMENT'S VENUE, not a hardcoded one (F31). With
+            // `EXCHANGE_ID=bybit` this used to send the operator's manual
+            // order to Binance with Bybit credentials.
+            exchange: ctx.venue ?? 'binance',
             apiKey: apiKey.trim(),
             apiSecret: apiSecret.trim(),
             symbol,

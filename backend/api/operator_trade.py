@@ -238,7 +238,37 @@ async def trade_context(
         "openPositions": positions or [],
         "credentialsConfigured": _credentials_configured(),
         "balanceCacheSeconds": BALANCE_TTL_S,
+        # WHICH VENUE, AND WHAT THE REAL TICKET CAN ACTUALLY DO (F31).
+        #
+        # The panel hardcoded `exchange: 'binance'`, so a Bybit deployment's
+        # manual orders still went to Binance. And its leverage slider went to
+        # the futures ceiling while `/api/operator/exchange/order` deliberately
+        # builds a SPOT client — so at 5x/100% the operator was shown 1x of
+        # margin and submitted a 5x-balance SPOT order, which is either
+        # rejected or spends five times the cash on screen.
+        #
+        # The panel reads both now: `venue` so the order goes where the
+        # deployment points, and `realOrderMaxLeverage: 1` so the slider cannot
+        # offer leverage the real path has no way to use.
+        "venue": _configured_venue(),
+        "realOrderMarket": "spot",
+        "realOrderMaxLeverage": 1,
+        "realOrderNote": (
+            "Manual REAL orders are placed on the SPOT market with your own keys, "
+            "so they carry no leverage. The leverage slider applies to the PAPER "
+            "tab only; on the real tab the size is margin = notional."
+        ),
     }
+
+
+def _configured_venue() -> str:
+    """The venue this deployment trades, for the operator panel."""
+    try:
+        from backend.services.venue import configured_venue
+
+        return configured_venue()
+    except Exception:  # noqa: BLE001 - a panel hint must never fail a context read
+        return "binance"
 
 
 def _credentials_configured() -> bool:
