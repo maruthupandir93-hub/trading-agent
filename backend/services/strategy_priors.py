@@ -89,7 +89,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -131,12 +131,19 @@ def _neutral_equivalent_win_rate() -> float:
     return TRACK_RECORD_FLOOR_WIN_RATE + 0.5 * TRACK_RECORD_SPAN
 
 
-def _newest_summary() -> Optional[str]:
-    """The most recent backtest run's summary.json, or None.
+def _all_summaries() -> List[str]:
+    """EVERY stored backtest summary, oldest first.
 
-    Newest by DIRECTORY NAME, which `run_backtests.py` stamps with the UTC date,
-    rather than by mtime: a `git clone` or a file copy rewrites every mtime to
-    the same instant, so mtime would pick an arbitrary run on a fresh deploy.
+    THIS USED TO RETURN ONLY THE NEWEST, AND THAT MADE THE PRIOR A COIN FLIP
+    (F8). The committed runs disagree almost perfectly -- Scalping is the best
+    strategy in the September window and the worst in the October one, VWAP
+    the reverse -- so whichever run happened last decided what the live agent
+    preferred. Re-running the backtests silently re-ordered strategy selection.
+
+    Sorted by DIRECTORY NAME, which `run_backtests.py` stamps with the UTC
+    date, rather than by mtime: a `git clone` or a file copy rewrites every
+    mtime to the same instant, so mtime would order them arbitrarily on a
+    fresh deploy.
     """
     try:
         names = sorted(
@@ -144,12 +151,19 @@ def _newest_summary() -> Optional[str]:
             if os.path.isdir(os.path.join(BACKTEST_DIR, d))
         )
     except OSError:
-        return None
-    for name in reversed(names):
+        return []
+    out = []
+    for name in names:
         path = os.path.join(BACKTEST_DIR, name, "summary.json")
         if os.path.isfile(path):
-            return path
-    return None
+            out.append(path)
+    return out
+
+
+def _newest_summary() -> Optional[str]:
+    """The most recent summary, for reporting WHICH runs were used."""
+    found = _all_summaries()
+    return found[-1] if found else None
 
 
 def load(*, force: bool = False) -> Dict[str, Any]:
@@ -171,43 +185,75 @@ def load(*, force: bool = False) -> Dict[str, Any]:
         "reason": "no backtest has been run — `python scripts/run_backtests.py`",
     }
 
-    path = _newest_summary()
-    if path is None:
+    paths = _all_summaries()
+    if not paths:
         _cache, _cached_at = empty, time.time()
         return _cache
 
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception as exc:  # noqa: BLE001 - a bad file is "no prior", not a crash
-        logger.warning(
-            "Could not read the backtest summary at %s (%s). Strategy scoring falls "
-            "back to a neutral track record, exactly as it behaved before priors "
-            "existed.", path, exc,
-        )
-        _cache, _cached_at = dict(empty, reason=f"unreadable: {exc}"), time.time()
-        return _cache
-
-    # POOLED ACROSS EVERY SYMBOL AND TIMEFRAME IN THE RUN. A per-symbol prior
-    # would be the more precise thing and is NOT what this file can honestly
-    # support: the run covers three symbols at two timeframes, so a per-symbol
-    # sample is a third the size and well under any floor worth trusting.
+    # POOLED ACROSS EVERY RUN, EVERY SYMBOL AND EVERY TIMEFRAME (F8).
+    #
+    # Reading only the newest run made the prior depend on which window
+    # happened to be measured last, and the committed runs disagree almost
+    # perfectly: Scalping is the best strategy in the September window and the
+    # worst in the October one, VWAP the reverse. Each window is about ten
+    # days, so a ranking that inverts between them is measuring that window's
+    # REGIME rather than a strategy's edge -- and "re-run the backtests"
+    # silently re-ordered what the live agent preferred.
+    #
+    # A per-symbol prior would be more precise and is NOT what this file can
+    # honestly support: a run covers three symbols at two timeframes, so a
+    # per-symbol sample is a third the size and well under any floor worth
+    # trusting.
     pooled: Dict[str, Dict[str, float]] = {}
-    for run in data.get("runs") or []:
-        for row in run.get("strategies") or []:
-            name = row.get("strategy")
-            if not name:
-                continue
-            from backend.core.strategy_versions import signal_version
-            if row.get("signal_version", 1) != signal_version(name):
-                continue
-            acc = pooled.setdefault(name, {"trades": 0.0, "wins": 0.0, "total_r": 0.0})
-            try:
-                acc["trades"] += float(row.get("trades") or 0)
-                acc["wins"] += float(row.get("wins") or 0)
-                acc["total_r"] += float(row.get("total_r") or 0)
-            except (TypeError, ValueError):
-                continue
+    # Per-window expectancy per strategy, for the sign-agreement test below.
+    windows: Dict[str, List[float]] = {}
+    read: List[str] = []
+    generated: Optional[str] = None
+
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:  # noqa: BLE001 - a bad file is "no prior", not a crash
+            logger.warning(
+                "Could not read the backtest summary at %s (%s); skipping that run. "
+                "Strategy scoring uses whatever other runs are readable.", path, exc,
+            )
+            continue
+
+        read.append(path)
+        generated = data.get("generatedAt") or generated
+
+        # This RUN's own per-strategy totals, so its sign can be compared with
+        # the other runs' before anything is pooled.
+        this_run: Dict[str, Dict[str, float]] = {}
+        for run in data.get("runs") or []:
+            for row in run.get("strategies") or []:
+                name = row.get("strategy")
+                if not name:
+                    continue
+                from backend.core.strategy_versions import signal_version
+                if row.get("signal_version", 1) != signal_version(name):
+                    continue
+                for acc in (pooled.setdefault(name, {"trades": 0.0, "wins": 0.0, "total_r": 0.0}),
+                            this_run.setdefault(name, {"trades": 0.0, "total_r": 0.0})):
+                    try:
+                        acc["trades"] += float(row.get("trades") or 0)
+                        acc["total_r"] += float(row.get("total_r") or 0)
+                        if "wins" in acc:
+                            acc["wins"] += float(row.get("wins") or 0)
+                    except (TypeError, ValueError):
+                        continue
+
+        for name, acc in this_run.items():
+            if acc["trades"] > 0:
+                windows.setdefault(name, []).append(acc["total_r"] / acc["trades"])
+
+    if not read:
+        _cache, _cached_at = dict(empty, reason="no readable backtest summary"), time.time()
+        return _cache
+    path = read[-1]
+    data = {"generatedAt": generated}
 
     neutral = _neutral_equivalent_win_rate()
     out: Dict[str, Any] = {}
@@ -216,7 +262,25 @@ def load(*, force: bool = False) -> Dict[str, Any]:
         if n <= 0:
             continue
         raw = acc["wins"] / n
-        usable = n >= MIN_BACKTEST_TRADES
+
+        # THE SIGN MUST AGREE ACROSS WINDOWS, OR THERE IS NO PRIOR (F8).
+        #
+        # A strategy that wins in one ten-day window and loses in the next has
+        # not demonstrated an edge; it has demonstrated that the window
+        # mattered more than the strategy. NEUTRAL is the honest value for
+        # that, and it is the same rule this module already applies to a
+        # strategy with no backtest at all.
+        #
+        # One window is allowed to stand on its own -- requiring agreement
+        # between two would mean a single committed run produced no priors,
+        # which is a worse default than the one measurement available.
+        per_window = windows.get(name) or []
+        consistent = True
+        if len(per_window) >= 2:
+            signs = {1 if r > 0 else (-1 if r < 0 else 0) for r in per_window}
+            consistent = len(signs - {0}) <= 1
+
+        usable = n >= MIN_BACKTEST_TRADES and consistent
         if usable:
             eff = min(n, MIN_BACKTEST_TRADES)
             shrunk = (eff * raw + MIN_BACKTEST_TRADES * neutral) / (eff + MIN_BACKTEST_TRADES)
@@ -229,12 +293,24 @@ def load(*, force: bool = False) -> Dict[str, Any]:
             "rawWinRate": round(raw, 4),
             "shrunkWinRate": round(shrunk, 4) if shrunk is not None else None,
             "expectancyR": round(acc["total_r"] / n, 4),
+            # Per-window expectancy, and whether they agree in sign. A strategy
+            # showing [+0.16, -0.31] has no prior, and this is what says why.
+            "windowExpectancyR": [round(r, 4) for r in per_window],
+            "signConsistent": consistent,
             "usable": usable,
         }
 
     _cache = {
         "strategies": out,
         "source": os.path.relpath(path, os.path.dirname(BACKTEST_DIR)).replace("\\", "/"),
+        # EVERY RUN THAT WAS POOLED, not just the newest (F8). A reader who
+        # sees one filename will assume one window was used, which is exactly
+        # the assumption that made the prior a coin flip.
+        "sources": [
+            os.path.relpath(p, os.path.dirname(BACKTEST_DIR)).replace("\\", "/")
+            for p in read
+        ],
+        "windowsPooled": len(read),
         "generatedAt": data.get("generatedAt"),
         "neutralEquivalentWinRate": round(neutral, 4),
         "minTrades": MIN_BACKTEST_TRADES,

@@ -153,6 +153,12 @@ def test_breakout_prior_requires_current_signal_version(monkeypatch, tmp_path, v
         row["signal_version"] = version
     path = tmp_path / "summary.json"
     path.write_text(json.dumps({"runs": [{"strategies": [row]}]}))
+    # `_all_summaries`, not `_newest_summary`: priors pool EVERY committed run
+    # now (F8), because reading only the newest made the prior depend on which
+    # window happened to be measured last. Patching the old seam left the real
+    # `backtests/` directory in play and this test passed or failed on what was
+    # committed there.
+    monkeypatch.setattr(sp, "_all_summaries", lambda: [str(path)])
     monkeypatch.setattr(sp, "_newest_summary", lambda: str(path))
     sp.reset()
     try:

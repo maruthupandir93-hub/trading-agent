@@ -274,7 +274,17 @@ def test_the_committed_backtest_ranks_the_losing_strategies_below_neutral():
             assert entry["shrunkWinRate"] >= neutral - 1e-9, (
                 f"{name} wins ({entry['expectancyR']:+.3f}R) but is penalised"
             )
-    assert checked >= 5, f"only {checked} usable strategies — is the file real?"
+    # THE FLOOR DROPPED FROM 5 TO 3 WHEN F8 WAS FIXED, AND THAT IS THE POINT.
+    #
+    # A strategy now earns a prior only when its sign AGREES ACROSS WINDOWS.
+    # Seven of eleven flip between the committed September and October runs --
+    # Scalping +0.160R then -0.309R, VWAP the reverse -- so they are neutral
+    # now rather than carrying whichever window ran last. Four remain usable,
+    # all consistently negative, and all correctly demoted.
+    #
+    # If this ever fails for being too LOW, the committed backtests have begun
+    # to agree with each other, which is a finding and not a broken test.
+    assert checked >= 3, f"only {checked} usable strategies — is the file real?"
 
 
 def test_the_status_carries_the_caveats_with_the_numbers():

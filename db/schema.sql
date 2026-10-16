@@ -116,7 +116,12 @@ CREATE TABLE IF NOT EXISTS decisions (
   requested_price          numeric NOT NULL,
   outcome                  text NOT NULL CHECK (outcome IN (
                               'approved-executed', 'approved-not-executed', 'rejected',
-                              'pending-approval', 'manually-approved', 'manually-rejected'
+                              'pending-approval', 'manually-approved', 'manually-rejected',
+                              -- The CRO's veto. Omitted here once, and every veto
+                              -- update was rejected and swallowed (F42). The DO
+                              -- block near the end of this file is what fixes an
+                              -- EXISTING database; this keeps a new one identical.
+                              'rejected-by-risk'
                             )),
   urgency                  text NOT NULL,
   rejection_reasons        jsonb NOT NULL DEFAULT '[]',
@@ -991,6 +996,37 @@ BEGIN
     CHECK (origin_tag IN (
       'debate', 'chat-trade-action', 'agent-plan', 'agent-close',
       'user-command', 'manual-click', 'manual-panel'
+    ));
+END $$;
+
+
+-- ---------------------------------------------------------------------
+-- THE SAME TRAP AGAIN, ON `decisions.outcome` (F42)
+--
+-- The CHECK permitted six values. `supervisor_agent._update_decision_outcome`
+-- writes `'rejected-by-risk'` when the CRO vetoes a trade, which is not among
+-- them — so EVERY CRO VETO UPDATE FAILED and was swallowed, and the single
+-- most interesting class of decision ("risk said no, and here is why") was
+-- never recorded at all.
+--
+-- Identical in shape to `trades_origin_tag_check` above: a CHECK that omits a
+-- value the code emits does not degrade, it REJECTS the write. And
+-- `CREATE TABLE IF NOT EXISTS` cannot widen a CHECK on a live table, so the
+-- CREATE block alone would have changed nothing on the operator's database.
+--
+-- `approved-executed` is kept even though nothing writes it yet: retention no
+-- longer depends on it (it joins `trades` instead), but it remains the correct
+-- vocabulary for a decision that filled.
+-- ---------------------------------------------------------------------
+
+DO $$
+BEGIN
+  ALTER TABLE decisions DROP CONSTRAINT IF EXISTS decisions_outcome_check;
+  ALTER TABLE decisions ADD CONSTRAINT decisions_outcome_check
+    CHECK (outcome IN (
+      'approved-executed', 'approved-not-executed', 'rejected',
+      'pending-approval', 'manually-approved', 'manually-rejected',
+      'rejected-by-risk'
     ));
 END $$;
 

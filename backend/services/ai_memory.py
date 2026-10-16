@@ -28,16 +28,57 @@ def _load_memory() -> Dict[str, Any]:
         with open(MEMORY_FILE, 'r') as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"Failed to load AI Memory: {e}")
+        # A CORRUPT FILE SILENTLY DISABLED THE DAILY-LOSS CHECK (F39).
+        #
+        # Returning {} made `ledger_for_tab` return [], so `check_daily_loss`
+        # passed after a losing day — the one check whose job is to stop a bad
+        # day getting worse — and `record_closed_trade` then wrote a fresh
+        # memory over the damaged one, so the ledger stayed empty forever.
+        #
+        # The file is PRESERVED and the failure is loud. A quarantined copy is
+        # recoverable; an overwritten one is not, and this file holds the only
+        # record of the account's win rate.
+        quarantine = f"{MEMORY_FILE}.corrupt"
+        try:
+            if os.path.exists(MEMORY_FILE) and not os.path.exists(quarantine):
+                os.replace(MEMORY_FILE, quarantine)
+                moved = f" The damaged file was moved to {quarantine}."
+            else:
+                moved = ""
+        except Exception:  # noqa: BLE001
+            moved = " It could NOT be quarantined, so it will be overwritten."
+        logger.error(
+            "Failed to load AI Memory (%s). The win rate, the trade ledger and the "
+            "DAILY-LOSS CHECK all read this file, so they start from zero for this "
+            "process.%s", e, moved,
+        )
         return {}
 
 def _save_memory(memory: Dict[str, Any]) -> None:
+    """Write the memory file ATOMICALLY.
+
+    `json.dump` straight onto the path truncates it first, so a crash — or a
+    container stop — between the truncate and the final byte leaves a
+    half-written file that `_load_memory` cannot parse (F39). Writing a
+    temporary file and renaming it means the path always points at a COMPLETE
+    document: either the old one or the new one.
+    """
     try:
-        os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
-        with open(MEMORY_FILE, 'w') as f:
+        directory = os.path.dirname(MEMORY_FILE)
+        os.makedirs(directory, exist_ok=True)
+        tmp = f"{MEMORY_FILE}.tmp"
+        with open(tmp, 'w') as f:
             json.dump(memory, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, MEMORY_FILE)
     except Exception as e:
         logger.error(f"Failed to save AI Memory: {e}")
+        try:
+            if os.path.exists(f"{MEMORY_FILE}.tmp"):
+                os.remove(f"{MEMORY_FILE}.tmp")
+        except Exception:  # noqa: BLE001
+            pass
 
 async def record_trade(symbol: str, side: str, pnl: float, reasons: List[str] = None, active_strategies: List[str] = None) -> None:
     """

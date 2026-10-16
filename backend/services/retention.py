@@ -252,17 +252,39 @@ async def prune_once() -> Dict[str, Any]:
             # (a quiet week cannot empty the table) and a cap (a busy day cannot
             # grow it without limit), and unlike an age window it is not
             # sensitive to how hard the agent happened to be working.
+            # "EXECUTED" IS NOW A FACT ABOUT `trades`, NOT A STRING (F42).
+            #
+            # The outcome filter alone kept only `approved-executed` and
+            # `manually-approved`, and NO BACKEND CODE WRITES EITHER: a backend
+            # TAR is recorded `pending-approval` and stays that way, so the
+            # decisions that actually produced trades were pruned along with
+            # the noise. The one record of WHY a trade was taken was the first
+            # thing deleted.
+            #
+            # A decision whose `tar_id` appears in `trades` demonstrably led to
+            # a fill, whatever its outcome string says. That is structural and
+            # cannot drift the way a vocabulary does — which is the same
+            # failure the `trades_origin_tag_check` CHECK already caused once.
             deleted = await conn.fetchval(
                 f"""
-                WITH keep AS (
-                    SELECT id FROM decisions
-                     WHERE outcome <> ALL($1::text[])
+                WITH prunable AS (
+                    SELECT d.id, d.ts
+                      FROM decisions d
+                     WHERE d.outcome <> ALL($1::text[])
+                       AND NOT EXISTS (
+                             SELECT 1 FROM trades t
+                              WHERE t.tar_id IS NOT NULL
+                                AND t.tar_id::text = d.tar_id::text
+                           )
+                ),
+                keep AS (
+                    SELECT id FROM prunable
                      ORDER BY ts DESC
                      LIMIT {MIN_KEEP}
                 ),
                 doomed AS (
                     DELETE FROM decisions
-                     WHERE outcome <> ALL($1::text[])
+                     WHERE id IN (SELECT id FROM prunable)
                        AND id NOT IN (SELECT id FROM keep)
                     RETURNING 1
                 )

@@ -54,6 +54,44 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+
+# Chat-template control tokens. A model that emits these has leaked its own
+# scaffolding into the answer; none of them can appear in a genuine completion.
+_CONTROL_TOKEN_MARKERS = (
+    "<|", "<｜",            # ASCII and the full-width form some tokenisers use
+    "<s>", "</s>",
+    "[INST]", "[/INST]",
+    "<<SYS>>",
+)
+
+
+def _looks_garbled(text: str) -> Optional[str]:
+    """Why this completion is unusable, or None if it reads like language.
+
+    See the call site for the live example that prompted it (F4). The bar is
+    deliberately low: this must not refuse a terse but real answer.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return "it is empty"
+
+    for marker in _CONTROL_TOKEN_MARKERS:
+        if marker in stripped:
+            return f"it contains the control token {marker!r}, which a real answer never does"
+
+    # Almost no letters. A legitimate answer may be a bare number or a JSON
+    # object, so digits, braces and punctuation are not evidence on their own —
+    # this only catches text that is mostly neither letters nor structure.
+    letters = sum(1 for ch in stripped if ch.isalpha())
+    if len(stripped) >= 40 and letters / len(stripped) < 0.35:
+        return (
+            f"only {letters} of {len(stripped)} characters are letters, which is "
+            f"not prose"
+        )
+
+    return None
+
+
 def _record_health(model, tier, *, ok, error=None, error_class=None):
     """Record a call outcome for the health tracker. Never raises — a health
     write must not be able to fail a real completion."""
@@ -625,6 +663,37 @@ class OpenAICompatibleProvider(LLMProvider):
                 + (f" (finish_reason={finish})" if finish else "")
                 + detail
             )
+            _record_health(model, tier, ok=False, error=_err,
+                           error_class=_classify(None, _err, empty=True))
+            return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
+
+        # AN ANSWER THAT IS NOT LANGUAGE IS NOT AN ANSWER (F4).
+        #
+        # The operator's `reflections` table held exactly one row, and its
+        # content was:
+        #
+        #     "<|close|> w.<|close|>think,'. . the , .,0. A.S +, not
+        #      available., X9. The in. A. 、 ```!.<|close|>!1. ..."
+        #
+        # Control tokens leaking out of a reasoning model. It was persisted as
+        # the LESSON for a losing trade, and `llmHealth` called the call
+        # "healthy" because the HTTP request had succeeded — an output that is
+        # not language was not classed as a failure anywhere.
+        #
+        # Treated as an empty completion, which it effectively is: the caller
+        # falls back to its rule-based path, the health metric counts it, and
+        # nothing stores a string that reads like damage.
+        #
+        # DELIBERATELY CONSERVATIVE. It rejects only text that is plainly not
+        # prose — special tokens, or almost no letters at all. A short answer,
+        # a number, a JSON object and a non-English reply all pass, because the
+        # cost of refusing a real answer is a lost lesson and the cost of
+        # accepting this one is a fabricated lesson that the learning loop then
+        # trains on.
+        garbled = _looks_garbled(text)
+        if garbled is not None:
+            _err = f"{self._provider_id}: {model} returned unusable output — {garbled}"
+            logger.warning("%s. First 120 chars: %r", _err, text[:120])
             _record_health(model, tier, ok=False, error=_err,
                            error_class=_classify(None, _err, empty=True))
             return LLMResult(text=None, model=model, tier=tier, latency_ms=elapsed, error=_err)
