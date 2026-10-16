@@ -463,7 +463,9 @@ async def analyse_market(state: TradingState) -> Optional[Dict[str, Any]]:
     from backend.agents.sentiment_agent import fetch_macro_data
 
     try:
-        macro = await fetch_macro_data()
+        # THE SYMBOL UNDER ANALYSIS (F37). Without it the funding and
+        # open-interest fields described BTC while the panel voted on SOL.
+        macro = await fetch_macro_data(state.get("symbol"))
     except Exception as e:
         return {"unavailable": [f"sentiment (fetch failed: {e})"]}
 

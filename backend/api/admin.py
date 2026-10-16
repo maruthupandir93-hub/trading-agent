@@ -292,6 +292,21 @@ async def reset_paper(req: ResetPaperRequest) -> Dict[str, Any]:
     # It does not fail the reset: a stale mark is a halt the operator can
     # clear, while a refused reset leaves them stuck with the state they were
     # trying to leave.
+    # 2c. THE LEARNING STATS BELONG TO THE BOOK THAT EARNED THEM (F68).
+    #
+    # `/api/memory` reported 12 trades, a 25% win rate and +$769.19 of P&L on
+    # an account holding $2.83 — an older $10,000 book's record, which the
+    # probability calibrator, the Confidence Agent and Kelly sizing all read.
+    # A reset account was sizing its first trade against another account's
+    # history.
+    try:
+        from backend.services.ai_memory import reset_tab_stats
+
+        report["learningStatsCleared"] = (await reset_tab_stats("paper")).get("cleared")
+    except Exception as exc:  # noqa: BLE001
+        report["learningStatsCleared"] = f"could not clear: {exc}"
+        logger.warning("Paper book reset, but the learning stats were not cleared: %s", exc)
+
     try:
         from backend.agents.ceo_agent import rearm_high_water_mark
 

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Dict, Optional, Set
 
 import ccxt.pro as ccxtpro
@@ -55,6 +56,24 @@ logger = logging.getLogger(__name__)
 # In-memory cache for the latest prices. `get_price` in `market_data` reads this
 # first — see its docstring for the three-cache ordering.
 _live_prices: Dict[str, float] = {}
+# WHEN EACH PRICE ARRIVED (F43).
+#
+# The cache carried no timestamp, so a DEAD FEED kept serving its last price
+# indefinitely — and `/api/market/price` labels that source `websocket`, so it
+# was reported as live. That price feeds equity, the Risk Gateway's entry and
+# the operator panel's figures, which means a silently stalled socket produced
+# confident numbers about a market nobody was watching.
+#
+# CLAUDE.md already records the same reasoning for the UNSUBSCRIBE path:
+# "`get_live_price` carries no timestamp, so a value left behind is served
+# forever as a live websocket price". Purging on unsubscribe fixed the case
+# where we KNOW the feed went away; this covers the case where it just stops.
+_live_price_ts: Dict[str, float] = {}
+
+# How old a socket price may be and still be served as live. Generous against
+# a 2s tick: a quiet market still prints, and a feed silent for this long has
+# stopped rather than slowed.
+LIVE_PRICE_MAX_AGE_S = 60.0
 
 # Always watched, so the dashboard has something to show on a fresh process and
 # the common instruments are never waiting on a reconcile.
@@ -86,6 +105,7 @@ async def _watch_ticker_loop(exchange, symbol: str, bus) -> None:
             if price is not None:
                 failures = 0
                 _live_prices[symbol] = price
+                _live_price_ts[symbol] = time.time()
                 await bus.publish(
                     "TICK_RECEIVED",
                     TickReceivedEvent(
@@ -225,6 +245,7 @@ async def _reconcile(bus) -> None:
         # time in the past. Dropping it means `get_price` falls through to the
         # polled cache, which at least knows how old it is.
         _live_prices.pop(symbol, None)
+        _live_price_ts.pop(symbol, None)
         logger.info("Unsubscribed from %s — nothing open or configured needs it.", symbol)
 
 
@@ -257,6 +278,7 @@ async def start_live_data_feed() -> None:
         _watchers.clear()
         # Nothing is arriving any more, so nothing here is a live price.
         _live_prices.clear()
+        _live_price_ts.clear()
         try:
             await _exchange.close()
         except Exception:  # pragma: no cover
@@ -265,8 +287,31 @@ async def start_live_data_feed() -> None:
 
 
 def get_live_price(symbol: str) -> float:
-    """Latest price from the live socket cache, or 0.0 when none has arrived."""
-    return _live_prices.get(symbol, 0.0)
+    """Latest price from the live socket cache, or 0.0.
+
+    0.0 ALSO FOR A STALE ONE (F43). A socket that stops without closing left
+    its last price in the cache forever, and every reader treated it as live —
+    equity, the gateway's entry price, the operator panel. Returning 0.0 makes
+    `get_price` fall through to the polled cache, which knows how old its data
+    is, exactly as the unsubscribe path already does.
+    """
+    price = _live_prices.get(symbol, 0.0)
+    if price <= 0:
+        return 0.0
+    stamped = _live_price_ts.get(symbol)
+    if stamped is not None and (time.time() - stamped) > LIVE_PRICE_MAX_AGE_S:
+        logger.debug(
+            "Socket price for %s is %.0fs old (limit %.0fs); not serving it as live.",
+            symbol, time.time() - stamped, LIVE_PRICE_MAX_AGE_S,
+        )
+        return 0.0
+    return price
+
+
+def live_price_age_s(symbol: str) -> Optional[float]:
+    """How old the socket price is, or None when there is none. For diagnostics."""
+    stamped = _live_price_ts.get(symbol)
+    return None if stamped is None else (time.time() - stamped)
 
 
 def watched_symbols() -> Set[str]:

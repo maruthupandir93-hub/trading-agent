@@ -47,10 +47,31 @@ class HistoricalBacktestEngine:
         #
         # `rebind_bus` returns the previous bus so it can be restored; see
         # `restore_agent_buses`, which `run()` calls in a `finally`.
+        # THE SINGLETONS ARE REBOUND AND RESTORED. THE THROWAWAY IS NOT (F71).
+        #
+        # `ExecutionAgent(simulation_mode=True)` SUBSCRIBES TO THE LIVE BUS the
+        # moment it is constructed — `BaseAgent.__init__` does that — so the
+        # sequence was:
+        #
+        #   1. construct      -> subscribed to the LIVE bus
+        #   2. rebind_bus     -> moved to the private simulation bus
+        #   3. restore_buses  -> moved BACK to the live bus, and left there
+        #
+        # After two backtests one `TAR_APPROVED` executed THREE times:
+        # duplicate trade rows, duplicate paper fills and duplicate
+        # ORDER_FILLED events, until a restart. `POST /api/research/run`
+        # triggers it, and before F6 anyone could call that.
+        #
+        # The two SINGLETONS genuinely must go back — they are the live
+        # system's own agents. This one is a temporary object that should
+        # never have been on the live bus at all, so it is DETACHED instead.
         self._previous_buses = [
             (agent, agent.rebind_bus(self.bus))
-            for agent in (self.market_intelligence, self.supervisor, self.execution)
+            for agent in (self.market_intelligence, self.supervisor)
         ]
+        self.execution.detach()          # off the LIVE bus it auto-joined
+        self.execution.rebind_bus(self.bus)
+        self.execution._setup_subscriptions()   # onto the private one
 
         # State tracking
         self.peak_equity = 10000.0
@@ -70,6 +91,13 @@ class HistoricalBacktestEngine:
         while self._previous_buses:
             agent, previous = self._previous_buses.pop()
             agent.rebind_bus(previous)
+
+        # And the throwaway executor leaves entirely, rather than being handed
+        # back to the live bus to keep filling orders (F71).
+        try:
+            self.execution.detach()
+        except Exception:  # noqa: BLE001 - teardown must not raise
+            logger.debug("Backtest execution agent could not be detached cleanly.")
 
     def _register_agent(self, agent):
         """Subscribe only. Prefer `rebind_bus` — see the note in `__init__` on why

@@ -405,16 +405,53 @@ async def place_paper_trade(req: PaperTradeRequest) -> Dict[str, Any]:
                 ),
             )
     else:
-        ok = await sell_paper(req.symbol, req.qty, price)
-        if not ok:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Cannot sell {req.qty} {req.symbol}: the paper book does not hold "
-                    f"that much. A short entry is not supported on the paper book — "
-                    f"sell closes an existing long."
-                ),
+        # THROUGH THE MONITOR WHEN IT IS WATCHING THIS SYMBOL (F74).
+        #
+        # `sell_paper` settles the book and does NOTHING ELSE, so a manual sell
+        # left the watch row its own BUY had created. That row is not inert:
+        # `may_open_new_position` counts it against
+        # MAX_CONCURRENT_POSITIONS=1, so a ghost position BLOCKED EVERY AGENT
+        # ENTRY — the F1 symptom reached by a different route. And when the
+        # orphaned stop later fired, it booked a fabricated loss (-10.04 in the
+        # reproduction) into the win rate and the daily-loss check.
+        #
+        # `close_tracked` runs the whole sequence once: the closed-trade row
+        # carrying a real P&L, the watch row's deletion, the resting stop and
+        # take-profit cancelled, and POSITION_CLOSED — which is what drives
+        # reflection, the learning ledger and the Telegram alert.
+        from backend.agents.position_monitor import get_position_monitor
+
+        monitor = get_position_monitor()
+        watched = any(
+            str(p.get("symbol")) == req.symbol and str(p.get("tab", "paper")) == "paper"
+            for p in monitor.snapshot_open()
+        )
+
+        if watched:
+            fill = await monitor.close_tracked(
+                req.symbol, "closed from the operator panel", price=price, tab="paper",
             )
+            ok = fill is not None
+            if not ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Could not close the monitored {req.symbol} position. It is "
+                        f"still open and still watched; the monitor will retry on the "
+                        f"next tick."
+                    ),
+                )
+        else:
+            ok = await sell_paper(req.symbol, req.qty, price)
+            if not ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot sell {req.qty} {req.symbol}: the paper book does not hold "
+                        f"that much. A short entry is not supported on the paper book — "
+                        f"sell closes an existing long."
+                    ),
+                )
 
     monitored = False
     monitor_note: str

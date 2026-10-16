@@ -29,6 +29,7 @@ on the same position will eventually act twice on it.
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -102,7 +103,15 @@ class ContinuousMonitorWorker:
                 marked.append({"symbol": symbol, "qty": qty, "pnlPct": None, "priced": False})
                 continue
 
-            pnl_pct = ((live - cost) / cost * 100) if cost else 0.0
+            # DIRECTION-AWARE (F76). `(live - cost)/cost` is long-only, so a
+            # SHORT winning 6% was reported as "down -6.00% against entry" and
+            # raised a concern, while a LOSING short raised nothing at all —
+            # the one case this worker exists to catch. The book stores a
+            # positive quantity plus an explicit `side`, the same field the
+            # exit plan and the Supervisor both had to learn to read.
+            side = str(pos.get("side") or "buy").lower()
+            direction = -1.0 if side == "sell" else 1.0
+            pnl_pct = ((live - cost) / cost * 100 * direction) if cost else 0.0
             marked.append({"symbol": symbol, "qty": qty, "pnlPct": round(pnl_pct, 3), "priced": True})
             if pnl_pct <= -5.0:
                 concerns.append(f"{symbol}: down {pnl_pct:.2f}% against entry.")
@@ -210,6 +219,7 @@ class ContinuousMonitorWorker:
         trigger for it would recreate exactly the bug above under a new name.
         """
         from backend.core.message_bus import get_message_bus
+        from backend.graphs.triggers import TriggerReason
         from backend.models.events import TriggerFiredEvent
 
         known = {str(m.get("symbol")) for m in (marked or []) if m.get("symbol")}
@@ -231,17 +241,43 @@ class ContinuousMonitorWorker:
                 len(unattributed), "; ".join(unattributed),
             )
 
+        # THROUGH THE TRIGGER GATE, NOT AROUND IT (F76).
+        #
+        # These were published with `acted=True` straight onto the bus, which
+        # BYPASSES the per-(symbol, kind) cooldown and the 6-runs-per-minute
+        # ceiling that every other automatic trigger passes. This worker runs
+        # every 60 seconds and a concern like "no live price for this position"
+        # persists, so each one started a FULL 24-NODE GRAPH RUN every minute,
+        # indefinitely — the exact cost the gate exists to bound.
+        #
+        # `_admit` returns a decision carrying `acted` and, when suppressed,
+        # the reason. A suppressed trigger is still published so the event
+        # buffer records that the condition was seen and deliberately not acted
+        # on; the analysis graph only runs on `acted`.
+        from backend.graphs.triggers import get_trigger_evaluator
+
+        evaluator = get_trigger_evaluator()
         bus = get_message_bus()
         for symbol, items in by_symbol.items():
             try:
+                decision = evaluator._admit(
+                    TriggerReason(
+                        kind="monitoring_concern",
+                        symbol=symbol,
+                        detail="; ".join(items),
+                        observed_value=float(len(items)),
+                        threshold=1.0,
+                    ),
+                    time.time(),
+                )
                 await bus.publish("TRIGGER_FIRED", TriggerFiredEvent(
                     symbol=symbol,
                     kind="monitoring_concern",
                     detail="; ".join(items),
-                    acted=True,
+                    acted=decision.acted,
                     observed_value=float(len(items)),
                     threshold=1.0,
-                    suppressed_reason=None,
+                    suppressed_reason=decision.suppressed_reason,
                 ))
             except Exception as e:  # noqa: BLE001
                 # One symbol failing must not stop the others being raised.

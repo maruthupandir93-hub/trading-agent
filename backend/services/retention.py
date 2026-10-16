@@ -41,6 +41,7 @@ window. If `trades` ever needs bounding, it needs archiving, not deletion.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -229,7 +230,18 @@ async def prune_once() -> Dict[str, Any]:
     # filled the production server to 100%, and it must still be bounded on a
     # deployment running without a database pool. Returning early on "no pool"
     # would leave the one store that actually caused an outage unpruned.
-    checkpoints = prune_checkpoints()
+    # OFF THE EVENT LOOP (F40).
+    #
+    # `prune_checkpoints` is SYNCHRONOUS and ends in a SQLite `VACUUM`, which
+    # rewrites the whole file. Measured: 9.2 seconds on a 246 MB database.
+    # Called directly from async code it blocked the loop for that long, once
+    # an hour — so ticks stopped, stops could not fire, HTTP did not answer,
+    # and the EMERGENCY STOP would not have been served either.
+    #
+    # `to_thread` keeps the work and its timing exactly as they were; only the
+    # loop is freed. SQLite is used from one thread at a time here, and this
+    # is the only caller.
+    checkpoints = await asyncio.to_thread(prune_checkpoints)
 
     pool = get_db_pool()
     if pool is None:

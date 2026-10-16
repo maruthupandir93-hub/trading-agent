@@ -630,7 +630,10 @@ def _patch_feeds(monkeypatch, price=112.0):
     async def fake_klines(symbol, tf, limit=100):
         return _bars()
 
-    async def fake_macro():
+    # Takes the SYMBOL now (F37): funding and open interest are
+    # per-instrument, and the node hardcoded BTCUSDT while the panel
+    # voted on whatever coin was under analysis.
+    async def fake_macro(symbol=None):
         return {"fng": 55, "fng_classification": "Greed", "funding_rate": 0.0001,
                 "oi": 1_000.0, "unavailable": []}
 

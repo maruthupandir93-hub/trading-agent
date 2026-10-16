@@ -451,6 +451,38 @@ async def _register_real_position(*, req, side: str, filled_qty: float, fill_pri
             ),
         }
 
+    # THE MONITOR CANNOT ACTUALLY CLOSE THIS, AND SAYING IT CAN FABRICATES A
+    # TRADE (F73).
+    #
+    # Two independent reasons, and either one alone is enough:
+    #
+    #   1. This route places a SPOT order (`defaultType: "spot"`, deliberately).
+    #      The monitor's close path goes through `services/venue`, which is the
+    #      linear-PERPETUAL client. It cannot reduce a spot position.
+    #   2. With `LIVE_TRADING=false`, `routes_to_venue("real")` is false — it
+    #      needs `tab == "real"` AND `not simulation_mode` — so the close takes
+    #      the SIMULATED branch. Reproduced: a `real` agent-close row with a
+    #      P&L of -10.04 was written and the watch row deleted, while the spot
+    #      position stayed open at the exchange with nothing watching it.
+    #
+    # A fabricated close is strictly worse than no monitoring: the operator is
+    # told the position is gone AND the invented P&L enters the win rate and
+    # the daily-loss check. So the registration is refused, loudly, with the
+    # action the operator can actually take.
+    from backend.core.config import settings
+
+    if not req.testnet and not settings.LIVE_TRADING:
+        return {
+            "monitored": False,
+            "note": (
+                "NOT REGISTERED. This is a SPOT position and LIVE_TRADING is off, so "
+                "the in-process monitor could not place a real closing order — it "
+                "would 'close' it by simulation, writing a fabricated fill and P&L "
+                "while the position stayed open at the exchange. Manage this stop at "
+                "the venue, or place the trade through the agent's own path."
+            ),
+        }
+
     try:
         from backend.agents.position_monitor import get_position_monitor
 

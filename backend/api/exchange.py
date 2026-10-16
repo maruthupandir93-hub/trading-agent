@@ -47,6 +47,18 @@ def _position_monitoring_enabled() -> bool:
     return os.getenv("POSITION_MONITORING_ENABLED", "false").strip().lower() == "true"
 
 
+
+def _is_usdt_market(symbol: str) -> bool:
+    """A USDT-quoted market, spot or linear perpetual.
+
+    Spot is `BTC/USDT`; the perpetual this venue actually serves is
+    `BTC/USDT:USDT`. Both are accepted, so the route keeps working whichever
+    `defaultType` the client was built with.
+    """
+    base = str(symbol or "").split(":")[0]
+    return base.endswith("/USDT")
+
+
 @router.get("/status")
 async def get_exchange_status() -> Dict[str, Any]:
     """Connection and mode. The first thing to check before anything else.
@@ -134,7 +146,13 @@ async def get_tickers(limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
     rows = [
         {"symbol": symbol, "last": data.get("last"), "quoteVolume": data.get("quoteVolume")}
         for symbol, data in tickers.items()
-        if symbol.endswith("/USDT") and data.get("last")
+        # `BTC/USDT:USDT`, NOT `BTC/USDT` (F51). These are FUTURES tickers and
+        # ccxt keys a linear perpetual with the settlement suffix, so
+        # `endswith("/USDT")` matched NOTHING and this route returned
+        # `count: 0` on every call. CLAUDE.md records fixing exactly this in
+        # `market_data.fetch_prices`, where the same string test left the price
+        # cache empty and the log blamed the network; this copy was missed.
+        if _is_usdt_market(symbol) and data.get("last")
     ]
     # Sorted by volume so the truncation keeps the liquid markets rather than
     # an arbitrary alphabetical slice.

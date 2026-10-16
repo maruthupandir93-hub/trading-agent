@@ -1,7 +1,7 @@
 import httpx
 import time
 import logging
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,20 @@ _cache = {
 
 CACHE_TTL = 300 # 5 minutes
 
-async def fetch_macro_data() -> Dict[str, Any]:
+
+def _venue_symbol(symbol: Optional[str]) -> str:
+    """`SOL/USDT` or `SOL/USDT:USDT` -> `SOLUSDT`, defaulting to BTCUSDT.
+
+    The default is the market-wide proxy and is the right fallback for a
+    caller that genuinely has no instrument in hand (the macro worker). A
+    caller that DOES have one must pass it -- see F37.
+    """
+    if not symbol:
+        return "BTCUSDT"
+    return str(symbol).split(":")[0].replace("/", "").replace("-", "").upper()
+
+
+async def fetch_macro_data(symbol: Optional[str] = None) -> Dict[str, Any]:
     """Fetches Fear & Greed, Funding Rate, and Open Interest.
 
     Every field starts as None and an `unavailable` list records what could not
@@ -49,15 +62,28 @@ async def fetch_macro_data() -> Dict[str, Any]:
                     data["fng"] = int(fng_data["data"][0]["value"])
                     data["fng_classification"] = fng_data["data"][0]["value_classification"]
                     
-            # 2. Funding Rate (Binance Futures BTCUSDT)
-            fund_resp = await client.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT")
+            # 2. FUNDING RATE FOR THE SYMBOL UNDER ANALYSIS, NOT BTC (F37).
+            #
+            # This was hardcoded to BTCUSDT, and `specialist_funding` presents
+            # the result as the funding of whatever coin is being analysed --
+            # a 1.0-weight DIRECTIONAL vote about a different market. Funding
+            # is paid by the crowded side of THAT instrument; BTC's crowding
+            # says nothing about SOL's.
+            #
+            # Fear & Greed above is genuinely market-wide and is left alone.
+            fund_resp = await client.get(
+                f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={_venue_symbol(symbol)}"
+            )
             if fund_resp.status_code == 200:
                 fund_data = fund_resp.json()
                 data["funding_rate"] = float(fund_data.get("lastFundingRate", 0.0))
                 
             # 3. Open Interest approximation (Just getting current to see if it's high/low)
             # True OI delta requires history, but we can fetch current OI.
-            oi_resp = await client.get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT")
+            # Per-instrument too, for the same reason.
+            oi_resp = await client.get(
+                f"https://fapi.binance.com/fapi/v1/openInterest?symbol={_venue_symbol(symbol)}"
+            )
             if oi_resp.status_code == 200:
                 oi_data = oi_resp.json()
                 # For this free API without history, we just log it, but we can't easily tell trend 

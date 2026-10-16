@@ -157,7 +157,18 @@ class CuriosityEngineWorker:
         if questions:
             created = await add_research_tasks(
                 hypothesis_id=None,
-                trade_id=f"curiosity-{now}",
+                # A STABLE ID, NOT A PER-CYCLE ONE (F86).
+                #
+                # `add_research_tasks` de-duplicates on `(tradeId, question)`,
+                # and stamping the cycle's timestamp into the id made every
+                # pair unique — so the SAME question was queued again every
+                # hour, forever, and the research queue filled with copies.
+                #
+                # The curiosity worker asks about the PORTFOLIO, not about one
+                # trade, so a constant is the honest key: the same question
+                # about the same portfolio is the same task until someone
+                # answers it.
+                trade_id="curiosity-portfolio",
                 symbol="portfolio",
                 tasks=questions,
             )

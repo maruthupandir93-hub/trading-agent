@@ -66,6 +66,16 @@ class RegisteredAgent:
         self.health = AgentHealthRecord(agentId=descriptor.id)
         self.last_scheduled_at = 0.0
 
+# How many consecutive failures before an agent is backed off (F69). It used to
+# be the point at which it was disabled FOREVER.
+ERROR_THRESHOLD = 5
+
+# The longest an agent waits between retries while failing. Five minutes: long
+# enough that a genuinely broken agent is not a load problem, short enough that
+# a recovered dependency is noticed without a restart.
+MAX_BACKOFF_MS = 300_000
+
+
 class AgentOS:
     """
     Central runtime kernel for the Multi-Agent OS.
@@ -103,7 +113,10 @@ class AgentOS:
             for agent_id in self.get_execution_order():
                 agent = self.agents[agent_id]
                 
-                if agent.health.status != 'running' or not agent.tick_fn or agent.descriptor.tickIntervalMs == 0:
+                # 'degraded' is still scheduled — it is a backed-off agent, not a
+                # dead one (F69). Only an explicitly stopped agent is skipped.
+                if (agent.health.status not in ('running', 'degraded')
+                        or not agent.tick_fn or agent.descriptor.tickIntervalMs == 0):
                     continue
                 
                 elapsed = now - agent.last_scheduled_at
@@ -128,14 +141,47 @@ class AgentOS:
                     agent.health.lastHeartbeat = now
                     agent.health.totalTicks += 1
                     agent.health.consecutiveErrors = 0
+                    # A success RESTORES it (F69): the backoff was a response
+                    # to failures, and there are none now.
+                    if agent.health.status == 'degraded':
+                        logger.warning("Agent %s recovered and is running normally again.", agent_id)
+                        agent.health.status = 'running'
                 except Exception as e:
                     agent.health.lastError = str(e)
                     agent.health.lastErrorAt = now
                     agent.health.totalErrors += 1
                     agent.health.consecutiveErrors += 1
-                    logger.error(f"Agent {agent_id} failed: {e}")
-                    if agent.health.consecutiveErrors >= 5:
-                        agent.health.status = 'error'
+                    logger.error(f"Agent {agent_id} failed: {e}", exc_info=True)
+                    if agent.health.consecutiveErrors >= ERROR_THRESHOLD:
+                        # QUARANTINED, NOT KILLED (F69).
+                        #
+                        # `status = 'error'` is permanent: the scheduling gate
+                        # at the top of this loop skips anything not
+                        # 'running', and nothing ever sets it back. Five
+                        # transient failures — a rate limit, a restart of the
+                        # upstream, a cold cache — disabled an agent for the
+                        # life of the process. That includes `trading_agent`,
+                        # whose `fetch_prices` feeds the polled price cache,
+                        # so the system could lose a price source permanently
+                        # because an exchange was briefly slow.
+                        #
+                        # It backs off instead and retries, with the interval
+                        # doubling per failure up to a ceiling. An agent that
+                        # is genuinely broken therefore costs one call every
+                        # few minutes rather than one per tick, and an agent
+                        # whose dependency recovers comes back on its own.
+                        backoff = min(
+                            agent.descriptor.tickIntervalMs
+                            * (2 ** (agent.health.consecutiveErrors - ERROR_THRESHOLD + 1)),
+                            MAX_BACKOFF_MS,
+                        )
+                        agent.last_scheduled_at = now + backoff
+                        agent.health.status = 'degraded'
+                        logger.warning(
+                            "Agent %s has failed %d times in a row; backing off %.0fs "
+                            "before the next attempt. It is NOT disabled.",
+                            agent_id, agent.health.consecutiveErrors, backoff / 1000.0,
+                        )
                         
             await asyncio.sleep(tick_ms / 1000.0)
 

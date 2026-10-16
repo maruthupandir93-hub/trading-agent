@@ -150,6 +150,60 @@ async def record_trade(symbol: str, side: str, pnl: float, reasons: List[str] = 
     _save_memory(memory)
     logger.info(f"AI Memory updated. Win Rate: {stats['win_rate']:.1f}%. Total PnL: ${stats['total_pnl']:.2f}")
 
+
+async def reset_tab_stats(tab: str = "paper") -> Dict[str, Any]:
+    """Clear the learning stats and ledger for ONE book. Returns what was dropped.
+
+    F68: `/api/memory` reported 12 trades, a 25% win rate and **+$769.19** of
+    total P&L on an account holding $2.83 — figures carried over from an older
+    $10,000 book. Nothing cleared them when the book was reset or re-funded,
+    and three readers consume them: the probability calibrator counts those
+    trades toward its 20-trade minimum, the Confidence Agent calibrates against
+    the win rate, and Kelly sizing reads it.
+
+    So a reset account sizes its first trade against another account's record.
+
+    THE OTHER BOOK IS LEFT ALONE, and that is the point of doing it per tab:
+    resetting paper must not erase what the real book has learned.
+    `global_stats` is recomputed from whatever tabs remain, so the all-books
+    total stays consistent with its parts instead of drifting.
+    """
+    memory = _load_memory()
+    if not memory:
+        return {"cleared": 0}
+
+    before = dict((memory.get("tab_stats") or {}).get(tab) or {})
+    memory.setdefault("tab_stats", {})
+    memory["tab_stats"][tab] = {
+        "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "total_pnl": 0.0,
+    }
+    memory["trade_ledger"] = [
+        row for row in (memory.get("trade_ledger") or [])
+        if str(row.get("tab") or "") != tab
+    ]
+
+    # Recompute the all-books total from the per-book parts rather than
+    # zeroing it: the other book's record is still true.
+    totals = {"total_trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+    for stats in (memory.get("tab_stats") or {}).values():
+        for key in ("total_trades", "wins", "losses"):
+            totals[key] += int(stats.get(key) or 0)
+        totals["total_pnl"] += float(stats.get("total_pnl") or 0.0)
+    totals["win_rate"] = (
+        totals["wins"] / totals["total_trades"] if totals["total_trades"] else 0.0
+    )
+    memory["global_stats"] = totals
+
+    _save_memory(memory)
+    logger.warning(
+        "Learning stats for the '%s' book were RESET (was %s trades, %s wins, "
+        "%.2f total P&L). The other book's record is untouched.",
+        tab, before.get("total_trades", 0), before.get("wins", 0),
+        float(before.get("total_pnl") or 0.0),
+    )
+    return {"cleared": int(before.get("total_trades") or 0), "previous": before}
+
+
 async def record_closed_trade(
     symbol: str,
     side: str,

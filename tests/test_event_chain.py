@@ -133,7 +133,10 @@ async def test_tick_produces_features_structure_and_macro(monkeypatch):
             "resistance": 62_000.0,
         }
 
-    async def fake_macro():
+    # Takes the SYMBOL now (F37): funding and open interest are
+    # per-instrument, and the node hardcoded BTCUSDT while the panel
+    # voted on whatever coin was under analysis.
+    async def fake_macro(symbol=None):
         return {"fng": 55, "fng_classification": "Greed", "funding_rate": 0.0001,
                 "oi": 1.0, "unavailable": []}
 

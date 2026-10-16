@@ -1,7 +1,11 @@
 import logging
 from typing import Dict, Any, TypedDict, List
 from backend.algorithms.trading_styles import get_viable_styles
-from backend.algorithms.strategy_profiles import get_profile, is_strategy_active_in_regime
+from backend.algorithms.strategy_profiles import (
+    canonical_regime,
+    get_profile,
+    is_strategy_active_in_regime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +102,14 @@ def score_strategies(state: StrategySelectionState) -> StrategySelectionState:
         # graph. `is_strategy_active_in_regime` above already uses `active_regimes`,
         # so this now agrees with the gate immediately preceding it instead of
         # consulting a different (non-existent) field.
-        if profile and regime and regime in (profile.active_regimes or []):
+        # TRANSLATED FIRST (F82). The profiles speak "Trending Bullish" and
+        # the classifier returns "Bull Trend", so a raw `in` comparison never
+        # matched in three of four regimes and the bonus never applied —
+        # while these scores ARE the ensemble's vote weights. Same mismatch
+        # as F29 in the debate's volatility leg, and the same single
+        # translation point fixes it.
+        canonical = canonical_regime(regime) if regime else None
+        if profile and canonical and canonical in (profile.active_regimes or []):
             score += REGIME_MATCH_BONUS
 
         # Volatility fit, only when volatility was actually measured. An unmeasured
@@ -133,13 +144,23 @@ def _volatility_fit(profile, volatility: str) -> float:
     strategy gets sensible treatment without a second place to update. Returns 0.0
     when the profile says nothing about volatility — silence is not agreement.
     """
+    # WHOLE WORDS, NOT SUBSTRINGS (F82). `"low" in best` matched the "low"
+    # inside "s*low* EMA" and "be*low*", so a strategy whose prose happened to
+    # mention a slow moving average scored a LOW-volatility bonus it had not
+    # earned. These scores are the ensemble's vote weights, so a spurious
+    # bonus changes which strategy speaks loudest.
+    import re as _re
+
     best = (profile.best_conditions or "").lower()
     worst = (profile.worst_conditions or "").lower()
-    token = volatility.lower()
+    token = volatility.lower().strip()
+    if not token:
+        return 0.0
 
-    if token in best:
+    pattern = _re.compile(rf"(?<![a-z]){_re.escape(token)}(?![a-z])")
+    if pattern.search(best):
         return VOLATILITY_FIT_BONUS
-    if token in worst:
+    if pattern.search(worst):
         return -VOLATILITY_FIT_BONUS
     return 0.0
 

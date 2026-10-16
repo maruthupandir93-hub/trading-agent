@@ -153,13 +153,37 @@ class PortfolioAgent(BaseAgent):
         if event.event_type == "CONFIDENCE_CALIBRATED":
             from backend.models.events import ConfidenceCalibratedEvent, RiskEvaluatedEvent
             if isinstance(event, ConfidenceCalibratedEvent):
-                # We mock the intended side as LONG for this pipeline demonstration
-                result = evaluate_portfolio_risk(event.symbol, "LONG")
-                
+                # THE DIRECTION, NOT A HARDCODED LONG (F77). A correlation cap
+                # that assumes every position is long counts a hedging long and
+                # ignores a same-direction short, which is the wrong way round
+                # for both.
+                side = (getattr(event, "direction", None) or "LONG").upper()
+                if side not in ("LONG", "SHORT"):
+                    side = "LONG"
+                result = evaluate_portfolio_risk(event.symbol, side)
+
+                # RISK WAS INVERTED, AND THE GATE BELOW FAILS AT >= 0.8 (F77).
+                #
+                # `confidence * size_multiplier` is a measure of how GOOD the
+                # trade looks, not how risky it is — so:
+                #   * a portfolio VETO (size_multiplier 0) scored 0.0 and
+                #     PASSED, and
+                #   * a confident, approved trade (0.9) scored 0.9 and FAILED.
+                # Exactly backwards on both ends.
+                #
+                # Risk is the COMPLEMENT: a refused trade is maximal risk, and
+                # a trade the portfolio is happy to size fully is minimal. This
+                # path is dormant while GRAPH_EXECUTION_ENABLED is true, and it
+                # is fixed rather than left because turning that flag off is a
+                # supported configuration.
+                multiplier = float(result.get("size_multiplier", 1.0) or 0.0)
+                approved = bool(result.get("approved"))
+                risk_score = 1.0 if not approved else max(0.0, min(1.0, 1.0 - multiplier))
+
                 await self.publish(RiskEvaluatedEvent(
                     symbol=event.symbol,
-                    risk_score=event.calibrated_confidence * result.get("size_multiplier", 1.0),
-                    warnings=[result.get("reason", "")] if not result.get("approved") else []
+                    risk_score=risk_score,
+                    warnings=[result.get("reason", "")] if not approved else []
                 ))
 
 def get_portfolio_agent() -> PortfolioAgent:
