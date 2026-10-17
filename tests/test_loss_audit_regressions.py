@@ -222,7 +222,26 @@ async def test_demo_accounting_reads_fills_and_signed_funding_only(monkeypatch):
     assert len(calls) == 3 and all(call[0] == "GET" for call in calls)
 
 
-async def test_demo_microstructure_uses_futures_and_separate_cache(monkeypatch):
+async def test_microstructure_reads_the_real_market_whatever_the_mirror_does(monkeypatch):
+    """REPLACES `test_demo_microstructure_uses_futures_and_separate_cache` (F11).
+
+    That test asserted the opposite: that turning the paper mirror on moved the
+    order book and the tape to `demo-fapi.binance.com` too. It passed, and the
+    behaviour it pinned was wrong.
+
+    Moving the PRICE and the CANDLES to the demo venue is right -- fills happen
+    there, and marking a book against another market's price is not the book.
+    The ORDER BOOK is a different claim. Binance's demo book is thin and
+    largely synthetic; it is a fill simulator, not a market. The `orderflow`
+    and `liquidity` specialists reading it carry 3.0 of the debate's 7.0
+    weight, so the panel was voting on the microstructure of a market that does
+    not exist while the trade it was deciding would be sized against the real
+    one.
+
+    The separate-cache half of the old test went with it, and nothing is lost:
+    there is only one base now, so there is only one thing the cache key can
+    mean.
+    """
     from types import SimpleNamespace
     from backend.services import microstructure_feed as mf, binance_testnet as bt
     monkeypatch.setattr(mf, "_micro_cache", {})
@@ -231,12 +250,20 @@ async def test_demo_microstructure_uses_futures_and_separate_cache(monkeypatch):
         calls.append(url)
         return SimpleNamespace(ok=True, data={"bids": [[1, 2]], "asks": [[2, 2]]} if "depth?" in url else [])
     monkeypatch.setattr(mf, "fetch_json", fetch)
+
     monkeypatch.setattr(bt, "demo_data_active", lambda: False)
     await mf.fetch_microstructure("XRP/USDT")
+    assert len(calls) == 2
+
+    # The mirror goes on. The market being reasoned about must not change.
     monkeypatch.setattr(bt, "demo_data_active", lambda: True)
-    await mf.fetch_microstructure("XRP/USDT")
+    await mf.fetch_microstructure("XRP/USDT", force=True)
     assert len(calls) == 4
-    assert all(url.startswith(bt.BASE_URL + "/fapi/v1/") for url in calls[2:])
+    for url in calls:
+        assert url.startswith(mf.BINANCE_SPOT + "/api/v3/"), url
+        assert bt.BASE_URL not in url, url
+
+    # And the cache is still one cache, so a repeat inside the TTL is free.
     await mf.fetch_microstructure("XRP/USDT")
     assert len(calls) == 4
 

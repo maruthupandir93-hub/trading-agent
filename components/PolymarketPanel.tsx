@@ -68,18 +68,36 @@ type Snapshot = {
   eventRisk?: { concern: number; key: string; observation: string } | null;
 };
 
+type Mapping = {
+  symbol: string;
+  outcome: string;
+  title?: string | null;
+  role?: string | null;
+  marketType?: string | null;
+  directionalBasis?: string | null;
+  classificationReason?: string | null;
+  confirmed: boolean;
+  confirmedBy?: string | null;
+};
+
 type LoadState = 'loading' | 'ok' | 'unreachable';
 
 export function PolymarketPanel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [mappings, setMappings] = useState<Mapping[]>([]);
   const [state, setState] = useState<LoadState>('loading');
+  // Which mapping is mid-request, and the last failure. A confirm that silently
+  // did nothing is the failure mode this whole feature is about.
+  const [pending, setPending] = useState<string | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [s, snap] = await Promise.all([
+      const [s, snap, maps] = await Promise.all([
         fetch(backendProxyPath(BACKEND_PATHS.polymarket)),
         fetch(backendProxyPath(BACKEND_PATHS.polymarketSnapshots)),
+        fetch(backendProxyPath(BACKEND_PATHS.polymarketMappings)),
       ]);
       if (!s.ok || !snap.ok) {
         setState('unreachable');
@@ -87,6 +105,9 @@ export function PolymarketPanel() {
       }
       setStatus(await s.json());
       setSnapshots((await snap.json()).snapshots ?? []);
+      // The mappings list is additive: a failure to read it must not blank the
+      // gate checklist, which is the panel's primary job.
+      setMappings(maps.ok ? ((await maps.json()).mappings ?? []) : []);
       setState('ok');
     } catch {
       // The FastAPI backend is a separate process. Not running it is the normal
@@ -95,6 +116,37 @@ export function PolymarketPanel() {
       setState('unreachable');
     }
   }, []);
+
+  const setConfirmed = useCallback(
+    async (m: Mapping, confirmed: boolean) => {
+      const key = `${m.symbol}|${m.outcome}`;
+      setPending(key);
+      setConfirmError(null);
+      try {
+        const res = await fetch(backendProxyPath(BACKEND_PATHS.polymarketConfirm), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // Same-origin so the dashboard credential travels and the proxy
+          // attaches the backend key server-side. The browser never holds it.
+          credentials: 'same-origin',
+          body: JSON.stringify({ symbol: m.symbol, outcome: m.outcome, confirmed }),
+        });
+        if (!res.ok) {
+          const detail = await res.text();
+          setConfirmError(
+            `${confirmed ? 'Confirm' : 'Un-confirm'} failed (${res.status}): ${detail.slice(0, 200)}`,
+          );
+          return;
+        }
+        await load();
+      } catch (e) {
+        setConfirmError(`Could not reach the backend: ${(e as Error).message}`);
+      } finally {
+        setPending(null);
+      }
+    },
+    [load],
+  );
 
   useEffect(() => {
     load();
@@ -179,6 +231,53 @@ export function PolymarketPanel() {
           {snapshots.map((s) => (
             <SnapshotRow key={s.symbol} snapshot={s} />
           ))}
+        </div>
+      )}
+
+      {mappings.length > 0 && (
+        <div className="space-y-1.5 border-t border-line pt-2">
+          <div className="font-mono text-[10.5px] uppercase tracking-wide text-txt2">
+            Discovered markets
+          </div>
+          <p className="text-[10.5px] leading-relaxed text-txt2">
+            Discovery is automated; attribution is not. Confirm a market only if it is
+            genuinely about that instrument — a confirmed mapping becomes real evidence
+            with a real confidence attached to it.
+          </p>
+          {confirmError && <p className="text-[10.5px] text-red">{confirmError}</p>}
+          {mappings.map((m) => {
+            const key = `${m.symbol}|${m.outcome}`;
+            return (
+              <div key={key} className="flex items-start justify-between gap-2 text-[11px]">
+                <span className="min-w-0">
+                  <span className="font-mono text-[10.5px] text-txt2">{m.symbol}</span>{' '}
+                  <span className="break-words">{m.title ?? m.outcome}</span>
+                  <span className="text-txt2">
+                    {' '}
+                    — {m.role ?? 'unclassified'}
+                    {m.directionalBasis ? ` / ${m.directionalBasis}` : ''}
+                  </span>
+                  {m.classificationReason && (
+                    <span className="block text-[10.5px] text-txt2">
+                      {m.classificationReason}
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  disabled={pending === key}
+                  onClick={() => setConfirmed(m, !m.confirmed)}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide disabled:opacity-50 ${
+                    m.confirmed
+                      ? 'border-green text-green'
+                      : 'border-line text-txt2 hover:text-txt'
+                  }`}
+                >
+                  {pending === key ? '…' : m.confirmed ? 'confirmed' : 'confirm'}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

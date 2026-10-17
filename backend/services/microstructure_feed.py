@@ -167,10 +167,22 @@ async def fetch_microstructure(symbol: str, *, force: bool = False) -> Microstru
     duplicates.
     """
     slug = to_binance_slug(symbol)
-    from backend.services import binance_testnet
-    demo_market = binance_testnet.demo_data_active()
-    base = binance_testnet.BASE_URL if demo_market else BINANCE_SPOT
-    prefix = "/fapi/v1" if demo_market else "/api/v3"
+    # ALWAYS THE REAL MARKET, EVEN WHILE THE DEMO MIRROR IS ON (F11).
+    #
+    # `binance_testnet.demo_data_active()` legitimately moves the PRICE and the
+    # CANDLES to the demo venue: fills happen there, and marking a book against
+    # a different market's price is not the book. It used to move the DEPTH and
+    # the TAPE too, and that is a different claim. Binance's demo order book is
+    # thin and largely synthetic -- it is a fill simulator, not a market -- and
+    # the `orderflow` and `liquidity` specialists reading it carry 3.0 of the
+    # debate's 7.0 weight. The panel was therefore voting on the microstructure
+    # of a market that does not exist.
+    #
+    # A mirrored fill is a faithful execution test; a mirrored ORDER BOOK is not
+    # a faithful market. Keep the two separate: execute where the money is,
+    # reason about the market that is actually there.
+    base = BINANCE_SPOT
+    prefix = "/api/v3"
     cache_key = f"{base}:{slug}"
     if not slug.isalnum():
         return Microstructure(

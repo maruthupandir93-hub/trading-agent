@@ -327,12 +327,29 @@ class CROAgent(BaseAgent):
         # used to claim it had "Passed all VaR and correlation constraints"
         # while performing no correlation check whatsoever.
         # ---------------------------------------------------------------
+        # WHAT A STOP-OUT ACTUALLY COSTS, ON EVERY APPROVAL (F63).
+        #
+        # The VaR check already states the LIMIT. It never stated the loss this
+        # particular trade takes if the stop fires, and that is the number the
+        # operator is choosing when they set a VaR fraction, an allocation and a
+        # leverage. At a $3 book and 10x it was measured at 3-8% of equity per
+        # stop-out -- which is what makes the drawdown and daily-loss halts fire
+        # after a handful of ordinary losses -- and nothing said so until they
+        # did. This is arithmetic over numbers already in hand, so stating it
+        # invents nothing.
+        loss_pct = (implied_var / total_equity * 100.0) if total_equity > 0 else None
+        cost_note = (
+            f"A stop-out on this position costs about ${implied_var:.2f}"
+            + (f" ({loss_pct:.1f}% of equity)" if loss_pct is not None else "")
+            + ". "
+        )
         rationale = (
             f"Approved: leverage {tar.requested_leverage}x within {ceiling}x ceiling; "
             f"stop-loss {tar.stop_loss:.6g} verified on the correct side of entry {entry:.6g}; "
             f"implied VaR ${implied_var:.2f} ({move_basis}) within ${var_limit:.2f} "
             f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity). "
-            f"Correlation caps and the drawdown killswitch are not yet implemented and were NOT checked."
+            + cost_note
+            + f"Correlation caps and the drawdown killswitch are not yet implemented and were NOT checked."
         )
         logger.info(f"CRO APPROVED {tar.tar_id}")
 

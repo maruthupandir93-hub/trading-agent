@@ -163,6 +163,25 @@ async def consult_externally(state: TradingState) -> Optional[Dict[str, Any]]:
     from backend.llm.provider import build_consultation_panel
     from backend.services.ai_consultation import consult, should_consult
 
+    # NOTHING WAS DECIDED, SO THERE IS NOTHING TO SECOND-GUESS (F44).
+    #
+    # The router now convenes the panel on a cycle where we merely HOLD the
+    # instrument and found no entry setup. The specialists can genuinely split
+    # on direction there, which is this node's strongest trigger -- so without
+    # this guard a held position would buy a model call on every decision
+    # interval, spending the 40/min key budget on a run that cannot open or
+    # close anything.
+    if state.get("decision") is None:
+        return {
+            "consultation": {
+                "consulted": False,
+                "skipReason": (
+                    "no decision was produced this cycle, so there is no stated "
+                    "action for an outside view to agree or disagree with"
+                ),
+            }
+        }
+
     confidence = _internal_confidence(state)
     disagree = _directions_disagree(state)
 

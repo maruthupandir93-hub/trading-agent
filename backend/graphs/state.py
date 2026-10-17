@@ -955,12 +955,18 @@ class TradingState(TypedDict, total=False):
     llm_calls_made: int
     llm_tokens_used: int
 
+    # Do we already hold this instrument? Stamped ONCE by `start_run`, never
+    # read live by a node -- Section 39.4, the same reason `started_at` is
+    # stamped there. The Supervisor's EXIT branch is routed on it (F44).
+    holding_position: bool
+
 
 def new_state(
     run_id: str,
     symbol: str,
     trigger: TriggerReason,
     started_at: float,
+    holding_position: bool = False,
 ) -> TradingState:
     """A fresh state for one run.
 
@@ -1006,6 +1012,7 @@ def new_state(
         nodes_visited=[],
         llm_calls_made=0,
         llm_tokens_used=0,
+        holding_position=holding_position,
     )
 
 

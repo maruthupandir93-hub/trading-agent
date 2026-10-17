@@ -45,6 +45,12 @@ TRACE_DIR = os.path.join(_ROOT, ".data", "graph_traces")
 # unbounded trace directory on a 24/7 system is a disk-space incident.
 MAX_TRACE_FILES = 500
 
+# PER GRAPH, not in total (F12). The old single bound let
+# `position_monitoring` — which runs once per tick per open position — evict
+# every `trade_analysis` trace within minutes, leaving the one view that
+# explains a decision with a single row in it.
+MAX_TRACES_PER_GRAPH = 250
+
 
 @dataclass
 class NodeTrace:
@@ -106,7 +112,19 @@ def record_run(trace: RunTrace) -> None:
     """
     try:
         os.makedirs(TRACE_DIR, exist_ok=True)
-        path = os.path.join(TRACE_DIR, f"{int(trace.started_at * 1000)}_{trace.run_id}.json")
+        # THE GRAPH IS IN THE FILENAME, so trimming can keep a quota PER GRAPH
+        # (F12). `position_monitoring` runs once per tick per open position
+        # while `trade_analysis` runs once per decision, so a single global
+        # cap of 500 meant monitoring traces evicted the analysis ones almost
+        # immediately: `GET /api/graphs/runs?graph=trade_analysis&limit=200`
+        # returned ONE run. Combined with the decision table being flooded
+        # (F10), there was effectively no record of why the agent traded or
+        # did not.
+        graph_tag = _safe_tag(getattr(trace, "graph", "") or "graph")
+        path = os.path.join(
+            TRACE_DIR,
+            f"{int(trace.started_at * 1000)}_{graph_tag}_{trace.run_id}.json",
+        )
 
         # Atomic write — a crash mid-write otherwise leaves a truncated file
         # that breaks the reader on the next `list_recent_runs()`.
@@ -128,20 +146,43 @@ def record_run(trace: RunTrace) -> None:
         logger.error("Could not write graph trace for run %s: %s", trace.run_id, e)
 
 
+def _safe_tag(value: str) -> str:
+    """A filename-safe graph name."""
+    return "".join(c if c.isalnum() or c in "-" else "-" for c in str(value))[:40] or "graph"
+
+
 def _trim_old_traces() -> None:
+    """Keep a quota PER GRAPH, not one global pool (F12).
+
+    A single cap let the busiest graph starve every other one.
+    `position_monitoring` runs once per TICK PER OPEN POSITION and
+    `trade_analysis` once per decision, so the analysis traces — the ones that
+    answer "why did it trade?" — were evicted within minutes and the runs
+    endpoint returned a single row.
+
+    Files not matching the current naming scheme (written before the graph tag
+    existed) fall into one shared bucket and are trimmed together, so an
+    upgrade does not leave them unbounded.
+    """
     try:
-        files = sorted(
-            f for f in os.listdir(TRACE_DIR) if f.endswith(".json")
-        )
-        excess = len(files) - MAX_TRACE_FILES
-        for name in files[:excess] if excess > 0 else []:
+        files = sorted(f for f in os.listdir(TRACE_DIR) if f.endswith(".json"))
+    except Exception:
+        # Trimming is housekeeping. A failure here must not surface.
+        return
+
+    by_graph: Dict[str, List[str]] = {}
+    for name in files:
+        parts = name.split("_", 2)
+        tag = parts[1] if len(parts) == 3 else "_legacy"
+        by_graph.setdefault(tag, []).append(name)
+
+    for tag, names in by_graph.items():
+        excess = len(names) - MAX_TRACES_PER_GRAPH
+        for name in (names[:excess] if excess > 0 else []):
             try:
                 os.unlink(os.path.join(TRACE_DIR, name))
             except OSError:
                 pass
-    except Exception:
-        # Trimming is housekeeping. A failure here must not surface.
-        pass
 
 
 def list_recent_runs(limit: int = 50) -> List[Dict[str, Any]]:

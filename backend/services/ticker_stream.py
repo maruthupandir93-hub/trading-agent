@@ -60,6 +60,15 @@ BINANCE_STREAM_URL = "wss://stream.binance.com:9443/stream"
 # watchlist would be streamed forever because nothing ever says "stop".
 SUBSCRIPTION_TTL_S = 300.0
 
+# HOW LONG TO WAIT FOR A BURST OF SUBSCRIPTION CHANGES TO STOP (F14).
+#
+# A watchlist mounts as several single-symbol requests a few hundred
+# milliseconds apart. Reconnecting on each one cost a connect per symbol and a
+# gap in every other symbol's ticks. 0.75s covers a page load; the 5s cap stops
+# a steady trickle of additions pinning the socket on a stale set forever.
+SUBSCRIBE_SETTLE_S = 0.75
+SUBSCRIBE_SETTLE_MAX_S = 5.0
+
 # A tick older than this is reported as stale rather than returned as current.
 # It is deliberately much larger than the poll interval — a quiet symbol
 # genuinely does not tick often, and calling that "stale" would be wrong.
@@ -298,6 +307,24 @@ class TickerStream:
             else:
                 self._connected = False
 
+
+    async def _settle_subscriptions(self, resubscribe: "asyncio.Event") -> None:
+        """Wait for a burst of subscription changes to stop arriving (F14).
+
+        Returns as soon as `SUBSCRIBE_SETTLE_S` passes with no further change,
+        and never waits longer than `SUBSCRIBE_SETTLE_MAX_S` in total -- an
+        unbounded wait would let a symbol being added every few hundred
+        milliseconds keep the socket on the OLD set forever, which is the same
+        bug in the other direction.
+        """
+        deadline = time.monotonic() + SUBSCRIBE_SETTLE_MAX_S
+        while self._running and time.monotonic() < deadline:
+            resubscribe.clear()
+            try:
+                await asyncio.wait_for(resubscribe.wait(), timeout=SUBSCRIBE_SETTLE_S)
+            except asyncio.TimeoutError:
+                return
+
     async def _consume(self, ws: Any, subscribed: Set[str]) -> None:
         """Read frames until the wanted set changes, then return to resubscribe."""
         resubscribe = self._resubscribe
@@ -320,7 +347,24 @@ class TickerStream:
 
             if resub_task in done:
                 if set(self._wanted) != subscribed:
-                    logger.info("Ticker subscription set changed; reconnecting.")
+                    # SETTLE FIRST (F14). A watchlist mounts as a burst of
+                    # single-symbol requests, and reconnecting on the first one
+                    # means reconnecting on every one -- seventeen connects were
+                    # measured for a handful of symbols, each one a gap in the
+                    # ticks of every symbol already being streamed.
+                    #
+                    # Bounded, and short: the window is a sub-second pause in
+                    # reading frames, against a reconnect that costs more than
+                    # that on every symbol. Re-checked after waiting, because
+                    # the burst may have removed what it added.
+                    await self._settle_subscriptions(resubscribe)
+                    if set(self._wanted) == subscribed:
+                        resubscribe.clear()
+                        continue
+                    logger.info(
+                        "Ticker subscription set changed (%d -> %d symbols); reconnecting.",
+                        len(subscribed), len(self._wanted),
+                    )
                     return
                 resubscribe.clear()
                 continue

@@ -176,10 +176,15 @@ def supervise(state: TradingState) -> Optional[Dict[str, Any]]:
     thesis = state.get("trade_thesis")
     verdict = state.get("debate_verdict")
 
-    if thesis is None:
-        # Unreachable through the analysis graph, whose router does not convene the
-        # panel without a thesis. Handled anyway so the node is safe to call
-        # directly and in any future graph that routes differently.
+    # NO FRESH ENTRY THESIS IS NOT THE END OF THE RUN ANY MORE (F44).
+    #
+    # The router now also convenes the panel when we HOLD this instrument, so
+    # that "the panel argues against the position I am in" can be reached on a
+    # cycle that found no new setup -- which is most cycles. There is nothing to
+    # ENTER on such a run, and nothing below tries to: the only branch that can
+    # fire is the EXIT one, and every other path returns the same no-thesis
+    # answer this node has always returned.
+    if thesis is None and not state.get("holding_position"):
         return {"unavailable": ["supervisor decision (no thesis to decide on)"]}
 
     unavailable: List[str] = []
@@ -206,6 +211,18 @@ def supervise(state: TradingState) -> Optional[Dict[str, Any]]:
             ),
         )
         return _emit(state, decision, unavailable)
+
+    if thesis is None:
+        # Held, and the panel did NOT contradict the position. There is nothing
+        # to enter and nothing to exit, and saying which is the useful answer --
+        # "no thesis" alone would read as the run having failed.
+        return {
+            "unavailable": [
+                "supervisor decision (no entry setup this cycle; the panel does "
+                "not contradict the open position, which stays protected by its "
+                "stop and target)"
+            ]
+        }
 
     # ---- 2. Invariant 3: no position without a computed stop. ---------------
     #
@@ -571,8 +588,25 @@ def _answer_the_ten(
     what_could_happen_next = _scenarios(thesis)
 
     # 5 + 6. Evidence, already gathered deterministically by the thesis and panel.
-    evidence_for = list(thesis.supporting_evidence)
-    evidence_against = list(thesis.contradicting_evidence)
+    # `thesis` is None on an F44 position-review run; the panel own evidence is
+    # still real and is the whole basis for an EXIT, so it is kept.
+    evidence_for = list(thesis.supporting_evidence) if thesis is not None else []
+    evidence_against = list(thesis.contradicting_evidence) if thesis is not None else []
+    if thesis is None:
+        # AND THE ABSENCE IS STATED, not left as an empty list.
+        #
+        # `_assert_all_ten_answered` treats an empty evidence list as an
+        # unanswered question and RAISES -- correctly, for an entry, where empty
+        # evidence means the thesis was never built. On a review run the lists
+        # are legitimately empty of SETUP evidence, and a panel that happens to
+        # file nothing on one side would otherwise crash the node on the exact
+        # path F44 exists to open. Say what is true instead.
+        note = (
+            "no entry setup was produced this cycle, so there is no setup "
+            "evidence; this run reviews the open position against the panel alone"
+        )
+        evidence_for.append(note)
+        evidence_against.append(note)
     if verdict is not None:
         evidence_for += [f"panel: {s}" for s in verdict.supporting]
         evidence_against += [f"panel: {c}" for c in verdict.contradicting]
@@ -667,6 +701,12 @@ def _scenarios(thesis: Any) -> str:
     the stop and target are the levels at which this specific trade resolves, and
     they are computed, not guessed.
     """
+    if thesis is None:
+        return (
+            "no entry setup was produced this cycle, so there is no new trade to "
+            "bound. An open position resolves at the stop and target it was "
+            "opened with, which the position monitor enforces"
+        )
     if thesis.entry_price is None or thesis.stop_loss is None or thesis.take_profit is None:
         return (
             "cannot be bounded: entry, stop or target is missing, so the outcomes "
@@ -689,6 +729,12 @@ def _scenarios(thesis: Any) -> str:
 
 
 def _downside(thesis: Any, technical: Any) -> str:
+    if thesis is None:
+        return (
+            "not applicable to a new trade: no entry setup was produced this "
+            "cycle. The downside on the OPEN position is its own stop, which was "
+            "computed when it was opened"
+        )
     if thesis.entry_price is None or thesis.stop_loss is None:
         return (
             "UNBOUNDED as specified: no stop level is available, which is itself "
@@ -737,10 +783,15 @@ def _portfolio_impact(state: TradingState, thesis: Any) -> str:
     else:
         parts.append("equity could not be computed")
 
-    if same:
+    if same and thesis is not None:
         parts.append(
             f"{len(same)} of them already in {base}, so a {thesis.direction} entry "
             f"here concentrates rather than diversifies"
+        )
+    elif same:
+        parts.append(
+            f"{len(same)} of them already in {base}; this cycle produced no entry "
+            f"setup, so the question is whether that exposure is still right"
         )
     else:
         parts.append(f"none in {base}, so this would be a new exposure")

@@ -307,3 +307,44 @@ def test_reconciliation_asks_the_same_question(monkeypatch):
     assert "venue_backed_book_exists()" in src, (
         "reconciliation must observe a mirrored book too, or F1 is invisible again"
     )
+
+
+# --------------------------------------------------------------------------
+# F11: the panel must reason about the REAL order book, not the demo one.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_microstructure_reads_mainnet_even_while_the_demo_mirror_is_on(monkeypatch):
+    """The depth and tape fetch must not follow `demo_data_active()`.
+
+    Prices and candles SHOULD follow it -- fills happen at the demo venue. The
+    order book must not: Binance's demo book is thin and synthetic, and the
+    orderflow + liquidity specialists reading it carry 3.0 of the debate's 7.0
+    weight. Before this, turning the paper mirror on silently swapped the
+    market those two voted about.
+    """
+    from backend.services import binance_testnet, microstructure_feed
+
+    monkeypatch.setattr(binance_testnet, "demo_data_active", lambda: True)
+    microstructure_feed._micro_cache.clear()
+
+    urls: list[str] = []
+
+    async def _fake_fetch_json(url, *, label=""):
+        urls.append(url)
+        from backend.services.upstream import UpstreamResult
+        if "depth" in url:
+            return UpstreamResult(data={"bids": [["100", "1"]], "asks": [["101", "1"]]})
+        return UpstreamResult(data=[])
+
+    monkeypatch.setattr(microstructure_feed, "fetch_json", _fake_fetch_json)
+
+    await microstructure_feed.fetch_microstructure("SOL/USDT", force=True)
+
+    assert urls, "no upstream call was made"
+    for url in urls:
+        assert url.startswith(microstructure_feed.BINANCE_SPOT), url
+        assert binance_testnet.BASE_URL not in url, (
+            f"microstructure fetched from the demo venue: {url}"
+        )

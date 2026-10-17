@@ -338,6 +338,28 @@ def wrap_node(
 # Run construction
 # ---------------------------------------------------------------------------
 
+
+def _holding(symbol: str) -> bool:
+    """Does the position monitor hold this instrument right now?
+
+    An in-memory read of the monitor singleton -- no I/O, no await. Used only
+    to decide whether the Supervisor's EXIT branch is worth convening the panel
+    for; it never gates an entry, so a False answer costs nothing a trade
+    depends on.
+    """
+    try:
+        from backend.agents.position_monitor import get_position_monitor
+
+        base = str(symbol or "").split("/")[0].split(":")[0].upper()
+        for pos in get_position_monitor().snapshot_open():
+            held = pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", "")
+            if str(held or "").split("/")[0].split(":")[0].upper() == base:
+                return True
+    except Exception:  # pragma: no cover - routing hint only, never fatal
+        return False
+    return False
+
+
 def start_run(
     graph: str,
     symbol: str,
@@ -356,7 +378,20 @@ def start_run(
     started_at = time.time()
     thread_id = thread_id_for(graph, thread_scope)
 
-    state = new_state(run_id=run_id, symbol=symbol, trigger=trigger, started_at=started_at)
+    state = new_state(
+        run_id=run_id,
+        symbol=symbol,
+        trigger=trigger,
+        started_at=started_at,
+        # STAMPED HERE, ONCE, for the same reason `started_at` is (F44). A node
+        # asking the live monitor would get a different answer on replay, and
+        # "were we holding when this ran?" is exactly the kind of question a
+        # replayed trace must answer the same way twice.
+        #
+        # Never raises: this is a convenience for routing, and a run that cannot
+        # tell simply behaves as it did before -- entry-only.
+        holding_position=_holding(symbol),
+    )
 
     trace = RunTrace(
         run_id=run_id,

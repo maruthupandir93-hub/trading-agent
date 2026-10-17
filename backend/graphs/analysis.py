@@ -126,14 +126,28 @@ def _ensure_nodes() -> None:
 # ---------------------------------------------------------------------------
 
 def _after_opportunity(state: TradingState) -> str:
-    """Convene the panel only when there is a thesis to test.
+    """Convene the panel when there is a thesis to test -- OR a position to review.
 
     Replaces Phase 25's router of the same name, which routed to the narrative.
     Seven nodes and a portfolio read is real work; spending it on a run that
     produced nothing to analyse would be spending it on every run, since most
     runs produce nothing.
+
+    THE SECOND CLAUSE IS F44. This system claims two exit reasons: the stop or
+    target (enforced on every tick by `position_monitor`, authoritative) and
+    "the panel now argues against the position I am holding" (the Supervisor's
+    EXIT branch). The second could only ever run on a cycle that had ALSO found
+    a fresh entry setup -- and the measured live behaviour is that most cycles
+    find none, so the branch was close to unreachable.
+
+    Holding the instrument is the one case where a run with no setup is still
+    worth the panel: the question is no longer "should I enter?" but "is what I
+    am already in still right?". `holding_position` is stamped once by
+    `start_run`, so this stays a pure function of the state.
     """
-    return "analyse" if state.get("trade_thesis") is not None else "no_opportunity"
+    if state.get("trade_thesis") is not None:
+        return "analyse"
+    return "analyse" if state.get("holding_position") else "no_opportunity"
 
 
 def analysis_config() -> GraphConfig:
