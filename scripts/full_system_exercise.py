@@ -661,6 +661,445 @@ async def scenario_session_refusals(c: Check) -> None:
              f"{stub.asked[0] * stub.asked[1]:.3f}")
 
 
+async def _seed_price(symbol: str) -> Optional[float]:
+    """Put a REAL current price into the dashboard tick cache.
+
+    Fetched from public Binance, which CLAUDE.md records as reachable from
+    this machine. Never fabricated: a made-up price would make every number
+    downstream fiction, which is invariant 6.
+    """
+    import time as _time
+
+    from backend.services import ticker_stream as tsm
+    from backend.services.upstream import fetch_json
+
+    slug = symbol.split(":")[0].replace("/", "").upper()
+    res = await fetch_json(
+        f"https://api.binance.com/api/v3/ticker/price?symbol={slug}",
+        label="harness price seed",
+    )
+    if not res.ok:
+        return None
+    try:
+        price = float((res.data or {}).get("price"))
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+
+    stream = tsm.get_ticker_stream()
+    stream._ticks[slug.lower()] = tsm._Tick(
+        price=price, prev_close=price, ts=_time.time()
+    )
+    return price
+
+
+# ---------------------------------------------------------------------------
+# 12. Every backend module imports
+# ---------------------------------------------------------------------------
+
+async def scenario_every_module_imports(c: Check) -> None:
+    """A NameError does not exist until its line runs.
+
+    This project has hit that class three times -- `supervisor_agent`'s sizing
+    dict, `risk_gateway`'s counter-trend branch, and the CRO's approval path --
+    and each time the cost was finding the line, not reading the message. An
+    import sweep cannot reach a branch, but it does catch the whole family of
+    module-level mistakes (a bad import, a typo in a constant, an annotation
+    referring to a name that was never imported -- the `Optional[List[str]]`
+    ForwardRef that would have 500'd the session route on its first request).
+    """
+    import importlib
+    import pkgutil
+
+    import backend
+
+    failed = []
+    count = 0
+    for mod in pkgutil.walk_packages(backend.__path__, prefix="backend."):
+        name = mod.name
+        if "__pycache__" in name:
+            continue
+        try:
+            importlib.import_module(name)
+            count += 1
+        except Exception as exc:  # noqa: BLE001
+            failed.append(f"{name}: {type(exc).__name__}: {exc}")
+
+    c.note(f"{count} modules imported")
+    c.ok(not failed, "every backend module must import: " + "; ".join(failed[:5]))
+
+
+# ---------------------------------------------------------------------------
+# 13. Every agent is constructible and declares itself
+# ---------------------------------------------------------------------------
+
+async def scenario_every_agent_declares_itself(c: Check) -> None:
+    """Section 3's agent contract, asserted against the real classes.
+
+    Every agent in this system declares `name`, `purpose`, `permissions`,
+    `events_consumed`, `events_published` and `failure_recovery_strategy`.
+    Those are not decoration: `/api/agents` renders them, and an agent whose
+    `events_consumed` disagrees with what `main.py` subscribes it to is an
+    agent nobody can tell is disconnected.
+    """
+    import importlib
+    import inspect
+    import pkgutil
+
+    import backend.agents
+    from backend.core.agent_base import BaseAgent
+
+    # SPLIT ON PURPOSE. An agent that publishes nothing is legitimate -- the
+    # CIO and CEO read and advise, the Hypothesis agent writes a record -- and
+    # asserting otherwise would be a harness inventing a requirement the system
+    # does not have. What is NOT legitimate is an agent with no name, no stated
+    # purpose, no permissions or no recovery strategy: `/api/agents` renders
+    # those, and an unnamed agent is one nobody can tell is disconnected.
+    identity = ("name", "purpose", "permissions", "failure_recovery_strategy")
+    event_lists = ("events_consumed", "events_published")
+
+    seen = []
+    problems = []
+    for mod in pkgutil.iter_modules(backend.agents.__path__, prefix="backend.agents."):
+        module = importlib.import_module(mod.name)
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(obj, BaseAgent) or obj is BaseAgent:
+                continue
+            if obj.__module__ != mod.name:
+                continue   # re-export, already covered where it is defined
+            try:
+                agent = obj()
+            except TypeError:
+                # Agents that require wiring are constructed by the singletons
+                # the other scenarios already drive; skipping is honest here
+                # rather than inventing a constructor argument.
+                c.note(f"{obj.__name__} needs wiring; covered by its own scenario")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{obj.__name__} could not be built: {exc}")
+                continue
+            seen.append(obj.__name__)
+            for field in identity:
+                value = getattr(agent, field, None)
+                if value is None or (isinstance(value, (list, str)) and not value):
+                    problems.append(f"{obj.__name__}.{field} is empty")
+            silent = []
+            for field in event_lists:
+                value = getattr(agent, field, None)
+                if not isinstance(value, list):
+                    problems.append(f"{obj.__name__}.{field} is not a list")
+                elif not value:
+                    silent.append(field)
+            if silent:
+                c.note(f"{obj.__name__} declares no {' and no '.join(silent)}")
+
+    c.note(f"{len(seen)} agents: {', '.join(sorted(seen))}")
+    c.ok(len(seen) >= 8, f"expected the full agent roster, found {len(seen)}")
+    c.ok(not problems, "every agent must declare its contract: " + "; ".join(problems[:5]))
+
+
+# ---------------------------------------------------------------------------
+# 14. The AUTOMATIC chain, from a graph decision to a watched position
+# ---------------------------------------------------------------------------
+
+async def scenario_automatic_trade_chain(c: Check) -> None:
+    """execution_service -> TAR -> CRO -> ExecutionAgent -> book + watch list.
+
+    This is the plane invariant 1 describes, driven end to end with the REAL
+    `ExecutionService` and the REAL `CROAgent` rather than a hand-published
+    approval. Scenarios 2-6 start at TAR_APPROVED and therefore skip exactly
+    the two hops where this project has lost a trade silently: Pydantic
+    dropping an undeclared field on `TarApprovedEvent`, and the CRO raising a
+    NameError that the bus then swallowed without a traceback.
+    """
+    from backend.agents.cro_agent import CROAgent
+    from backend.models.events import ExecutionPlanReadyEvent
+    from backend.services import execution_service as es
+
+    executor, monitor = await fresh()
+    bus = get_message_bus()
+
+    # THE PRODUCTION WIRING FUNCTION, not a hand-made subscription. `main.py`
+    # calls `subscribe_to_plans(executor)`; a harness that subscribed the
+    # service itself would be testing its own wiring rather than the system's,
+    # which is how the inline-delivery bug stayed invisible for so long.
+    es.reset_for_tests()
+    es.subscribe_to_plans(executor)
+
+    cro = CROAgent()
+    bus.subscribe("TAR_SUBMITTED", cro.handle_event)
+
+    approvals: List[Any] = []
+    rejections: List[Any] = []
+    bus.subscribe("TAR_APPROVED", lambda e: approvals.append(e))
+    bus.subscribe("TAR_REJECTED", lambda e: rejections.append(e))
+
+    symbol, entry = "SOL/USDT", 100.0
+    await tick(symbol, entry)
+
+    # The plan the Risk Gateway produces: a size the VaR policy can carry, a
+    # stop on the correct side, a 2:1 target.
+    plan = ExecutionPlanReadyEvent(
+        run_id=uuid.uuid4().hex,
+        symbol=symbol,
+        intent="open",
+        side="buy",
+        idempotency_basis=f"harness-{uuid.uuid4().hex}",
+        size=1.0,
+        entry_price=entry,
+        stop_loss=97.5,
+        take_profit=105.0,
+        leverage=3,
+        tab="paper",
+        strategy="Breakout",
+        rationale="harness: the panel agreed at 0.42",
+        entry_context="RSI 58 | ATR 1.1% | structure bullish | regime Bull Trend",
+    )
+    await bus.publish(plan.event_type, plan)
+    await asyncio.sleep(0.2)
+
+    if rejections:
+        c.note(f"CRO rejected: {getattr(rejections[0], 'reason', rejections[0])}")
+    c.ok(approvals, "the CRO must approve a plan inside every limit")
+
+    if approvals:
+        approved = approvals[0]
+        # THE ATTRIBUTION FIELDS. `TarApprovedEvent` once did not DECLARE them,
+        # so Pydantic silently dropped what the CRO passed and the learning loop
+        # was structurally incapable of producing a number.
+        c.ok(getattr(approved, "strategy", None) == "Breakout",
+             "the approval must carry the strategy that chose the trade")
+        c.ok(getattr(approved, "run_id", None) == plan.run_id,
+             "the approval must carry the run that produced it")
+        c.ok(getattr(approved, "entry_context", None),
+             "the approval must carry the entry-context snapshot")
+        c.ok(approved.direction == "LONG",
+             f"direction must be the LONG literal, got {approved.direction!r}")
+
+    row = await position(symbol)
+    c.ok(row is not None, "the automatic chain must reach the paper book")
+    if row:
+        c.ok(row.get("side") == "buy", f"side must be recorded, got {row.get('side')!r}")
+
+    watched = monitor.snapshot_open()
+    c.ok(len(watched) == 1,
+         f"the fill must enter the stop-loss watch list, found {len(watched)}")
+    if watched:
+        c.ok(abs(float(watched[0]["stopLoss"]) - 97.5) < 1e-9,
+             "the watched stop must be the one risk approved, not a re-derived one")
+
+
+# ---------------------------------------------------------------------------
+# 15. The MANUAL chain
+# ---------------------------------------------------------------------------
+
+async def scenario_manual_trade_chain(c: Check) -> None:
+    """The operator's own click: book + watch list, and NOTHING else fires.
+
+    Registration goes through `track_manual_position`, never through
+    synthesised TAR_APPROVED / ORDER_FILLED events. Publishing those makes the
+    AGENT's executor place a second order, its fill consumes the pending entry,
+    and the hand-published one is logged as an UNPROTECTED POSITION -- a false
+    alarm on every manual trade. A TAR also means "the CRO approved this", and
+    minting one for a human's click puts a fabricated approval in the audit
+    trail.
+    """
+    executor, monitor = await fresh()
+    bus = get_message_bus()
+
+    tars: List[Any] = []
+    fills: List[Any] = []
+    bus.subscribe("TAR_APPROVED", lambda e: tars.append(e))
+    bus.subscribe("ORDER_FILLED", lambda e: fills.append(e))
+
+    symbol, entry = "SOL/USDT", 120.0
+    await tick(symbol, entry)
+
+    before = len(fills)
+
+    # THE ROUTE'S OWN ORDER: settle the book FIRST, then register with the
+    # watcher. `api/operator_trade` does exactly this, and the order matters --
+    # registering a position the book does not hold leaves the monitor trying
+    # to close something `apply_paper_fill` will refuse to reduce, which is
+    # precisely the "the book and the monitor disagree" state this system
+    # refuses to paper over by opening a reversed position.
+    funded = await portfolio_store.buy_paper(symbol, 2.0, entry, 5)
+    c.ok(funded, "the operator's paper buy must settle the book")
+
+    await monitor.track_manual_position(
+        symbol=symbol, side="buy", qty=2.0, entry_price=entry,
+        stop_loss=117.0, take_profit=126.0, tab="paper",
+    )
+    await asyncio.sleep(0.05)
+
+    row = await position(symbol)
+    c.ok(row is not None, "the manual trade must be on the paper book")
+
+    watched = monitor.snapshot_open()
+    c.ok(len(watched) == 1,
+         f"a manual position must be watched, found {len(watched)}")
+    c.ok(not tars,
+         "a human's click must NOT mint a TAR -- that would put a fabricated "
+         "CRO approval in the audit trail")
+    c.ok(len(fills) == before,
+         "a manual position must NOT publish ORDER_FILLED -- the agent's "
+         "executor would place a second, real order")
+
+    # And it is a real position to the monitor: its stop fires like any other.
+    await tick(symbol, 116.5)
+    await asyncio.sleep(0.1)
+    c.ok(not monitor.snapshot_open(),
+         "a manual position's stop must fire exactly like an agent position's")
+    c.ok(await position(symbol) is None,
+         "and the close must settle the book, not just stop watching it")
+    cash = float((await book()).get("cash") or 0.0)
+    c.note(f"cash after the manual round trip: {cash:.2f}")
+    c.ok(cash < 10_000.0,
+         f"a stop-out must leave less cash than it started with, got {cash:.2f}")
+
+
+# ---------------------------------------------------------------------------
+# 16. The F44 position-review EXIT, through the real nodes
+# ---------------------------------------------------------------------------
+
+async def scenario_position_review_exit(c: Check) -> None:
+    """A cycle with NO entry setup must still be able to exit what we hold."""
+    from backend.graphs.analysis import _after_opportunity
+    from backend.graphs.nodes.supervisor import ACTION_EXIT, supervise
+    from backend.graphs.state import (
+        DebateVerdict, PortfolioStateSnapshot, TriggerReason, new_state,
+    )
+
+    def build(holding):
+        st = new_state(run_id="x", symbol="SOL/USDT",
+                       trigger=TriggerReason(kind="t", symbol="SOL/USDT", detail="d"),
+                       started_at=0.0, holding_position=holding)
+        st["trade_thesis"] = None
+        st["debate_verdict"] = DebateVerdict(
+            direction="SHORT", confidence=0.88, directional_confidence=0.88,
+            participants=["market"], supporting=["momentum rolled over"], coverage=1.0,
+        )
+        st["portfolio_state"] = PortfolioStateSnapshot(
+            tab="paper", equity=10_000.0, cash=9_000.0,
+            open_positions=[{"symbol": "SOL/USDT", "qty": 5.0, "side": "buy"}],
+        )
+        return st
+
+    c.ok(_after_opportunity(build(False)) == "no_opportunity",
+         "a quiet cycle with nothing held must still skip the panel")
+    c.ok(_after_opportunity(build(True)) == "analyse",
+         "holding the instrument must convene the panel")
+
+    out = supervise(build(True))
+    c.ok(out is not None and "decision" in out,
+         "a confident opposing panel must reach a decision with no fresh thesis")
+    if out and "decision" in out:
+        c.ok(out["decision"].action == ACTION_EXIT,
+             f"expected EXIT, got {out['decision'].action}")
+
+
+# ---------------------------------------------------------------------------
+# 17. The whole analysis graph, on real mainnet candles
+# ---------------------------------------------------------------------------
+
+async def scenario_full_graph_on_real_data(c: Check) -> None:
+    """Every node, real upstream data, no order.
+
+    NEEDS NETWORK, and says so rather than failing silently: public Binance is
+    reachable from this machine (CLAUDE.md records the months this project lost
+    to assuming otherwise), but a run behind a firewall must read as skipped,
+    not as a broken graph.
+    """
+    from backend.graphs.analysis import run_analysis_graph
+    from backend.graphs.state import TriggerReason
+
+    # A PRICE HAS TO EXIST OR THE RUN ENDS AT NODE 2.
+    #
+    # `get_price` reads three caches -- the agent socket, the dashboard socket
+    # and the polled ccxt cache -- and none of those services runs in a
+    # harness, so `data_validation` correctly aborts with "no live price".
+    # That is the right refusal and not what this scenario is testing, so the
+    # price is seeded into the DASHBOARD cache the same way a real tick would
+    # land there. It is a real price: fetched from public Binance just above.
+    seeded = await _seed_price("SOL/USDT")
+    if seeded is None:
+        c.note("SKIPPED: could not fetch a real price (no network)")
+        return
+    c.note(f"seeded live price {seeded:.4f} from public Binance")
+
+    try:
+        result = await asyncio.wait_for(
+            run_analysis_graph(
+                symbol="SOL/USDT",
+                trigger=TriggerReason(kind="harness", symbol="SOL/USDT",
+                                      detail="full-system exercise"),
+            ),
+            timeout=180.0,
+        )
+    except asyncio.TimeoutError:
+        c.note("SKIPPED: the graph did not finish in 180s (upstream or model slow)")
+        return
+    except Exception as exc:  # noqa: BLE001
+        c.failures.append(f"the analysis graph raised {type(exc).__name__}: {exc}")
+        return
+
+    visited = result.get("nodesVisited") or result.get("nodes_visited") or []
+    c.note(f"{len(visited)} nodes visited")
+    c.ok(visited, "the graph must record which nodes ran")
+
+    errors = result.get("errors") or []
+    c.ok(not errors, f"no node may error: {errors[:3]}")
+
+    # The run either produced a decision or said why it did not. An empty
+    # answer to "why did this not trade?" is the failure `summarise_analysis`
+    # was carrying before `unavailable` was threaded through it.
+    decision = result.get("decision")
+    reasons = result.get("unavailable") or []
+    c.ok(decision is not None or reasons,
+         "a run with no decision must record a reason")
+    if decision is None and reasons:
+        c.note(f"no trade: {reasons[-1]}")
+    elif decision is not None:
+        c.note(f"decision: {getattr(decision, 'action', decision)}")
+
+
+# ---------------------------------------------------------------------------
+# 18. The microstructure source
+# ---------------------------------------------------------------------------
+
+async def scenario_microstructure_source(c: Check) -> None:
+    """The panel must reason about the real book even while the mirror is on."""
+    from backend.services import binance_testnet, microstructure_feed
+
+    urls: List[str] = []
+    original_fetch = microstructure_feed.fetch_json
+
+    async def spy(url, *, label=""):
+        urls.append(url)
+        return await original_fetch(url, label=label)
+
+    original_active = binance_testnet.demo_data_active
+    binance_testnet.demo_data_active = lambda: True
+    microstructure_feed.fetch_json = spy
+    microstructure_feed._micro_cache.clear()
+    try:
+        micro = await microstructure_feed.fetch_microstructure("SOL/USDT", force=True)
+    finally:
+        microstructure_feed.fetch_json = original_fetch
+        binance_testnet.demo_data_active = original_active
+
+    c.ok(urls, "the microstructure fetch must have been attempted")
+    for url in urls:
+        c.ok(url.startswith(microstructure_feed.BINANCE_SPOT),
+             f"depth/tape must come from the real market, got {url}")
+    if micro.available:
+        c.note(f"book: {len(micro.bids)} bids / {len(micro.asks)} asks, "
+               f"{len(micro.trades)} trades")
+    else:
+        c.note(f"book unavailable (network): {micro.reason}")
+
+
 SCENARIOS: List[Tuple[str, Callable]] = [
     ("1  bus delivery order", scenario_bus_ordering),
     ("2  long open", scenario_long_open),
@@ -673,6 +1112,13 @@ SCENARIOS: List[Tuple[str, Callable]] = [
     ("9  unfundable open", scenario_unfundable_open),
     ("10 learning ledger", scenario_learning_ledger),
     ("11 session refusals", scenario_session_refusals),
+    ("12 every module imports", scenario_every_module_imports),
+    ("13 every agent declares itself", scenario_every_agent_declares_itself),
+    ("14 AUTOMATIC trade chain", scenario_automatic_trade_chain),
+    ("15 MANUAL trade chain", scenario_manual_trade_chain),
+    ("16 position-review exit", scenario_position_review_exit),
+    ("17 full graph on real data", scenario_full_graph_on_real_data),
+    ("18 microstructure source", scenario_microstructure_source),
 ]
 
 
