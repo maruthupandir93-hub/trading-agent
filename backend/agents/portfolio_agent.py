@@ -10,12 +10,31 @@ logger = logging.getLogger(__name__)
 MAX_OPEN_POSITIONS = 3
 MAX_DIRECTIONAL_EXPOSURE = 2
 
+
+def _as_book_side(value: str) -> str:
+    """`LONG`/`SHORT`/`buy`/`sell` -> `buy`/`sell`.
+
+    The book, the events and the graph use three spellings between them. This
+    is the single translation point for this module; anything unrecognised
+    falls to "buy", which is what the book's own default does.
+    """
+    token = str(value or "").strip().lower()
+    if token in ("sell", "short"):
+        return "sell"
+    return "buy"
+
+
 def evaluate_portfolio_risk(symbol: str, intended_side: str) -> Dict[str, Any]:
     """
     Level 13: Portfolio Intelligence
     Evaluates the macro risk of the entire portfolio before approving a new trade.
     """
-    intended_side = intended_side.lower()
+    # ONE VOCABULARY (F83). Positions store `buy`/`sell`; callers pass
+    # `LONG`/`SHORT`. Comparing them directly meant the directional count NEVER
+    # matched — so a same-direction short was not counted against the
+    # correlation cap, while a hedging long could be. Both are normalised to
+    # the book's own spelling before anything is compared.
+    intended_side = _as_book_side(intended_side)
     
     active_positions = []
     
@@ -24,7 +43,7 @@ def evaluate_portfolio_risk(symbol: str, intended_side: str) -> Dict[str, Any]:
         if task.get("status") == "running" and task.get("currentEntryPrice"):
             active_positions.append({
                 "symbol": task.get("symbol"),
-                "side": task.get("side", "buy").lower(),
+                "side": _as_book_side(task.get("side", "buy")),
                 "qty": task.get("currentQty")
             })
             

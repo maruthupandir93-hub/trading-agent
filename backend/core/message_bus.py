@@ -250,6 +250,29 @@ class MessageBus:
                     await callback(payload)
                 else:
                     callback(payload)
+            except asyncio.CancelledError:
+                # A CANCELLED SUBSCRIBER MUST NOT TAKE THE REST OF THE CHAIN
+                # WITH IT (F64).
+                #
+                # `CancelledError` derives from BaseException, so the handler
+                # below never saw it, and the exception propagated out of
+                # `publish` — abandoning every subscriber queued behind this
+                # one. `live_market_data._reconcile` cancels a symbol's watcher
+                # while its tick chain is still being delivered, so ROTATING
+                # AWAY FROM A COIN dropped that coin's close processing: the
+                # Telegram alert, the CEO evaluation, the hypothesis and
+                # REFLECTION_COMPLETED were all lost. Reproduced: only
+                # `reflection-start` was delivered.
+                #
+                # Logged and skipped, exactly like any other failing
+                # subscriber. The cancellation still reaches the task that was
+                # cancelled; it just stops being contagious.
+                logger.warning(
+                    "Subscriber %s was CANCELLED while handling %s; the remaining "
+                    "subscribers still receive it.",
+                    getattr(callback, "__qualname__", repr(callback)), topic,
+                )
+                continue
             except Exception as e:
                 # Swallowed per-callback so one broken subscriber can't stop
                 # the others from seeing the event. Logged with the callback

@@ -40,6 +40,21 @@ class CloseFill(float):
         return value
 
 
+
+def _configured_venue_name() -> str:
+    """The venue this deployment trades, for labelling a fill.
+
+    Falls back to the old literal rather than raising: a label must never stop
+    a trade being recorded.
+    """
+    try:
+        from backend.services.venue import configured_venue
+
+        return f"{configured_venue()}_futures"
+    except Exception:  # noqa: BLE001
+        return "binance_futures"
+
+
 class ExecutionAgent(BaseAgent):
     def __init__(self, simulation_mode: Optional[bool] = None):
         """The sole gateway to the exchange.
@@ -294,7 +309,13 @@ class ExecutionAgent(BaseAgent):
         # `routes_to_venue`. A paper TAR arriving while LIVE_TRADING is on is
         # simulated, which is what "paper" means.
         to_venue = self.routes_to_venue(tar.tab)
-        exchange_name = "binance_futures" if to_venue else "simulated_exchange"
+        # THE CONFIGURED VENUE, not a hardcoded Binance (F89). A Bybit
+        # deployment recorded every fill as `binance_futures`, so the execution
+        # record named a venue the order never reached. The mirror branch below
+        # overrides this with its own name.
+        exchange_name = (
+            _configured_venue_name() if to_venue else "simulated_exchange"
+        )
         logger.info(f"Routing order to {exchange_name} with idempotency key {idempotency_key}")
 
         # Reference price for slippage measurement, captured before routing.
@@ -630,7 +651,10 @@ class ExecutionAgent(BaseAgent):
             fee_result.cost,
             fee_result.measured,
         )
-        await self._persist_execution_quality(str(tar.tar_id), order_id, tar.symbol, exchange_name, quality)
+        await self._persist_execution_quality(
+            str(tar.tar_id), order_id, tar.symbol, exchange_name, quality,
+            tab=tar.tab,
+        )
 
         # APPLY THE FILL TO THE PAPER BOOK.
         #
@@ -833,7 +857,13 @@ class ExecutionAgent(BaseAgent):
         # trims the operator's REAL position in the same symbol if they hold one.
         # See `routes_to_venue`.
         to_venue = self.routes_to_venue(tab)
-        exchange_name = "binance_futures" if to_venue else "simulated_exchange"
+        # THE CONFIGURED VENUE, not a hardcoded Binance (F89). A Bybit
+        # deployment recorded every fill as `binance_futures`, so the execution
+        # record named a venue the order never reached. The mirror branch below
+        # overrides this with its own name.
+        exchange_name = (
+            _configured_venue_name() if to_venue else "simulated_exchange"
+        )
 
         if not to_venue:
             # The caller's observed price wins. See the note above: the cache is
@@ -1200,6 +1230,13 @@ class ExecutionAgent(BaseAgent):
         symbol: str,
         exchange: str,
         quality: Dict[str, Any],
+        # THE TRADE'S OWN BOOK (F89). This read `settings.execution_tab`, a
+        # process-wide setting, so a PAPER fill recorded while LIVE_TRADING was
+        # on was labelled `real` — and the rows that say how well execution
+        # performed then described the wrong account. Same class as the routing
+        # bug the audit found in this file: a value carried on the call and
+        # then not used.
+        tab: Optional[str] = None,
     ) -> None:
         """Write the execution score to the `execution_quality` table.
 
@@ -1232,8 +1269,11 @@ class ExecutionAgent(BaseAgent):
                     order_id,
                     datetime.datetime.utcnow(),
                     symbol,
+                    # The venue that actually filled it, not a hardcoded
+                    # "binance_futures" — the caller knows which one, including
+                    # the testnet mirror and the simulated book.
                     exchange,
-                    settings.execution_tab,
+                    tab or settings.execution_tab,
                     quality["requestedQty"],
                     quality["filledQty"],
                     quality["fullyFilled"],

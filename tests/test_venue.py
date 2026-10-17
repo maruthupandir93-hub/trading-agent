@@ -243,13 +243,28 @@ async def test_an_order_without_credentials_refuses_and_names_the_variables():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_order_carries_no_fill_price():
+async def test_a_failed_order_carries_no_fill_price(monkeypatch):
     """`ok=False` must never be mistakable for a fill.
 
     `create_market_order` once fabricated a $60,000 fill on any exception and the
     caller wrote it into the trade log as real. A result with no price on it cannot
     be misread that way.
+
+    HERMETIC NOW (F93). This passed or failed depending on what was in `.env`:
+    with credentials present the order path got further and the failure arrived
+    from a different place, and with `USE_TESTNET` blank it attempted a REAL
+    CONNECTION — caught only by the network guard, and reported as a product
+    failure in the round-4 retest when it was nothing of the sort.
+    `tests/conftest.py` clears the LLM variables for exactly this reason; the
+    venue ones were missed.
     """
+    for var in (
+        "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_SECRET",
+        "BYBIT_API_KEY", "BYBIT_API_SECRET",
+        "BYBIT_TESTNET_API_KEY", "BYBIT_TESTNET_SECRET",
+    ):
+        monkeypatch.delenv(var, raising=False)
     result = await venue("binance").market_order(symbol="BTC/USDT", side="buy", qty=1.0)
     assert result.ok is False
     assert result.average_price is None

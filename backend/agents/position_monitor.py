@@ -1002,7 +1002,7 @@ class PositionMonitorAgent(BaseAgent):
         self, pos: "_Tracked", exit_price: float, realized: float, reason: str,
         qty: Optional[float] = None, fee: Optional["FeeResult"] = None,
         funding: Optional[float] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Record the completed round trip, WITH its realized P&L. Never raises.
 
         `qty` overrides the position's quantity for a PARTIAL close (scale-out): the
@@ -1037,6 +1037,12 @@ class PositionMonitorAgent(BaseAgent):
         exit_side = "sell" if pos.side == "buy" else "buy"
         row_qty = qty if qty is not None else pos.qty
         try:
+            # THE ROW ID IS RETURNED, because the reflection's foreign key
+            # points at `trades.id` and the event carried the TAR id instead
+            # (F88). A `manual-<hex>` TAR is not in `trades` at all, so every
+            # reflection on a manual trade was rejected by the FK and lost —
+            # logged at ERROR and swallowed.
+            closing_row_id = str(uuid.uuid4())
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -1047,7 +1053,7 @@ class PositionMonitorAgent(BaseAgent):
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                             $17, $18, $19)
                     """,
-                    str(uuid.uuid4()), datetime.datetime.utcnow(), pos.tab,
+                    closing_row_id, datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, row_qty, exit_price, realized,
                     "agent-close", f"closed by {reason} from entry {pos.entry_price:.8g}",
                     # THE ROW THE LEARNING LOOP READS. `strategy_performance`
@@ -1082,11 +1088,15 @@ class PositionMonitorAgent(BaseAgent):
                     *self._excursions(pos),
                     getattr(exit_price, "order_id", None),
                 )
+            return closing_row_id
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "Failed to persist the closing trade for %s (realized %+.2f): %s",
                 pos.symbol, realized, exc,
             )
+            # None, not the id: nothing was written, so the reflection has no
+            # row to attach to and must say so rather than target a phantom.
+            return None
 
     async def _arm_resting_stop_if_adverse(self, pos: "_Tracked", price: float) -> None:
         """Place the venue stop once the position has moved against us. Never raises.
@@ -2427,7 +2437,7 @@ class PositionMonitorAgent(BaseAgent):
             # It is written HERE rather than in the executor because this is the
             # only place that holds entry, exit, quantity and side together, which
             # is exactly what a closed round trip is. The executor sees one leg.
-            await self._persist_closed_trade(
+            closing_row_id = await self._persist_closed_trade(
                 pos, fill_price, realized, reason, fee=exit_fee, funding=funding.cost,
             )
 
@@ -2453,7 +2463,22 @@ class PositionMonitorAgent(BaseAgent):
 
             await self.publish(
                 PositionClosedEvent(
-                    trade_id=pos.tar_id,
+                    # THE CLOSING ROW'S OWN ID (F88). This was `pos.tar_id`,
+                    # and `reflections.trade_id` is a FOREIGN KEY into `trades`
+                    # — a `manual-<hex>` TAR is not in that table at all, so
+                    # every reflection on a manual trade was rejected by the
+                    # constraint, logged at ERROR and swallowed. Falls back to
+                    # the TAR id only when the row could not be written, which
+                    # the reflection then reports rather than persisting.
+                    # Only a real string id is used; anything else — a failed
+                    # write, or a stand-in from a caller that patched the
+                    # persist — falls back to the TAR id, which at least
+                    # identifies the position.
+                    trade_id=(
+                        closing_row_id
+                        if isinstance(closing_row_id, str) and closing_row_id
+                        else pos.tar_id
+                    ),
                     symbol=pos.symbol,
                     side=pos.side,
                     tab=pos.tab,

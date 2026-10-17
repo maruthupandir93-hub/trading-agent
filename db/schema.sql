@@ -1050,11 +1050,32 @@ CREATE OR REPLACE VIEW real_trades AS
 CREATE OR REPLACE VIEW paper_trades AS
   SELECT * FROM trades WHERE tab = 'paper';
 
+-- THESE TWO READ THE **BROWSER'S** BOOK, NOT THE AGENT'S (F94).
+--
+-- `positions` is written by `lib/portfolioStore.server.ts` — the dashboard's
+-- own book. The AGENT's positions live in `agent_positions`, written by
+-- `backend/services/portfolio_store.py`, and the two are deliberately separate
+-- actors (see CLAUDE.md, "Two data stores, both real").
+--
+-- So anyone querying `paper_positions` to see what the agent holds got the
+-- browser's answer, which is usually empty — and an empty result reads as
+-- "the agent holds nothing" rather than "you asked the wrong table". The
+-- agent views below are the ones to use for that.
 CREATE OR REPLACE VIEW real_positions AS
   SELECT * FROM positions WHERE tab = 'real';
 
 CREATE OR REPLACE VIEW paper_positions AS
   SELECT * FROM positions WHERE tab = 'paper';
+
+-- The AGENT's own book, which is what "what is the bot holding?" means.
+CREATE OR REPLACE VIEW agent_open_positions AS
+  SELECT * FROM agent_positions;
+
+-- And what it is actively watching a stop for, which is the safety-critical
+-- list and is narrower than the book: a row here is a position with an
+-- enforceable exit.
+CREATE OR REPLACE VIEW agent_watched_positions AS
+  SELECT * FROM monitored_positions WHERE status = 'open';
 
 CREATE OR REPLACE VIEW real_decisions AS
   SELECT * FROM decisions WHERE tab = 'real';

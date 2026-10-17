@@ -342,8 +342,28 @@ def isolate_agent_singletons():
     from backend.agents.execution_agent import reset_execution_agent
     from backend.agents.position_monitor import reset_position_monitor
 
+    def _clear_process_caches():
+        # PER-PROCESS THROTTLES MAKE TESTS ORDER-DEPENDENT, and one did
+        # immediately. `supervisor_agent` records its scope refusal at most
+        # once per symbol per hour (F10 — 27 identical rows a minute were
+        # evicting every real decision), so a second test on the same symbol
+        # saw NO refusal recorded and failed, while passing when run alone.
+        # Cleared here for the same reason the singletons above are.
+        for module_path, attr in (
+            ("backend.agents.supervisor_agent", "_scope_refusal_logged"),
+            ("backend.services.trading_session", "_throttled_notes"),
+        ):
+            try:
+                import importlib
+
+                getattr(importlib.import_module(module_path), attr).clear()
+            except Exception:  # noqa: BLE001 - isolation must never fail a test
+                pass
+
     reset_position_monitor()
     reset_execution_agent()
+    _clear_process_caches()
     yield
     reset_position_monitor()
     reset_execution_agent()
+    _clear_process_caches()

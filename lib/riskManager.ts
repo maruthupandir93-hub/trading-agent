@@ -1,6 +1,6 @@
 import type { StrategyContext } from './strategyContext';
 import type { TradeLogEntry, TradeTab, WatchItem } from './types';
-import { fixedFractionalSize, volatilityBasedSize, capToMaxExposure, kellyFraction, type SizingResult } from './positionSizing';
+import { ATR_STOP_MULTIPLIER, fixedFractionalSize, volatilityBasedSize, capToMaxExposure, kellyFraction, type SizingResult } from './positionSizing';
 import { relevantHeadlines, type NewsItem } from './sentimentAgent';
 import { getCorrelation, type CorrelationMatrix } from './portfolioIntelligence';
 
@@ -41,8 +41,11 @@ import { getCorrelation, type CorrelationMatrix } from './portfolioIntelligence'
 // If these need to change again, change the Python file first (it has the
 // evidence) and mirror it here. Two numbers that must agree live in two files;
 // keep them in sync deliberately.
-const ATR_FLOOR_MULTIPLIER = 2.5; // matches backend ATR_STOP_MULTIPLIER
-const ATR_FALLBACK_MULTIPLIER = 2.5; // pure-ATR stop == the Python stop distance
+// One source for the stop multiple across the TS side (F45). `positionSizing`
+// declares it; both of these are the same number by construction now, instead
+// of three literals that must be remembered together.
+const ATR_FLOOR_MULTIPLIER = ATR_STOP_MULTIPLIER; // matches backend ATR_STOP_MULTIPLIER
+const ATR_FALLBACK_MULTIPLIER = ATR_STOP_MULTIPLIER; // pure-ATR stop == the Python stop distance
 const DEFAULT_REWARD_RISK_RATIO = 2; // 2.5x stop -> 5.0x target, matching backend's 2:1
 
 export type StopLossTakeProfit = {

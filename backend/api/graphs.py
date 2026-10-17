@@ -445,11 +445,19 @@ async def stream_graph_progress(websocket: WebSocket, api_key: str = None) -> No
     final: Dict[str, Any] = {}
     try:
         graph = build_graph(analysis_config(), ctx)
-        async for event in stream_run(graph, state):
+        # THE SUMMARY COMES FROM THE RUN WE JUST STREAMED (F81).
+        #
+        # This streamed the graph and then called `graph.ainvoke(state)` to
+        # rebuild the summary — RUNNING THE WHOLE GRAPH A SECOND TIME. That
+        # doubles every LLM call and every market fetch against a 40/min key
+        # budget, and the "done" payload described a DIFFERENT run from the one
+        # the operator had just watched node by node.
+        #
+        # `stream_run` accumulates its deltas into this dict now, so the final
+        # state is the streamed run's own.
+        final: Dict[str, Any] = {}
+        async for event in stream_run(graph, state, final_state=final):
             await websocket.send_json({"type": "node", **event})
-        # `stream_run` yields updates; the accumulated state is what the runner
-        # normally returns, so the summary is rebuilt from the graph's final read.
-        final = await graph.ainvoke(state)
         await websocket.send_json({"type": "done", **summarise_analysis(final)})
     except WebSocketDisconnect:
         # The client went away mid-run. The run itself is unaffected and its trace is

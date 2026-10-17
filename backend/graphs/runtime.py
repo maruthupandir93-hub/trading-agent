@@ -449,6 +449,9 @@ async def stream_run(
     graph: Any,
     state: "TradingState",
     config: Optional[Dict[str, Any]] = None,
+    # Optional dict the caller owns; filled with the run's final state so
+    # the caller does not have to re-invoke the graph to summarise it (F81).
+    final_state: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Yield one progress event per node as a compiled graph executes.
 
@@ -469,6 +472,10 @@ async def stream_run(
         total = None
 
     seen = 0
+    # The state as the run leaves it. Mutated in place so the caller holds the
+    # same object after the generator finishes (F81).
+    accumulated: Dict[str, Any] = final_state if final_state is not None else {}
+    accumulated.update(state)
     try:
         async for update in graph.astream(state, config=config):
             # `astream` in updates mode yields {node_name: state_delta} per superstep.
@@ -476,7 +483,16 @@ async def stream_run(
             # counts nodes rather than supersteps.
             if not isinstance(update, dict):
                 continue
+            # ACCUMULATE THE DELTAS, so the caller does not have to RUN THE
+            # GRAPH A SECOND TIME to get the final state (F81).
+            #
+            # `/ws/graph-progress` streamed the run and then called
+            # `graph.ainvoke(state)` to build its summary — doubling every LLM
+            # call and every market fetch, and producing a summary from a
+            # DIFFERENT run than the one the operator had just watched.
             for node, delta in update.items():
+                if isinstance(delta, dict):
+                    accumulated.update(delta)
                 seen += 1
                 payload: Dict[str, Any] = {
                     "node": node,

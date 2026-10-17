@@ -39,6 +39,7 @@ decision).
 import datetime
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -112,6 +113,24 @@ def _debate_direction(debate: Optional[Dict[str, Any]]) -> Optional[str]:
         return None
     value = debate.get("direction") or debate.get("winning_dir")
     return str(value) if value else None
+
+
+
+# When each symbol's scope refusal was last RECORDED (F10). In-memory: a
+# restart should write one more, because the operator reading the table after
+# a restart has not seen it.
+_scope_refusal_logged: Dict[str, float] = {}
+_SCOPE_REFUSAL_INTERVAL_S = 3600.0
+
+
+def _should_record_scope_refusal(symbol: str) -> bool:
+    """True at most once per symbol per hour. See the call site."""
+    now = time.time()
+    last = _scope_refusal_logged.get(symbol)
+    if last is not None and (now - last) < _SCOPE_REFUSAL_INTERVAL_S:
+        return False
+    _scope_refusal_logged[symbol] = now
+    return True
 
 
 class SupervisorAgent(BaseAgent):
@@ -413,16 +432,35 @@ class SupervisorAgent(BaseAgent):
         from backend.services.execution_service import execution_enabled
 
         if execution_enabled():
-            await self._refuse(
-                symbol,
-                "entries are originated by the 24-node analysis graph while "
-                "GRAPH_EXECUTION_ENABLED=true, so this event-driven path does not "
-                "submit its own. It reaches a trade from the debate alone, without "
-                "the specialist panel, regime detection, strategy scoring or the "
-                "Risk Gateway's entry snapshot — so a trade it opened carried no "
-                "strategy, no run_id and no entry context, and the learning loop "
-                "and the trade-journey view both had nothing to read",
-            )
+            # RECORDED ONCE PER SYMBOL PER HOUR, NOT ON EVERY TICK (F10).
+            #
+            # This refusal is a CONSTANT while the flag is on, and
+            # `_consider_trade` runs per symbol per tick — measured live, 2,366
+            # decision rows in 86 minutes, about 27 a minute, ALL of them this
+            # one sentence. Retention keeps ~2,000 rows, so the noise EVICTED
+            # EVERY REAL DECISION RECORD within about 1.5 hours and "why did it
+            # not trade yesterday?" stopped being answerable from the database.
+            #
+            # The refusal itself is still worth recording — "why did this path
+            # not trade?" has to stay answerable — so it is throttled rather
+            # than dropped. The first one per symbol per hour is written; the
+            # rest are counted in the log and nowhere else.
+            if _should_record_scope_refusal(symbol):
+                await self._refuse(
+                    symbol,
+                    "entries are originated by the 24-node analysis graph while "
+                    "GRAPH_EXECUTION_ENABLED=true, so this event-driven path does not "
+                    "submit its own. It reaches a trade from the debate alone, without "
+                    "the specialist panel, regime detection, strategy scoring or the "
+                    "Risk Gateway's entry snapshot — so a trade it opened carried no "
+                    "strategy, no run_id and no entry context, and the learning loop "
+                    "and the trade-journey view both had nothing to read",
+                )
+            else:
+                logger.debug(
+                    "Event-path entry for %s refused (graph owns entries); not "
+                    "re-recorded this hour.", symbol,
+                )
             return
 
         # --- direction: from the debate, never assumed ------------------
@@ -752,7 +790,22 @@ class SupervisorAgent(BaseAgent):
             # this is not inventing a price, it is stating the position at
             # book value when no live quote is available.
             mark = live if live > 0 else float(pos.get("avgCost", 0.0))
-            equity += float(pos.get("qty", 0.0)) * mark
+
+            # LOCKED MARGIN + UNREALISED, AND THE DIRECTION (F60).
+            #
+            # This was `qty * mark`, the 1x-only formula CLAUDE.md records
+            # removing from `book_equity` and from the TypeScript side. It
+            # double-counts the leveraged part — at 10x a $7,000 position
+            # funded by $700 adds $6,300 of equity that does not exist — and
+            # it ignores direction, so a short moving AGAINST the account
+            # read as equity going UP. This figure is what the Supervisor
+            # sizes a risk fraction of.
+            qty = abs(float(pos.get("qty", 0.0)))
+            cost = float(pos.get("avgCost", 0.0))
+            locked = pos.get("marginLocked")
+            locked = float(locked) if isinstance(locked, (int, float)) else qty * cost
+            direction = -1.0 if str(pos.get("side") or "buy").lower() == "sell" else 1.0
+            equity += locked + (mark - cost) * qty * direction
         return equity
 
     async def _persist_decision(

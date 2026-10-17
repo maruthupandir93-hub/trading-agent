@@ -21,7 +21,32 @@ export function fixedFractionalSize(equityUsd: number, riskPct: number, entryPri
 // Volatility-based: same idea, but sizes directly off ATR rather than a
 // specific stop price — useful as a cross-check even when a structural
 // stop exists, and as the primary method when one doesn't.
-export function volatilityBasedSize(equityUsd: number, riskPct: number, entryPrice: number, atrValue: number, atrMultiplier: number = 1.5): SizingResult | null {
+// THE DEFAULT MULTIPLE WAS 1.5 WHILE EVERY REAL STOP IS 2.5 (F45).
+//
+// `volatilityBasedSize` divides the risk budget by `atr * multiplier`, so a
+// multiplier SMALLER than the stop actually placed produces a quantity LARGER
+// than the budget allows: 2.5/1.5 = 1.67x the configured risk on every trade
+// sized this way. Both callers — `riskManager`'s fallback and the TS backtest
+// — relied on the default, so the backtest's reported risk per trade was not
+// the risk it modelled.
+//
+// Imported from `riskManager` rather than restated, because that is where the
+// TS/Python alignment is maintained and a third copy of this number is how it
+// drifts again (the same reasoning as `lib/watchlistSeed.test.ts`).
+
+// THE STOP THIS SYSTEM ACTUALLY PLACES, in ATR multiples.
+//
+// Must equal `backend/core/risk_manager.ATR_STOP_MULTIPLIER` and
+// `lib/riskManager`'s ATR_FLOOR_MULTIPLIER / ATR_FALLBACK_MULTIPLIER. Three
+// numbers that must agree; CLAUDE.md records the TS and Python copies drifting
+// apart once already (1.2x/1.8x against 2.5x), which sized a tighter stop on
+// the browser path than on the autonomous one.
+//
+// Declared HERE rather than imported from `riskManager`, because that module
+// imports this one — the other direction would be a cycle.
+export const ATR_STOP_MULTIPLIER = 2.5;
+
+export function volatilityBasedSize(equityUsd: number, riskPct: number, entryPrice: number, atrValue: number, atrMultiplier: number = ATR_STOP_MULTIPLIER): SizingResult | null {
   if (atrValue <= 0 || equityUsd <= 0) return null;
   const stopDistance = atrValue * atrMultiplier;
   const riskUsd = equityUsd * riskPct;
