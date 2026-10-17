@@ -1577,8 +1577,10 @@ Two modes now, chosen in `risk_gateway.gate()` by whether an operator SESSION is
 driving the trade (`active_session_leverage()` returns non-None):
 
   * **BROKER-STYLE (a session).** `per_trade_margin = fraction × account_capital`,
-    held back by the 1.2x margin buffer (so a stop stays reachable before a margin
-    call — 100% therefore deploys ~83%, not literally every dollar). `notional =
+    held back by `MARGIN_BUFFER_MULTIPLIER`, which is **1.0** today and env-readable
+    (it was 1.2, which made 100% deploy ~83% rather than literally every dollar;
+    at 1.0 the buffer is off and 100% means 100%. Raising it back is a one-line
+    `.env` change and is the conservative direction). `notional =
     per_trade_margin × leverage`; `size = notional / entry`. The leverage is the
     session's own choice (`active_session_leverage()`), bounded AGAIN by
     `max_leverage_ceiling` — invariant 2 still hard-caps it at 3x real / 10x paper,
@@ -1900,7 +1902,11 @@ on `external_consultation`. A live trace recorded `external_consultation
 300,612.9ms`: the reasoning-tier ceiling to the millisecond, three times of
 three. That is the "the agent is very slow" symptom, and it was one dead model.
 
-Both now point at `mistralai/mistral-nemotron` — a MISTRAL-family model, so the
+**SUPERSEDED 2026-10-16 — SEE THE MODEL CENSUS BELOW. `mistralai/mistral-nemotron`
+is now DEAD and `openai/gpt-oss-20b` is ALIVE: the two have swapped places since
+this was written.** The reasoning in this section still holds and is why the
+census exists; only the names are out of date. Both then pointed at
+`mistralai/mistral-nemotron` — a MISTRAL-family model, so the
 consultation remains a genuinely different prior from the NVIDIA Nemotron-3
 reasoning tier, which is the property that makes it a second opinion rather than
 the same model agreeing with itself. Measured after: run 300s+ -> 19.0s,
@@ -3017,6 +3023,134 @@ derived their expectations from the `side` they passed separately; they were
 internally consistent and building an event production cannot produce.
 `tests/test_tar_direction_literal.py` scans for the eighth.
 
+### The model census is dated, and a model's state is not a property of its name
+
+**Measured live against this account's NVIDIA key on 2026-10-16**, by direct
+HTTP, because the catalog (`GET /v1/models`) still lists models that are gone:
+
+    ALIVE   nvidia/nemotron-3-super-120b-a12b    HTTP 200 in 1.23s
+    ALIVE   openai/gpt-oss-20b                   HTTP 200 in 0.90s
+    410     mistralai/mistral-nemotron
+    410     openai/gpt-oss-120b
+    410     moonshotai/kimi-k3
+    410     meta/llama-3.3-70b-instruct
+    410     qwen/qwen3-next-80b-a3b-instruct
+
+`LLM_MODEL_MECHANICAL` and `LLM_CONSULT_MODEL_NVIDIA` are both
+`openai/gpt-oss-20b` in `.env` now. **This file has twice recorded the OPPOSITE
+of each of those two lines** — gpt-oss-20b as "DEAD on this account, no HTTP
+status at all in 120s" and mistral-nemotron as the working replacement — and
+both statements were true when written. That is the lesson, not a correction:
+a model's state is a property of the ACCOUNT AND THE DATE, never of the name,
+and the provider fails closed, so a dead model looks exactly like a quiet
+degradation. **Probe before trusting a config that names one.**
+
+`GET /api/monitoring`'s `llmHealth` is the standing version of that probe, and
+it now flags BOTH shapes of death — the 410/404 that gpt-oss-120b returned, and
+the model that accepts a request and never answers, which is what cost 300s a
+run before `_UNRESPONSIVE_THRESHOLD` existed.
+
+### The October 2026 diagnosis, and the one shape most of it had
+
+`docs/DIAGNOSIS_2026-10-15.md` is a 94-finding audit across four rounds, run
+against a deployment that had been **frozen since 2026-10-11** on a phantom XRP
+position: 47,298 polls, 2,469 analyses, 2 trades. Every finding is fixed or
+explicitly declined, and the ones with lasting consequences are written into
+the sections above rather than left in that document.
+
+**THE FREEZE ITSELF (F1) IS WORTH KNOWING AS A PATTERN.**
+`close_position` returned `None` for every testnet-mirror refusal, and the
+caller reads `None` as "retry next tick". The venue was already flat, so the
+retry could never succeed and the monitor re-closed the same position forever.
+`paper_testnet.venue_flat()` now returns **True / False / None** — and only a
+definite True settles the book, because "the venue holds nothing" and "I could
+not ask" are the distinction this codebase has now paid for in three separate
+places (`fetch_usdt_perpetual_prices`, `open_positions()`, and this).
+
+**THE SHAPE MOST OF THEM SHARED** is the one the September audit already named,
+and it recurred eleven more times: *a value is carried all the way to the
+decision point and then not used.* The funding specialist voted on BTC's
+funding for every coin. The session scope gate compared against `session.symbol`
+while the session rotated a list. Eight exit settings were read once at import,
+so the Settings page changed nothing until a restart. In each case the code
+LOOKS like it is using the right input, which is why a green suite sat on top
+of them — and why the tests added for them assert *the input reaching the
+decision*, never a happy path.
+
+**THREE FIXES CHANGED BEHAVIOUR DELIBERATELY AND SHOULD NOT BE QUIETLY
+REVERTED:**
+
+* **`TRAILING_STOP_R` defaults to 0.** Measured on the live ledger the trail
+  returned **-0.027R against the fixed 2:1** (z = -2.1). It is still available;
+  it is simply not the default any more, and `scripts/sweep_risk_model.py`
+  exists to re-measure before it changes back.
+* **A fee gate in the Risk Gateway.** An entry whose round-trip fee exceeds
+  `MAX_FEE_FRACTION_OF_R` (0.12R, about a 0.83% stop) is refused. That removed
+  7 of the last 10 approved plans, which had needed a 40-44% win rate to break
+  even on fees alone.
+* **The backend is authenticated.** `auth.open_closed` makes every WRITE route
+  503 without `TRADES_API_KEY`, and the Next proxy authenticates the INCOMING
+  caller before attaching that key — its comment previously claimed these
+  routes "have their own TRADES_API_KEY auth", which was backwards: the proxy
+  SUPPLIES the key. **`DASHBOARD_PASSWORD` and `TRADES_API_KEY` must both be
+  set on the deployment**; without them the write proxy was an open door to
+  enable live trading, switch venue or fire the emergency stop.
+
+**ONE FINDING WAS DECLINED, ON PURPOSE.** F66 reports that the volatility
+node's `STOP_ATR_MULTIPLE` is computed, written into the state and never
+applied — `opportunity` always uses 2.5. The report is correct; applying it
+would set a 1.5x stop in low volatility, and the nine-SOL-trade finding above
+is that five of six losses were stop-outs INSIDE the noise band at exactly that
+multiple. So only the trace line, which claimed a multiple that was not used,
+was fixed. The unused value stays unused until there is evidence for it.
+
+**TWO OF THEM CHANGED WHAT THE SYSTEM REASONS ABOUT, AND BOTH ARE EASY TO
+UNDO BY ACCIDENT.**
+
+* **The order book and the tape are read from the REAL market, always (F11).**
+  `binance_testnet.demo_data_active()` still moves the PRICE and the CANDLES to
+  the demo venue while the paper mirror is on, and that is right — fills happen
+  there, and marking a book against another market's price is not the book. It
+  used to move the DEPTH and the TAPE as well, and that is a different claim:
+  Binance's demo book is thin and largely synthetic, a fill simulator rather
+  than a market, and the `orderflow` and `liquidity` specialists reading it
+  carry **3.0 of the debate's 7.0 directional weight**. The panel was voting on
+  the microstructure of a market that does not exist while the trade it decided
+  would be sized against the real one. Execute where the money is; reason about
+  the market that is actually there.
+
+  `test_demo_microstructure_uses_futures_and_separate_cache` asserted the
+  opposite and passed. It was replaced, with its reasoning kept.
+
+* **A cycle with no entry setup can now still EXIT (F44).** This system claims
+  two exit reasons: the stop or target, enforced on every tick by
+  `position_monitor` and authoritative; and "the panel now argues against the
+  position I am holding". The second was close to unreachable, because
+  `_after_opportunity` convened the panel only when `strategy_scoring` produced
+  a fresh ENTRY thesis — so the branch whose job is to notice an OPEN position
+  has gone wrong required a cycle that was already hunting a new one, and most
+  cycles find no setup. The router now also convenes the panel when we HOLD the
+  instrument.
+
+  `holding_position` is stamped ONCE in `start_run`, beside `started_at`, for
+  the same Section 39.4 reason: a node asking the live monitor would get a
+  different answer on replay. **The entry path is unchanged and a review run
+  can never produce a decision** — there is nothing to enter — which is the
+  property the tests assert hardest, because loosening invariant 1's gate would
+  be a far worse bug than the one being fixed. `external_consultation` also
+  skips a run with no decision, or a held position would buy a model call every
+  decision interval against the 40/min key budget.
+
+**WHAT THE EXERCISE HARNESS NOW COVERS.**
+`scripts/full_system_exercise.py` is 18 scenarios against the real bus and the
+real agents, ending in an assertion that no database pool was ever opened. It
+now drives BOTH origination paths — the automatic chain through the real
+`subscribe_to_plans` wiring, and the operator's manual one in the route's own
+order — plus an import sweep of every backend module, the agent roster's
+declarations, and the whole 24-node graph on live mainnet candles. Run it
+before and after anything that touches the trading plane; several of the bugs
+in this file were found by nothing else.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -3093,7 +3227,7 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 33 files / 475 tests, must all pass
+npm run test                        # vitest; 35 files / 498 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
@@ -3101,7 +3235,7 @@ npm run build                       # catches route/provider issues tsc won't
 Vitest run alongside `tsc` or `next build` on a memory-constrained
 machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (33/33, 475/475, verified over five consecutive runs). The
+deterministic (35/35, 498/498). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing
@@ -3126,7 +3260,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2059 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2294 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note
