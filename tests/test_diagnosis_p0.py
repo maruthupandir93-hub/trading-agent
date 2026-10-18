@@ -407,3 +407,24 @@ def test_auth_status_distinguishes_configured_from_deliberately_open(monkeypatch
     # It is still a warning: an open write surface on a reachable backend is
     # the exposure the fail-closed default exists to remove.
     assert opened["remedy"], "an open write surface must still tell the operator to close it"
+
+
+def test_the_suite_does_not_read_the_operators_real_write_credentials():
+    """The isolation that three `test_api_surface` tests lacked for years.
+
+    They POSTed with no credential and asserted 200, and passed only because
+    `TRADES_API_KEY` happened to be unset in the operator's `.env`. Writing a
+    real key there -- to fix a production outage -- turned all three red at
+    once, and the failure read as an auth regression rather than as fixtures
+    that had never controlled their own inputs.
+
+    Same shape as the `LLM_*` isolation this suite already has, and the same
+    rule: pin the configuration, never inherit it.
+    """
+    import os
+
+    assert os.getenv("TRADES_API_KEY") in (None, ""), (
+        "a test is reading the operator's real write key; conftest's "
+        "isolate_write_auth should have cleared it"
+    )
+    assert os.getenv("DASHBOARD_PASSWORD") in (None, "")

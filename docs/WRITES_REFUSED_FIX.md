@@ -133,6 +133,27 @@ Three changes, so this is visible before a click rather than after one:
   still states plainly that the system is **NOT** stopped, and says to stop the
   agent at the exchange if you need it stopped right now.
 
+## One thing this exposed in the test suite
+
+Writing a real `TRADES_API_KEY` into `.env` turned three `test_api_surface`
+tests red at once. They were not a regression: they POST to
+`/api/knowledge/relationship` with no credential and assert `200`, and they had
+passed for years **because nothing was configured**, not because they had
+isolated anything.
+
+That is the same lesson this repo already records for `LLM_*` — where two tests
+asserting "no provider is configured" started issuing live HTTP requests the
+moment a real key went into `.env`, and only the network guard caught it.
+
+`tests/conftest.py::isolate_write_auth` now clears `TRADES_API_KEY` and
+`DASHBOARD_PASSWORD` for every test and pins `ALLOW_UNAUTHENTICATED_WRITES`
+explicitly, so the suite runs a **known** configuration rather than whatever the
+operator's `.env` happens to hold. `tests/test_api_auth.py` owns the real
+behaviour and sets both variables itself, so the refusal is still exercised in
+both directions.
+
+---
+
 And the status endpoint stopped making a false claim. With no key it used to
 report *"ALL endpoints are open"* — true while the dependency was a no-op, and
 the exact opposite of the truth once writes failed closed.

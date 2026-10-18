@@ -3151,6 +3151,61 @@ declarations, and the whole 24-node graph on live mainnet candles. Run it
 before and after anything that touches the trading plane; several of the bugs
 in this file were found by nothing else.
 
+### Fail-closed writes broke production on the first deploy, and the status page said the opposite
+
+The F6 fix is right and stays: `require_write_auth` used to be a complete no-op
+with `TRADES_API_KEY` unset, on a VM whose port 8000 is internet-reachable, so
+anyone who found it could enable live trading, switch venue or place a real
+order. Writes fail closed now.
+
+What that cost on the first deploy, because the variables were not set first:
+
+    {"detail":"This endpoint changes state and TRADES_API_KEY is not
+     configured, so writes are refused. ..."}
+
+on every control, as raw JSON, **after** each click. Reads stay open on purpose
+— the browser polls them and cannot hold a server secret — which is exactly why
+the dashboard renders perfectly while nothing on it works, and that combination
+reads as a frontend bug rather than as missing configuration.
+
+**THE STATUS PAGE WAS ASSERTING THE OPPOSITE OF THE TRUTH.** `auth_status`
+reported *"TRADES_API_KEY is not set, so ALL endpoints are open"* and the
+Settings badge rendered **"All endpoints open"**. Both were true while the
+dependency was a no-op and became exactly backwards the moment it started
+refusing. An operator whose every button was returning 503 was reading a status
+page telling them nothing was protected. `writesPossible` / `openWritesAllowed`
+/ `remedy` are machine-readable now, and the badge's third state is
+"Writes refused — no key set".
+
+**TWO GATES, AND FIXING ONE LOOKS IDENTICAL TO FIXING NEITHER.**
+`DASHBOARD_PASSWORD` on the FRONTEND (the proxy attaches the backend key, so it
+must authenticate the caller first — unset means writes 401) and
+`TRADES_API_KEY` on the BACKEND **and** the frontend (the backend checks it, the
+proxy supplies it — set it on one side only and the 503 does not change).
+
+`lib/writeBlocker.ts` rewrites only those two refusals and leaves every other
+one exactly as the backend worded it: flattening a 409 "a real position is open"
+into advice about environment variables would be worse than the bug being fixed.
+It deliberately does NOT repeat the backend's own mention of
+`ALLOW_UNAUTHENTICATED_WRITES` — that is correct on a laptop and is the hole F6
+closed on a reachable host, and offering it as an equal option is how an
+operator "fixes" this by re-opening it. A 401 is read as "the frontend has no
+password configured", not "wrong password": the browser replays Basic
+automatically once the middleware has challenged it.
+
+The blocker renders ABOVE the controls on Settings, which is the rule
+`VenueSwitchPanel` already follows. `docs/WRITES_REFUSED_FIX.md` has the
+deployment steps.
+
+**AND IT EXPOSED THE SAME ISOLATION BUG THE `LLM_*` SECTION ABOVE RECORDS.**
+Writing a real key into `.env` turned three `test_api_surface` tests red at
+once. They POST with no credential and assert 200, and had passed for years
+because nothing was configured — not because they had isolated anything.
+`tests/conftest.py::isolate_write_auth` clears `TRADES_API_KEY` and
+`DASHBOARD_PASSWORD` and pins `ALLOW_UNAUTHENTICATED_WRITES` explicitly, so the
+suite runs a KNOWN configuration instead of the operator's. `test_api_auth.py`
+owns the real behaviour and sets both itself.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically

@@ -233,6 +233,44 @@ def isolate_tradeable_universe(monkeypatch):
     monkeypatch.setenv("UNTRADEABLE_SYMBOLS", "")
 
 
+# THE SUITE MUST NOT READ THE OPERATOR'S REAL WRITE CREDENTIALS EITHER.
+#
+# Exactly the lesson `isolate_llm_configuration` below already records, hit a
+# second time by a different variable. Three tests in `test_api_surface.py`
+# POST to `/api/knowledge/relationship` with no credential and asserted 200.
+# They passed for YEARS -- not because they had isolated anything, but because
+# `TRADES_API_KEY` happened to be unset in `.env`. The moment a real key was
+# written there to fix a production outage, all three returned 401 and the
+# failure read as an auth regression rather than as a fixture that had never
+# controlled its own inputs.
+#
+# `DASHBOARD_PASSWORD` is cleared for the same reason: it is the other half of
+# the same configuration, and a test reading the operator's real one would be
+# just as accidental.
+#
+# WHY WRITES ARE THEN OPENED RATHER THAN AUTHENTICATED. With the key simply
+# cleared, `require_write_auth` fails CLOSED and every write test gets a 503 --
+# correct behaviour, and not what those tests are about. Making each of them
+# carry a bearer header would make every behavioural test partly a test of
+# auth, and the refusal would then be the thing most likely to break them.
+#
+# So the suite pins a KNOWN configuration explicitly instead of inheriting
+# whatever `.env` holds. This is the same arrangement as
+# `isolate_tradeable_universe` above, and it is set rather than assumed
+# precisely because a test that reads its own enablement from a default is
+# really a test of the default.
+#
+# `tests/test_api_auth.py` is the file that OWNS this behaviour and sets both
+# variables itself, in the test body or in a fixture, so it still exercises the
+# real refusal in both directions. A test body's `monkeypatch` runs after this
+# fixture, so it always wins.
+@pytest.fixture(autouse=True)
+def isolate_write_auth(monkeypatch):
+    monkeypatch.delenv("TRADES_API_KEY", raising=False)
+    monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_WRITES", "true")
+
+
 @pytest.fixture(autouse=True)
 def isolate_llm_configuration(monkeypatch):
     from backend.llm.provider import reset_provider
