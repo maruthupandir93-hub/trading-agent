@@ -24,6 +24,7 @@ import { useState } from 'react';
 
 import { Card, SectionTitle } from '@/components/ui/primitives';
 import { backendProxyPath } from '@/lib/backendConfig';
+import { describeWriteRefusal } from '@/lib/writeBlocker';
 
 const PHRASE = 'RESET PAPER';
 
@@ -58,7 +59,7 @@ export function ResetPaperBookPanel({ liveTrading }: { liveTrading: boolean }) {
         body: JSON.stringify({ startingCash: cashNum, clearTradeLog: clearTrades, confirm: PHRASE }),
       });
       const body = (await res.json().catch(() => ({}))) as ResetResult;
-      if (!res.ok) throw new Error(body.detail ?? `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(describeWriteRefusal(res.status, body.detail ?? ''));
       setResult(body);
       setPhrase('');
     } catch (e) {

@@ -30,6 +30,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Card, SectionTitle } from '@/components/ui/primitives';
 import { backendProxyPath } from '@/lib/backendConfig';
+import { describeWriteRefusal } from '@/lib/writeBlocker';
 
 interface Check {
   ok: boolean;
@@ -87,7 +88,7 @@ export function TestnetPanel() {
         body: JSON.stringify({ enabled: next, verify: next, ...(venue ? { venue } : {}) }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.detail ?? `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(describeWriteRefusal(res.status, json?.detail ?? ''));
       setCheck(json.verification ?? null);
       await load();
     } catch (e) {

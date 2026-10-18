@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Card, SectionTitle } from '@/components/ui/primitives';
 import { backendProxyPath } from '@/lib/backendConfig';
+import { describeWriteRefusal } from '@/lib/writeBlocker';
 
 interface Rule {
   label: string;
@@ -107,7 +108,7 @@ export function ExitRulesPanel() {
         body: JSON.stringify(body),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.detail ?? `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(describeWriteRefusal(res.status, json?.detail ?? ''));
       setNote('Saved. Applies from the next price tick — no restart needed.');
       await load();
     } catch (e) {

@@ -348,3 +348,62 @@ async def test_microstructure_reads_mainnet_even_while_the_demo_mirror_is_on(mon
         assert binance_testnet.BASE_URL not in url, (
             f"microstructure fetched from the demo venue: {url}"
         )
+
+
+# --------------------------------------------------------------------------
+# The status endpoint must not claim the opposite of what the backend does.
+# --------------------------------------------------------------------------
+
+
+def test_auth_status_never_says_everything_is_open_while_writes_are_refused(monkeypatch):
+    """The false claim that cost a production debugging session.
+
+    With no key configured, `auth_status` used to report *"ALL endpoints are
+    open"*. That was true while `require_write_auth` was a no-op and became the
+    exact OPPOSITE of the truth when writes began failing closed -- so an
+    operator whose every button was being refused with a 503 read a status page
+    telling them nothing was protected.
+    """
+    from backend.core import auth
+
+    monkeypatch.delenv(auth.ENV_VAR, raising=False)
+    monkeypatch.delenv("ALLOW_UNAUTHENTICATED_WRITES", raising=False)
+
+    status = auth.auth_status()
+
+    assert status["writeAuthEnabled"] is False
+    assert status["writesPossible"] is False, "a write cannot succeed with no key"
+    assert "open" not in status["note"].lower() or "refus" in status["note"].lower(), status["note"]
+    assert "503" in status["note"], "the note must name what the operator is seeing"
+    # The remedy must name BOTH sides. Setting the key on the backend alone
+    # leaves the dashboard proxy attaching nothing, and the refusal is
+    # identical -- which is the loop this field exists to break.
+    assert status["remedy"] and auth.ENV_VAR in status["remedy"]
+    assert "dashboard" in status["remedy"].lower()
+
+
+def test_auth_status_distinguishes_configured_from_deliberately_open(monkeypatch):
+    """Three states, not two: keyed, explicitly open, and refusing.
+
+    Collapsing the last two is what produced the false claim in the first
+    place. `writesPossible` is true in the first two and false in the third,
+    which is the only question a UI deciding whether to offer a control has.
+    """
+    from backend.core import auth
+
+    monkeypatch.setenv(auth.ENV_VAR, "a-key")
+    monkeypatch.delenv("ALLOW_UNAUTHENTICATED_WRITES", raising=False)
+    keyed = auth.auth_status()
+    assert keyed["writeAuthEnabled"] is True
+    assert keyed["writesPossible"] is True
+    assert keyed["remedy"] is None
+
+    monkeypatch.delenv(auth.ENV_VAR, raising=False)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_WRITES", "true")
+    opened = auth.auth_status()
+    assert opened["writeAuthEnabled"] is False
+    assert opened["writesPossible"] is True, "the opt-out means writes DO work"
+    assert opened["openWritesAllowed"] is True
+    # It is still a warning: an open write surface on a reachable backend is
+    # the exposure the fail-closed default exists to remove.
+    assert opened["remedy"], "an open write surface must still tell the operator to close it"

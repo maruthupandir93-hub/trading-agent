@@ -163,18 +163,65 @@ async def require_write_auth(authorization: Optional[str] = Header(default=None)
 
 
 def auth_status() -> dict:
-    """For the status endpoint. Never returns the key itself."""
-    return {
-        "writeAuthEnabled": auth_required(),
-        "scheme": "Bearer" if auth_required() else None,
-        "envVar": ENV_VAR,
-        "readsProtected": False,
-        "note": (
+    """For the status endpoint. Never returns the key itself.
+
+    THIS USED TO MAKE A FALSE CLAIM, and it is the kind that wastes a day.
+    With no key configured it said *"ALL endpoints are open"* -- which was true
+    when `require_write_auth` was a no-op and became FALSE the moment writes
+    began failing closed. An operator reading it would conclude the opposite of
+    what the backend was doing: the status page said everything was permitted
+    while every button on the dashboard was being refused with a 503.
+
+    The three machine-readable fields exist so the UI can render the BLOCKER
+    BEFORE THE CONTROL rather than after a click, which is the rule the venue
+    switch panel already follows -- discovering a refusal from an error toast is
+    worse than never being offered the action.
+    """
+    configured = auth_required()
+    open_writes = open_writes_allowed()
+    # Writes work when a key is configured, or when the operator has explicitly
+    # opted into an open write surface. Not otherwise.
+    writes_possible = configured or open_writes
+
+    if configured:
+        note = (
             "Reads are intentionally open so the browser UI need not hold a server secret. "
             "A shared bearer token is not user authentication — there are no users or roles, "
             "and actions are not attributed to an identity."
-            if auth_required()
-            else f"{ENV_VAR} is not set, so ALL endpoints are open. Set it before exposing "
-                 f"this service beyond localhost."
-        ),
+        )
+        remedy = None
+    elif open_writes:
+        note = (
+            f"{ENV_VAR} is not set and ALLOW_UNAUTHENTICATED_WRITES is on, so writes are "
+            f"accepted from anyone who can reach this port. That is only safe if this "
+            f"process is genuinely unreachable from the internet."
+        )
+        remedy = (
+            f"Set {ENV_VAR} and remove ALLOW_UNAUTHENTICATED_WRITES if this backend is "
+            f"reachable from anywhere but localhost."
+        )
+    else:
+        note = (
+            f"{ENV_VAR} is not set, so every STATE-CHANGING route is refused with HTTP 503. "
+            f"Reads still work, which is why the dashboard renders while its buttons do "
+            f"nothing. Nothing is open: writes fail closed."
+        )
+        remedy = (
+            f"Set {ENV_VAR} to the same value in the backend's .env AND in the dashboard's "
+            f"environment, then restart the backend. Trading cannot start until you do: "
+            f"starting a session, enabling live trading and the emergency stop are all "
+            f"write routes."
+        )
+
+    return {
+        "writeAuthEnabled": configured,
+        # NEW, and the reason this function was touched: a UI needs to know
+        # whether a write can succeed, not merely whether auth is enabled.
+        "writesPossible": writes_possible,
+        "openWritesAllowed": open_writes,
+        "remedy": remedy,
+        "scheme": "Bearer" if configured else None,
+        "envVar": ENV_VAR,
+        "readsProtected": False,
+        "note": note,
     }

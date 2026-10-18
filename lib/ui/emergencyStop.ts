@@ -36,5 +36,20 @@ export function stopFailureMessage(cause: { httpStatus?: number; networkError?: 
     typeof cause.httpStatus === 'number'
       ? `Backend refused the stop: HTTP ${cause.httpStatus}.`
       : `Could not reach the backend (${cause.networkError || 'network error'}).`;
-  return `${prefix} The system is NOT stopped.`;
+
+  // NAME THE LIKELY CAUSE FOR THE TWO STATUSES THAT HAVE A FIXED ONE.
+  //
+  // Writes fail closed when TRADES_API_KEY (backend, 503) or
+  // DASHBOARD_PASSWORD (proxy, 401) is unset — correct on a real-money
+  // service, and a bare "HTTP 503" on THIS button sends the operator looking
+  // for a backend outage during the moment they most need to act. The status
+  // is still printed, because a guess that displaced the fact would be worse.
+  const hint =
+    cause.httpStatus === 503
+      ? ' This is what an unset TRADES_API_KEY looks like: the backend refuses every write. Stop the agent at the exchange if you need it stopped now.'
+      : cause.httpStatus === 401
+        ? ' This is what an unset DASHBOARD_PASSWORD looks like: the dashboard proxy refuses every write. Stop the agent at the exchange if you need it stopped now.'
+        : '';
+
+  return `${prefix} The system is NOT stopped.${hint}`;
 }

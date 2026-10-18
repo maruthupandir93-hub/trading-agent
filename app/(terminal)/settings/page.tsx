@@ -23,6 +23,7 @@ import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
 import { ExitRulesPanel } from '@/components/operator/ExitRulesPanel';
 import { TestnetPanel } from '@/components/operator/TestnetPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
+import { describeWriteRefusal, writeBlocker, type BackendAuthStatus } from '@/lib/writeBlocker';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
 interface TradingModeData {
@@ -38,9 +39,19 @@ export default function SettingsPage() {
   const { config, setConfig, activeProvider, resolvedModel, hasKey } = useAppState();
   const tradingMode = useBackend<TradingModeData>(BACKEND_PATHS.tradingMode, { intervalMs: 5_000 });
   const exchange = useBackend<Record<string, unknown>>(BACKEND_PATHS.exchangeStatus, { intervalMs: 30_000 });
-  const admin = useBackend<{ isPaused?: boolean; emergencyStop?: boolean; auth?: { writeAuthEnabled?: boolean; note?: string } }>(
+  const admin = useBackend<{ isPaused?: boolean; emergencyStop?: boolean; auth?: BackendAuthStatus }>(
     BACKEND_PATHS.adminStatus, { intervalMs: 15_000 },
   );
+
+  // THE BLOCKER IS READ BEFORE ANYTHING IS CLICKED.
+  //
+  // Every control on this page is a write, and with TRADES_API_KEY unset the
+  // backend refuses all of them with a 503 whose JSON used to land in a toast
+  // one button at a time. The refusal is correct -- writes fail closed on a
+  // real-money service -- but discovering it from a toast after clicking is the
+  // failure `VenueSwitchPanel` already avoids by rendering its blocker above
+  // its control. Same rule here, for the same reason.
+  const blocker = writeBlocker(admin.data?.auth);
   const polymarket = useBackend<{ enabled?: boolean; gateMeaning?: string }>(BACKEND_PATHS.polymarket, { intervalMs: 60_000 });
 
   const live = tradingMode.data?.liveTradingEnabled === true;
@@ -92,7 +103,12 @@ export default function SettingsPage() {
         } catch {
           /* a non-JSON refusal is still a refusal */
         }
-        setToggleError(`Refused: ${detail}`);
+        // Rewritten rather than echoed: the backend's own text names an
+        // escape hatch (ALLOW_UNAUTHENTICATED_WRITES) that is not an equal
+        // option on a public deployment, and says nothing about the frontend
+        // half of the same configuration. Anything unrecognised falls through
+        // to the backend's wording unchanged.
+        setToggleError(`Refused: ${describeWriteRefusal(res.status, detail)}`);
         // Re-read the real state rather than assuming the old one is still
         // right — the refusal may have come after a partial change.
         tradingMode.reload();
@@ -115,6 +131,27 @@ export default function SettingsPage() {
   return (
     <div className="space-y-3">
       <h1 className="text-[17px] font-semibold">Settings</h1>
+
+      {blocker ? (
+        <Card>
+          <div className="flex items-center gap-2 mb-2">
+            <Badge state="CRITICAL" label="Writes disabled" />
+            <span className="text-[12px] font-semibold">{blocker.title}</span>
+          </div>
+          <p className="text-[11.5px] leading-relaxed mb-2" style={{ color: 'var(--text-secondary)' }}>
+            Reads still work, which is why this page renders while every control on it is
+            refused. Nothing is open — writes fail closed on purpose. Until this is set the
+            agent cannot start a session, enable live trading, switch venue, or fire the
+            emergency stop.
+          </p>
+          <ol className="text-[11.5px] leading-relaxed list-decimal pl-4 space-y-1"
+              style={{ color: 'var(--text-secondary)' }}>
+            {blocker.steps.map((step) => (
+              <li key={step} className="mono text-[11px]">{step}</li>
+            ))}
+          </ol>
+        </Card>
+      ) : null}
 
       {/* ─── Trading Mode Toggle ─── */}
       <Card>
@@ -221,12 +258,36 @@ export default function SettingsPage() {
         <Card>
           <SectionTitle>API auth</SectionTitle>
           <div className="flex items-center gap-2 mb-2">
-            <Badge state={admin.data.auth.writeAuthEnabled ? 'PASS' : 'WARN'}
-                   label={admin.data.auth.writeAuthEnabled ? 'Write auth on' : 'All endpoints open'} />
+            {/* "All endpoints open" WAS A FALSE CLAIM and it is the one that
+                wastes a day: it was true while `require_write_auth` was a
+                no-op, and became the exact opposite of the truth when writes
+                began failing closed. An operator reading it concluded
+                everything was permitted while every button was being refused. */}
+            <Badge
+              state={
+                admin.data.auth.writeAuthEnabled
+                  ? 'PASS'
+                  : admin.data.auth.openWritesAllowed
+                    ? 'WARN'
+                    : 'CRITICAL'
+              }
+              label={
+                admin.data.auth.writeAuthEnabled
+                  ? 'Write auth on'
+                  : admin.data.auth.openWritesAllowed
+                    ? 'Writes open — no key required'
+                    : 'Writes refused — no key set'
+              }
+            />
           </div>
           <div className="text-[11.5px] leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
             {admin.data.auth.note}
           </div>
+          {admin.data.auth.remedy ? (
+            <div className="text-[11.5px] leading-relaxed mt-2" style={{ color: 'var(--text-secondary)' }}>
+              {admin.data.auth.remedy}
+            </div>
+          ) : null}
         </Card>
       ) : null}
 
