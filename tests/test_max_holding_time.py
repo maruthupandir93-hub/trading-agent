@@ -142,7 +142,10 @@ def test_a_scalp_is_bounded_in_minutes_and_a_swing_in_days():
 def test_a_scalp_held_past_its_horizon_is_closed_on_time(monitor):
     """The live symptom, reproduced: a Scalping position open for over an hour."""
     pos = _open(monitor, strategy="Scalping")
-    _age(pos, 90)                      # the profile's bound is 30 minutes
+    # Scalping DECLARES 30 minutes; the EFFECTIVE bound is floored at
+    # MIN_HOLDING_BARS of the analysis timeframe (8 x 15m = 120 min). See
+    # `test_the_bound_is_floored_so_the_clock_stays_a_backstop` for why.
+    _age(pos, 180)
 
     _tick(monitor, 100.0)              # neither stop nor target is anywhere near
 
@@ -230,3 +233,69 @@ def test_the_time_exit_is_a_close_and_never_a_halt(monitor):
         assert forbidden not in src, (
             f"_check_price consults {forbidden}; an exit may never be gated"
         )
+
+
+def test_the_bound_is_floored_so_the_clock_stays_a_backstop(monitor):
+    """A rule that fires on almost every trade is not a backstop.
+
+    MEASURED on 5 instruments x 1000 real 15m candles with the RAW profile
+    bounds: Arbitrage ended 98% of its trades on the clock and Scalping 95%,
+    because their stated horizons ("Seconds", "Seconds to minutes") are one and
+    two bars of a 15-minute chart. A position cut after one bar never had the
+    chance to reach either level, so the clock had become the PRIMARY exit.
+
+    NOT AN EXPECTANCY CLAIM, and that distinction is the point. Pooled over 850
+    trades the floor moves the edge by at most 0.016R while
+    `evidence.required_gap(850)` puts the smallest detectable gap at 0.0988R --
+    six times larger. An earlier single-symbol run showed the time exit
+    improving 7 of 11 strategies and a four-symbol run showed it harming them;
+    both were the same noise, read in the direction the reader was hoping for.
+
+    The original complaint is still fixed: eight bars of a 15m chart is two
+    hours, and the live positions that prompted this ran nine and fourteen.
+    """
+    from backend.algorithms.strategy_profiles import (
+        MIN_HOLDING_BARS, ANALYSIS_BAR_MINUTES, effective_holding_minutes, get_profile,
+    )
+
+    floor = MIN_HOLDING_BARS * ANALYSIS_BAR_MINUTES
+    assert get_profile("Scalping").max_holding_minutes < floor
+    assert effective_holding_minutes("Scalping") == floor
+
+    # Behaviourally: inside the floor it is left alone...
+    pos = _open(monitor, strategy="Scalping")
+    _age(pos, floor - 30)
+    _tick(monitor, 100.0)
+    assert monitor.snapshot_open(), "closed before the floored bound"
+
+    # ...and past it, it closes.
+    _age(pos, floor + 30)
+    _tick(monitor, 100.0)
+    assert not monitor.snapshot_open()
+
+
+def test_a_declared_bound_above_the_floor_is_used_unchanged(monitor):
+    """The floor raises short bounds; it must not lower long ones."""
+    from backend.algorithms.strategy_profiles import effective_holding_minutes, get_profile
+
+    for agent in ("Trend", "Swing", "Breakout", "Range"):
+        declared = get_profile(agent).max_holding_minutes
+        assert effective_holding_minutes(agent) == declared, agent
+
+
+def test_the_backtest_and_the_monitor_apply_THE_SAME_bound():
+    """Issue E in one assertion.
+
+    A backtest applying a different bound from production measures a strategy
+    production does not run — and it would be invisible, because both would
+    look reasonable in isolation. One function, called by both.
+    """
+    import inspect
+    from tests.sourceutil import code_only
+    from backend.agents.position_monitor import PositionMonitorAgent
+    from backend.core import strategy_backtest as bt
+
+    monitor_src = code_only(inspect.getsource(PositionMonitorAgent._max_holding_minutes))
+    backtest_src = code_only(inspect.getsource(bt.backtest_strategy))
+    assert "effective_holding_minutes" in monitor_src
+    assert "effective_holding_minutes" in backtest_src

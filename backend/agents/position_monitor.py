@@ -2005,15 +2005,19 @@ class PositionMonitorAgent(BaseAgent):
         if not name:
             return None
         try:
-            from backend.algorithms.strategy_profiles import get_profile
+            # THE SHARED RULE, not the raw profile value. `effective_holding_minutes`
+            # floors the bound at MIN_HOLDING_BARS of the analysis timeframe so the
+            # clock stays a backstop rather than becoming the primary exit --
+            # measured, Arbitrage and Scalping were ending 98% and 95% of trades on
+            # the clock because their stated horizons are one and two bars.
+            #
+            # The BACKTEST calls the same function, which is what keeps it
+            # measuring the strategy production actually runs (Issue E).
+            from backend.algorithms.strategy_profiles import effective_holding_minutes
 
-            profile = get_profile(str(name))
+            return effective_holding_minutes(str(name))
         except Exception:  # pragma: no cover - a missing profile is not fatal
             return None
-        if profile is None:
-            return None
-        bound = getattr(profile, "max_holding_minutes", None)
-        return int(bound) if bound else None
 
     def _held_minutes(self, pos: "_Tracked") -> Optional[float]:
         """How long this position has been open, in minutes, or None.

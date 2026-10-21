@@ -162,28 +162,49 @@ Four properties, each pinned by `tests/test_max_holding_time.py`:
 > *Claim: zero rows in `reflections`, `debate_records`, `hypotheses`,
 > `strategy_versions`.*
 
-**CONFIRMED, and the cause is sharper than "the agent has not learned yet."**
-Checked by searching for every writer:
+**THE SYMPTOM IS CONFIRMED. MY FIRST DIAGNOSIS OF ITS CAUSE WAS WRONG, and
+correcting it is the finding.**
 
-| table | writers in the backend |
+I first reported that three of the four tables had **no writer anywhere**, and
+recommended adding INSERTs. That was produced by searching `backend/` only.
+Searching the whole repository:
+
+| table | writers |
 |---|---|
-| `reflections` | 1 — `reflection_agent.py:390` |
-| `debate_records` | **none** |
-| `hypotheses` | **none** (they persist to `.data/hypotheses.json` via `research_store`) |
-| `strategy_versions` | **none** (`signal_version()` exists; nothing records it) |
+| `reflections` | `backend/agents/reflection_agent.py`, `lib/reflectionStore.server.ts`, `scripts/import_json_to_postgres.py` |
+| `debate_records` | `lib/debateStore.server.ts`, `scripts/import_json_to_postgres.py` |
+| `hypotheses` | `lib/hypothesisStore.server.ts`, `scripts/import_json_to_postgres.py` |
+| `strategy_versions` | `lib/strategyVersionStore.server.ts`, `scripts/import_json_to_postgres.py` |
 
-Three of the four tables **cannot** have rows: no `INSERT` exists anywhere. They
-are declared in `db/schema.sql` with full columns, read by the API, and never
-produced — the schema-level instance of the same shape.
+**Every one of them has a writer. They are the BROWSER's tables**, and
+`lib/debateStore.server.ts` even reads back and `UPDATE`s them. This is the
+"two data stores, both real — do not consolidate them" split CLAUDE.md
+describes: Postgres is authoritative for the backend agent, and these four are
+written by the Next.js side.
 
-`hypotheses` is **not** a bug to fix by adding an INSERT: it already persists to
-JSON, and a second writer is precisely the two-books hazard CLAUDE.md forbids.
-The remaining two are real attribution gaps and are tracked as such.
+So the rows are zero because **the browser-side features that produce them have
+not been used on this deployment**, not because nothing can produce them.
 
-What already works and answers most of the review's required outcome:
-`trades.strategy`, `trades.run_id` and `trades.entry_context` are carried
-plan → TAR → CRO → approval → row, so *which strategy made each trade* and *what
-the market looked like when it was chosen* are both recorded.
+**AND ADDING THE BACKEND INSERTs I FIRST RECOMMENDED WOULD HAVE BEEN A REAL
+BUG** — the exact two-writers corruption CLAUDE.md records for the `positions`
+table, where a second writer means "the operator's next save deletes every
+position the agent holds". A backend writer on `debate_records` would collide
+with `debateStore.server.ts`'s own `INSERT`/`UPDATE` cycle on the same ids.
+
+One further correction, because the two are different concepts and I conflated
+them: `strategy_versions` is a **parameter-optimiser** table (`objective`,
+`algorithm ∈ grid|random|genetic|bayesian`, `params`, `train_metrics`,
+`test_metrics`). It has nothing to do with `core/strategy_versions.signal_version()`,
+which is a revision counter for rejecting stale backtest priors. The backend's
+own optimiser, `agents/optimizer_agent.optimize_strategy`, has **no callers** —
+so writing rows there would mean fabricating optimisation runs that never
+happened (invariant 6).
+
+**What the review actually wanted is already satisfied by the backend's own
+chain**: `trades.strategy`, `trades.run_id` and `trades.entry_context` travel
+plan → TAR → CRO → approval → row, so *which strategy made each trade* and
+*what the market looked like when it was chosen* are both recorded, and
+`reflections` has a live backend writer for *why it won or lost*.
 
 ---
 
@@ -342,6 +363,52 @@ Two points worth recording, because acting on them wrongly would cost money:
 
 ---
 
+## The live measurement, and the claim it did NOT support
+
+Closing the backtest gap made the time exit measurable for the first time, so
+it was measured rather than assumed — 5 instruments x 1000 real 15m candles,
+split 60/40.
+
+**THE FIRST TWO RUNS CONTRADICTED EACH OTHER, AND BOTH WERE NOISE.** A
+single-symbol run on SOL showed the time exit improving 7 of 11 strategies. A
+four-symbol run showed it costing −0.0704R out of sample. Pooled over five
+symbols and ~850 trades the whole spread across every floor setting is 0.016R,
+while `evidence.required_gap(850)` puts the smallest detectable gap at
+**0.0988R** — six times larger.
+
+So: **the time exit's effect on expectancy is not distinguishable from zero.**
+It is justified as a correctness and risk control — a 14-hour position on a
+minute-scale strategy is not the trade that was entered, and it accrues funding
+nobody budgeted for — and **not** as a profit improvement. Reporting the SOL
+run as an improvement would have been exactly the error
+`backend/core/evidence.py` exists to prevent, and it ran in the direction the
+author was hoping for, which is the only direction that error ever runs.
+
+**WHAT THE MEASUREMENT DID FIND is a real defect in the bounds as first
+written.** With the raw profile horizons:
+
+| | bound in bars | trades ended by the clock |
+|---|---|---|
+| Arbitrage | 1 | **98%** |
+| Scalping | 2 | **95%** |
+
+A rule that fires on 95% of trades is not a backstop; it had become the primary
+exit, and a position cut after one bar never had the chance to reach either
+level. `MIN_HOLDING_BARS = 8` floors the bound at eight bars of the analysis
+timeframe. The original complaint is still fixed — eight bars of a 15m chart is
+two hours, and the positions that prompted this ran nine and fourteen.
+
+**AND A SECOND FINDING THE FLOOR DOES NOT FIX, which is the operator's call.**
+Even floored, Scalping ends 76% of trades on the clock and Arbitrage 73%. That
+is a **timeframe mismatch**: their stated horizons are seconds-to-minutes and
+the system analyses 15-minute candles, so on this timeframe they are not
+running their own logic. Raising the floor further would only stop them being
+scalps. `StrategyResult.timeframe_warning` now says so on any strategy whose
+clock-exit share is a majority, rather than correcting it silently — **which
+strategies run on which timeframe is a trading decision, not a code fix.** It
+matters because Scalping is the top-ranked strategy in the committed backtest
+(+0.160R), so disabling it is consequential either way.
+
 ## What changed, in files
 
 | | |
@@ -353,13 +420,30 @@ Two points worth recording, because acting on them wrongly would cost money:
 | `tests/test_risk_coherence.py` | 16 tests |
 | `tests/test_max_holding_time.py` | 8 tests |
 | `tests/test_spec_matches_execution.py` | 6 tests |
+| `backend/core/strategy_backtest.py` | time exit, trailing stop, slippage; exit mix and timeframe warning reported |
+| `backend/algorithms/strategy_profiles.py` | `effective_holding_minutes` — the one bound the monitor AND the backtest both read |
+| `tests/test_backtest_exit_policy.py` | 13 tests |
 
 ## What is still open, stated plainly
 
-1. **`debate_records` and `strategy_versions` are never written.** Confirmed; not fixed here.
-2. **The backtest does not model the live exit policy.** Guarded by a test, not closed.
-3. **Slippage and funding are not modelled** in the backtest.
-4. **The edge is ~+0.05R and not yet distinguishable from zero.** Only more real closed trades settle this, and `MIN_SAMPLE` is 20 per strategy.
+1. ~~`debate_records` and `strategy_versions` are never written.~~ **Withdrawn —
+   this was my own misdiagnosis.** Both have browser-side writers; see the
+   learning-history section. Adding backend writers would have been a genuine
+   two-writers bug.
+2. ~~The backtest does not model the live exit policy.~~ **Closed.** It now
+   models the per-strategy time exit and the trailing stop, and reports the
+   exit mix so two runs with the same expectancy can be told apart.
+3. ~~Slippage is not modelled.~~ **Closed** — charged in R on both legs,
+   `BACKTEST_SLIPPAGE_RATE`, 2 bps per leg by default. **Funding remains
+   unmodelled on purpose**: it needs a per-symbol per-period rate this module
+   does not have, and inventing one would be a fabricated cost that looks
+   measured (invariant 6). The holding bound bounds the exposure instead.
+4. **`agents/optimizer_agent.optimize_strategy` has no callers.** Dead code
+   that a reader could mistake for a live optimisation loop.
+5. **The edge is ~+0.05R and not yet distinguishable from zero.** Only more
+   real closed trades settle this, and `MIN_SAMPLE` is 20 per strategy. **This
+   is the only item on this list that matters to profitability, and no code
+   change closes it.**
 
 ## What no change in this document can deliver
 

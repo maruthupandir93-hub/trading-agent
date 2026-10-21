@@ -507,6 +507,63 @@ def get_profile(agent: str) -> Optional[StrategyProfile]:
     return _BY_AGENT.get(agent)
 
 
+# THE TIME EXIT IS A BACKSTOP, AND A BACKSTOP MUST BE RARE.
+#
+# Measured on 5 instruments x 1000 real 15m candles: with the raw profile
+# bounds, Arbitrage exited on the clock on 98% of trades and Scalping on 95%,
+# because their stated horizons ("Seconds", "Seconds to minutes") are one and
+# two bars of a 15-minute chart. A position cut after one bar never had the
+# chance to reach either level, so the clock had become the PRIMARY exit rather
+# than a guard against a stuck one.
+#
+# THIS IS NOT AN EXPECTANCY CLAIM. Pooled over 850 trades the floor moves the
+# edge by at most 0.016R, and `evidence.required_gap(850)` puts the smallest
+# detectable gap at 0.0988R -- six times larger, so the difference is noise. It
+# is justified by the PROPERTY: a rule that fires on 95% of trades is not an
+# exception, and a strategy label on a trade the clock ended after two bars
+# explains nothing about why the trade was taken.
+#
+# Eight bars of the analysis timeframe. The original complaint -- 9-hour and
+# 14-hour holds on minute-scale strategies -- is still fixed, because eight
+# bars of a 15m chart is two hours.
+MIN_HOLDING_BARS = 8
+
+# The timeframe the live system makes decisions on. Named here rather than
+# imported from the graph so this module stays free of graph imports; a test
+# asserts the two agree, which is the arrangement the ATR multipliers should
+# have had from the start.
+ANALYSIS_BAR_MINUTES = 15
+
+
+def effective_holding_minutes(
+    agent: str, bar_minutes: Optional[float] = None
+) -> Optional[int]:
+    """The holding bound actually applied, floored so it stays a backstop.
+
+    READ BY BOTH the live `position_monitor` and `core/strategy_backtest`. One
+    function rather than two, because a backtest applying a different bound
+    from production is precisely the Issue E defect this area was fixed for --
+    a backtest would then measure a strategy production does not run.
+
+    `bar_minutes` lets the backtest pass the interval it actually measured from
+    the candles; the live path uses the analysis timeframe.
+
+    None when the strategy has no profile or declares no bound -- never a
+    guessed default, because a manual position closes with `strategy` NULL by
+    design and inventing a horizon would close the operator's own trade on a
+    rule they never chose.
+    """
+    profile = get_profile(agent) if agent else None
+    if profile is None:
+        return None
+    declared = getattr(profile, "max_holding_minutes", None)
+    if not declared:
+        return None
+    per_bar = bar_minutes if (bar_minutes and bar_minutes > 0) else ANALYSIS_BAR_MINUTES
+    return int(max(declared, MIN_HOLDING_BARS * per_bar))
+
+
+
 # ---------------------------------------------------------------------------
 # Regime vocabulary translation.
 #

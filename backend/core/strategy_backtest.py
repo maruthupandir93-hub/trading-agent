@@ -54,7 +54,80 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+import os
+
 from backend.services.fees import taker_rate
+
+
+# SLIPPAGE, AS A FRACTION OF PRICE PER LEG.
+#
+# The backtest fills at exactly the stop or the target. A live market order
+# does not: it crosses the spread, and a stop fills through its trigger in the
+# move that triggered it. Reporting that as zero is the same flattery the
+# testnet mirror exists to remove -- a simulated fill reports spread, slippage
+# and partial fills all as zero, and every one of them appears on day one of
+# real money.
+#
+# 2 bps per leg is deliberately conservative for the liquid USDT perpetuals
+# this agent trades, and it is env-readable because it is a property of the
+# VENUE and the instrument rather than of this code. It is NOT measured, and
+# saying so matters: `execution_quality` records real slippage per fill, and
+# once enough live fills exist this should be replaced by that measurement
+# rather than left as an assumption that looks like one.
+# WHAT THIS FILE STILL DOES NOT MODEL: FUNDING.
+#
+# Perpetual funding accrues per 8h interval on the notional, so costing it
+# needs a funding rate per symbol per period that this module does not have and
+# would have to invent. An invented funding number would be the most
+# persuasive fabrication available here, because it would look exactly like a
+# measured cost — invariant 6 forbids precisely that. The per-strategy holding
+# bound bounds the exposure instead, and this absence is stated in the stored
+# output rather than left for a reader to discover.
+SLIPPAGE_RATE_PER_LEG = 0.0002
+SLIPPAGE_VAR = "BACKTEST_SLIPPAGE_RATE"
+
+
+def slippage_rate() -> float:
+    """Read at call time, never frozen at import (the `simulation_mode` rule)."""
+    raw = os.getenv(SLIPPAGE_VAR)
+    if not raw:
+        return SLIPPAGE_RATE_PER_LEG
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return SLIPPAGE_RATE_PER_LEG
+    return value if value >= 0 else SLIPPAGE_RATE_PER_LEG
+
+
+def bar_minutes(candles: List[Dict[str, Any]]) -> Optional[float]:
+    """Minutes per candle, from the data rather than from a passed-in label.
+
+    A holding bound is written in MINUTES and this series is indexed in BARS,
+    so one cannot be applied to the other without it. Derived from the median
+    gap between consecutive `openTime` values -- the median rather than the
+    first gap, because a single missing candle would otherwise double the
+    inferred interval and halve every bound.
+
+    None when it cannot be derived, which is NOT the same as "no bound": the
+    caller treats it as "the time exit could not be modelled" and says so,
+    rather than silently applying a guessed interval.
+    """
+    stamps = []
+    for c in candles:
+        t = c.get("openTime")
+        if isinstance(t, (int, float)) and t > 0:
+            stamps.append(float(t))
+    if len(stamps) < 3:
+        return None
+    gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]) if b > a)
+    if not gaps:
+        return None
+    median = gaps[len(gaps) // 2]
+    # Binance klines are milliseconds. A gap under 1000 would mean seconds,
+    # which this project never requests, so treating it as ms is safe and a
+    # wrong unit would be caught by the implausible-interval guard below.
+    minutes = median / 60000.0
+    return minutes if 0.1 <= minutes <= 10080 else None
 from backend.core.risk_manager import ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER
 
 # The signal function contract: candles in, "BUY" | "SELL" | "HOLD" out. Exactly
@@ -115,6 +188,29 @@ class StrategyResult:
     # keeps working.
     gross_expectancy_r: float = 0.0
     fee_r_per_trade: float = 0.0
+    # HOW THE TRADES ENDED, so a reader can tell WHICH exit policy produced
+    # this expectancy. Two runs with the same number can be different
+    # strategies: one that mostly reaches its target and one that mostly runs
+    # out of time are not the same thing, and the difference is invisible in
+    # the expectancy alone.
+    exits: Dict[str, int] = field(default_factory=dict)
+    # Set when a requested model could NOT be applied -- e.g. a holding bound
+    # was asked for but the candle interval was underivable. Stated rather than
+    # silently ignored, so a run is never read as having modelled something it
+    # did not.
+    note: Optional[str] = None
+    # Share of closed trades the CLOCK ended, derived so a reader does not have
+    # to. A majority here means the strategy is not running its own logic on
+    # this timeframe -- see `timeframe_warning`.
+    time_exit_share: float = 0.0
+    # Set when the clock is ending MOST trades, which means the strategy's
+    # stated horizon is shorter than this candle interval can express. Measured
+    # on 5 instruments x 1000 real 15m candles: Scalping 76%, Arbitrage 73%
+    # even after the MIN_HOLDING_BARS floor. That is a TIMEFRAME MISMATCH, not
+    # something a longer bound fixes -- raising it further would just stop the
+    # strategy being a scalp. Reported rather than silently corrected, because
+    # which strategies to run on which timeframe is the operator's decision.
+    timeframe_warning: Optional[str] = None
     trade_log: List[Dict[str, Any]] = field(default_factory=list)
 
     def summary(self) -> Dict[str, Any]:
@@ -153,6 +249,11 @@ def backtest_strategy(
     target_mult: float = ATR_TARGET_MULTIPLIER,
     atr_period: int = ATR_PERIOD,
     window: int = 120,
+    # THE LIVE EXIT POLICY. Defaults match the live defaults exactly, so a run
+    # with no arguments measures what production does today and the stored
+    # backtests stay comparable.
+    max_holding_minutes: Optional[int] = None,
+    trail_r: float = 0.0,
 ) -> StrategyResult:
     """Walk the candles, take every signal, simulate under the live risk model.
 
@@ -161,6 +262,42 @@ def backtest_strategy(
     live must be measured on 120 bars, or the backtest tests a different function.
     """
     reward_per_r = target_mult / stop_mult  # +2.0 with the live 5.0/2.5
+
+    # THE HOLDING BOUND, CONVERTED TO BARS ONCE.
+    #
+    # `max_holding_minutes` is live by default now, so a backtest that ignores
+    # it measures a strategy production does not run. None when no bound was
+    # given OR when the interval could not be derived -- and those are
+    # different facts, so the second is reported rather than silently treated
+    # as "no bound".
+    minutes_per_bar = bar_minutes(candles)
+
+    # THE SHARED FLOOR. When the caller passes no explicit bound, the bound is
+    # whatever the LIVE system would apply to this strategy -- read from the
+    # same `effective_holding_minutes` the position monitor calls, measured
+    # against the interval derived from these very candles.
+    #
+    # One function rather than two is the whole point: a backtest applying a
+    # different bound from production is the Issue E defect this area was fixed
+    # for, and it would be invisible because both would look reasonable alone.
+    if max_holding_minutes is None:
+        try:
+            from backend.algorithms.strategy_profiles import effective_holding_minutes
+
+            max_holding_minutes = effective_holding_minutes(name, minutes_per_bar)
+        except Exception:  # pragma: no cover - a missing profile is not fatal
+            max_holding_minutes = None
+
+    max_bars: Optional[int] = None
+    time_exit_note: Optional[str] = None
+    if max_holding_minutes:
+        if minutes_per_bar:
+            max_bars = max(1, int(round(max_holding_minutes / minutes_per_bar)))
+        else:
+            time_exit_note = (
+                "a holding bound was requested but the candle interval could not "
+                "be derived, so the time exit was NOT modelled"
+            )
 
     trades: List[Trade] = []
     i = atr_period
@@ -193,22 +330,77 @@ def backtest_strategy(
         outcome = "open_at_end"
         r = 0.0
 
+        risk_per_unit_price = stop_mult * atr
+
+        def _r_at(level: float) -> float:
+            """R realised at `level`, measured against the ORIGINAL risk.
+
+            An untrailed stop is exactly -1.0, so this is byte-for-byte the old
+            behaviour for every trade the trail does not touch.
+
+            IT EXISTS BECAUSE HARDCODING -1.0 MADE THE TRAIL WORTHLESS. The
+            trailed exit price was recorded correctly and the R was not, so a
+            trade that trailed to +0.6R still booked a full -1R and every
+            backtest reported the trail as having no effect. Found by the test
+            that asserts a reversal exits better WITH the trail than without —
+            the exit prices differed (97.5 vs 101.5) and `total_r` did not.
+
+            The denominator stays the ORIGINAL risk on purpose: R is defined by
+            what was staked at entry, so re-basing it on the trailed distance
+            would make a tightened stop look like a bigger loss than it was.
+            """
+            if risk_per_unit_price <= 0:
+                return 0.0
+            moved = (level - entry) if long else (entry - level)
+            return moved / risk_per_unit_price
+
         for j in range(i + 1, n):
             high = float(candles[j]["high"])
             low = float(candles[j]["low"])
             hit_stop = low <= stop if long else high >= stop
             hit_target = high >= target if long else low <= target
+
+            # STOP AND TARGET FIRST, AND THE STOP WINS AN AMBIGUOUS BAR.
+            # Checked before the trail and the clock because a bar that reached
+            # a price level resolved there; letting a later rule claim it would
+            # overstate the strategy.
             if hit_stop and hit_target:
                 # Ambiguous bar — assume the STOP filled first. Conservative.
-                outcome, exit_price, r = "stop", stop, -1.0
+                outcome, exit_price, r = "stop", stop, _r_at(stop)
                 exit_index = j
                 break
             if hit_stop:
-                outcome, exit_price, r = "stop", stop, -1.0
+                outcome, exit_price, r = "stop", stop, _r_at(stop)
                 exit_index = j
                 break
             if hit_target:
                 outcome, exit_price, r = "target", target, reward_per_r
+                exit_index = j
+                break
+
+            # THE TRAIL, in R, the units the live rule is written in.
+            #
+            # Ratchets toward price and NEVER away from it, which is the one
+            # rule `tighten_stop` enforces live: a stop that can loosen is not
+            # a stop. Measured against the bar's favourable extreme, because
+            # that is what the live monitor sees on the ticks inside the bar.
+            if trail_r > 0 and risk_per_unit_price > 0:
+                best = high if long else low
+                gain_r = ((best - entry) if long else (entry - best)) / risk_per_unit_price
+                if gain_r >= trail_r:
+                    trailed = (
+                        best - trail_r * risk_per_unit_price if long
+                        else best + trail_r * risk_per_unit_price
+                    )
+                    stop = max(stop, trailed) if long else min(stop, trailed)
+
+            # THE CLOCK, LAST. A position that reached neither level and is past
+            # its strategy's horizon exits at the bar's close, which is the
+            # honest fill for a decision made on that bar.
+            if max_bars is not None and (j - i) >= max_bars:
+                exit_price = float(candles[j]["close"])
+                r = ((exit_price - entry) if long else (entry - exit_price)) / risk_per_unit_price
+                outcome = "time"
                 exit_index = j
                 break
 
@@ -232,7 +424,11 @@ def backtest_strategy(
         # A wider stop therefore costs proportionally less, which is the real
         # relationship and the reason this cannot be a flat constant.
         risk_per_unit = stop_mult * atr
-        fee_r = (2.0 * taker_rate() * entry / risk_per_unit) if risk_per_unit > 0 else 0.0
+        # Two legs each, and both scale with the entry price against the stop
+        # distance for the reason the fee comment gives: a wider stop costs
+        # proportionally less, so neither can be a flat constant.
+        cost_rate = 2.0 * (taker_rate() + slippage_rate())
+        fee_r = (cost_rate * entry / risk_per_unit) if risk_per_unit > 0 else 0.0
 
         trades.append(Trade(
             direction="long" if long else "short",
@@ -244,11 +440,19 @@ def backtest_strategy(
         # Resume scanning AFTER the exit — one position at a time.
         i = exit_index + 1
 
-    return _summarise(name, trades)
+    return _summarise(name, trades, note=time_exit_note)
 
 
-def _summarise(name: str, trades: List[Trade]) -> StrategyResult:
-    closed = [t for t in trades if t.outcome in ("target", "stop")]
+def _summarise(name: str, trades: List[Trade], note: Optional[str] = None) -> StrategyResult:
+    # A TIME EXIT IS A REALISED CLOSE, AND EXCLUDING IT WOULD BE THE SAME BUG
+    # THE LEDGER ALREADY HAD. `/api/stats` once reported `totalClosedTrades: 0`
+    # on an account that had been trading, because the reconstruction demanded
+    # a shape real closes did not have. A trade closed by the clock has a real
+    # entry, a real exit and a real R; dropping it would measure only the
+    # trades that reached a price level and flatter every strategy whose
+    # positions go nowhere -- which is precisely the behaviour the holding
+    # bound exists to penalise.
+    closed = [t for t in trades if t.outcome in ("target", "stop", "time")]
     wins = [t for t in closed if t.r_multiple > 0]
     losses = [t for t in closed if t.r_multiple <= 0]
     open_at_end = sum(1 for t in trades if t.outcome == "open_at_end")
@@ -270,6 +474,8 @@ def _summarise(name: str, trades: List[Trade]) -> StrategyResult:
     expectancy = gross_expectancy - avg_fee_r
     payoff = (avg_win / abs(avg_loss)) if avg_loss else None
     total_r = sum(t.r_multiple - t.fee_r for t in closed)
+    n_time = sum(1 for t in closed if t.outcome == "time")
+    time_share = (n_time / n_closed) if n_closed else 0.0
 
     return StrategyResult(
         strategy=name,
@@ -285,5 +491,19 @@ def _summarise(name: str, trades: List[Trade]) -> StrategyResult:
         payoff=round(payoff, 4) if payoff is not None else None,
         total_r=round(total_r, 4),
         open_at_end=open_at_end,
+        exits={
+            outcome: sum(1 for t in trades if t.outcome == outcome)
+            for outcome in ("target", "stop", "time", "open_at_end")
+            if any(t.outcome == outcome for t in trades)
+        },
+        note=note,
+        time_exit_share=round(time_share, 4),
+        timeframe_warning=(
+            f"{time_share:.0%} of closed trades were ended by the holding bound, not by "
+            f"the stop or the target. {name}'s stated horizon is shorter than this candle "
+            f"interval can express, so these results describe the clock more than the "
+            f"strategy. Measure it on a finer timeframe or do not run it on this one."
+            if time_share > 0.5 else None
+        ),
         trade_log=[asdict(t) for t in trades],
     )
