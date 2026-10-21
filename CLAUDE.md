@@ -3052,7 +3052,7 @@ run before `_UNRESPONSIVE_THRESHOLD` existed.
 
 ### The October 2026 diagnosis, and the one shape most of it had
 
-`docs/DIAGNOSIS_2026-10-15.md` is a 94-finding audit across four rounds, run
+`docs/DIAGNOSIS_2026-10-15_REMEDIATION.md` records a 94-finding audit across four rounds (the audit document itself has since been removed from the tree; the remediation is the surviving record), run
 against a deployment that had been **frozen since 2026-10-11** on a phantom XRP
 position: 47,298 polls, 2,469 analyses, 2 trades. Every finding is fixed or
 explicitly declined, and the ones with lasting consequences are written into
@@ -3205,6 +3205,113 @@ because nothing was configured — not because they had isolated anything.
 `DASHBOARD_PASSWORD` and pins `ALLOW_UNAUTHENTICATED_WRITES` explicitly, so the
 suite runs a KNOWN configuration instead of the operator's. `test_api_auth.py`
 owns the real behaviour and sets both itself.
+
+### The risk configuration halted itself on routine variance, and nothing checked
+
+The operator reported four losses in five trades with "more amount losses" and
+a stopped agent, and read it as broken strategies. The arithmetic says
+otherwise, and separating the two is the whole finding:
+
+    MAX_PORTFOLIO_VAR_FRACTION  0.12   -> a stop-out costs ~12% of equity
+    MAX_DRAWDOWN_FROM_HWM       0.30   -> the killswitch fires at 30%
+    losses to halt              2.5
+
+**FOUR LOSSES IN FIVE IS ROUTINE AT THIS PAYOFF.** The fixed 2:1 makes
+break-even a 33% win rate, so the per-trade loss probability is ~0.64 and four
+in a row is 0.64^4 = 17%, about one session in six. The strategies were not
+disproved. The account was sized so that ordinary variance ended the session
+before enough trades existed to measure anything — and five trades cannot
+distinguish a profitable strategy from a worthless one in any case.
+
+**THE SHIPPED DEFAULTS ARE SELF-DEFEATING TOO**, which is why this is a check
+and not a correction to one operator's `.env`: 0.05 against 0.10 halts after
+**2.0** losses, which happens 41% of the time. `ceo_agent` already carried this
+arithmetic in a comment — *"a limit certain to fire within the first handful of
+trades stops being a disaster brake and becomes a scheduled outage"* — and
+nothing acted on it. The same shape as every other finding in this file: a
+value computed, written down, and never used.
+
+`backend/services/risk_coherence.py` refuses a session whose own limits cannot
+survive `MIN_LOSSES_BEFORE_HALT` (8, env-readable at call time) consecutive
+stop-outs. Eight is derived, not picked: 0.64^8 = 2.8%, the point where a halt
+means something is genuinely wrong rather than that the coin came up tails.
+
+**IT REFUSES; IT NEVER RESIZES.** Silently trading a smaller size than the
+operator configured is the `simulation_mode` failure in a new place — they
+choose one risk and the system runs another. It names all three levers and says
+plainly that they are not equivalent: lowering the VaR fraction is the only one
+that reduces risk, raising the drawdown limit accepts a deeper one instead, and
+funding the account is what makes a safe fraction still clear the venue's
+minimum order. **"Could not measure" passes** with its reason stated — the
+True/False/None distinction this codebase has now paid for four times.
+
+### A strategy may not outlive the strategy that chose it
+
+`position_monitor` had exactly three exits — stop, target, partial scale-out —
+and **no concept of time anywhere in the codebase**, while every profile had
+carried `expected_holding_time` since Section 11.3 as prose nothing read. So a
+`Scalping` position whose own profile says "Seconds to minutes" ran over an
+hour on the live book and another ran 14 hours.
+
+It is a loss source, not untidiness: past its horizon a position is no longer
+the trade the signal justified — the setup has expired, it is paying funding
+nobody budgeted for, and it is exposed to a market nothing analysed. A scalp
+whose risk note says it "needs a high win rate to survive costs", held 14
+hours, is pure cost.
+
+`max_holding_minutes` is on all eleven profiles, derived from the same sentence
+so the two cannot drift, and `_check_price` closes on it as `max-holding-time`.
+Four properties, pinned by `tests/test_max_holding_time.py`:
+
+* **Near the TOP of each stated range, not the median.** This is a backstop
+  against a stuck position, not a second profit target — cutting winners early
+  is exactly how a 2:1 payoff is destroyed.
+* **A tick that hits the stop still closes as `stop-loss`.** Re-labelling it
+  would tell `strategy_performance` the clock took a trade out when the market
+  did.
+* **A manual position gets no horizon.** It closes with `strategy` NULL by
+  design; inventing one would close the operator's own trade on a rule they
+  never chose. Absence means no bound, never a default.
+* **It only ever closes**, through the ungated `_close` the stop uses, so
+  invariant 4 is untouched.
+
+### Two more ATR multipliers had drifted, and a test found them, not the review
+
+An external review flagged the Trend profile's `exit_logic` as "ATR stop at
+1.5x, target 3.0x" against the 2.5x/5.0x the system places. Prose, so never a
+live divergence in placed orders — and still the exact failure it names, for
+the third time in this codebase: a strategy whose SPEC and EXECUTION disagree
+can look profitable in a backtest and behave differently in production.
+
+The fix is structural rather than a correction: `exit_logic` INTERPOLATES
+`ATR_STOP_MULTIPLIER` / `ATR_TARGET_MULTIPLIER` and
+`tests/test_spec_matches_execution.py` fails if anyone restates them. **Its
+first run immediately caught two more the review had missed** (`VWAP`,
+`VolatilityBreakout`), which is the argument for a test over a correction.
+
+**AND THE REVIEW'S REMEDY FOR THE OTHER MISMATCH WOULD HAVE COST MONEY.** It
+correctly flagged that `position_monitor`'s comments describe a 2% profit
+target and a scale-out as enabled while both default to 0. The COMMENTS were
+stale; the CODE is right, and turning them on at this account's 10x sets a
+**93% break-even win rate** — the measurement already in the "fixed profit
+target was reversed" section above. The comments now carry that arithmetic so
+the next reader cannot make the change without seeing the cost.
+
+**WHAT THE BACKTEST STILL DOES NOT MODEL** is the live exit policy
+(`PROFIT_TARGET_PCT`, `PARTIAL_TP_FRACTION`, `TRAILING_STOP_R`,
+`max_holding_minutes`). With all four at their defaults the two agree — the ATR
+pair IS the live policy — which is why the stored backtests remain valid
+evidence. A test fails if one is turned on, so divergence is a deliberate act
+with a visible consequence rather than a silent one.
+
+**AND IT COST THE SUITE ELEVEN TESTS, the isolation lesson a third time.**
+Adding the risk-coherence refusal failed eleven `trading_session` tests about
+COMPLETELY DIFFERENT refusals — an untradeable symbol, a target below equity, a
+leverage above the ceiling — because `start_session` refused on risk coherence
+before reaching the condition each test was written to check. They had never
+pinned a risk configuration, so they inherited whichever was in force.
+`tests/conftest.py::isolate_risk_coherence` pins a coherent one, exactly as
+`isolate_write_auth` and `isolate_llm_configuration` do.
 
 ## Safety invariants — never break these
 

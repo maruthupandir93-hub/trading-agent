@@ -1,7 +1,9 @@
 # Remediation of `DIAGNOSIS_2026-10-15.md` — all 94 findings
 
-**Closed 2026-10-17.** Companion to `docs/DIAGNOSIS_2026-10-15.md`, which is
-left unedited as the record of what was found. This file records what was
+**Closed 2026-10-17.** Companion to the 94-finding audit of 2026-10-15. That
+audit document has since been removed from the tree, so this file is the
+surviving record of both what was found and what was done; every finding is
+restated here before its resolution. This file records what was
 *done*, what was *declined and why*, and what is **the operator's to do** —
 the last category is not a gap in the work, it is the set of actions that
 cannot be taken from inside the repository.

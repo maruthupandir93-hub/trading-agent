@@ -63,6 +63,10 @@ ALL_REGIMES = (REGIME_TRENDING_BULL, REGIME_TRENDING_BEAR, REGIME_RANGING, REGIM
 TRENDING = (REGIME_TRENDING_BULL, REGIME_TRENDING_BEAR)
 
 
+# Imported rather than restated: see `exit_logic` on the Trend profile.
+from backend.core.risk_manager import ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER
+
+
 @dataclass(frozen=True)
 class StrategyProfile:
     """Section 11.3's template, field for field."""
@@ -75,6 +79,24 @@ class StrategyProfile:
     best_conditions: str            # when this strategy should be active
     worst_conditions: str           # when it must be deactivated
     expected_holding_time: str
+    # THE ENFORCEABLE HALF OF `expected_holding_time`.
+    #
+    # The prose above has existed since Section 11.3 and nothing ever read it,
+    # so a `Scalping` position whose profile says "Seconds to minutes" ran for
+    # over an hour on the live book and another ran 14 hours. A position held
+    # far past its strategy's horizon is no longer the trade that was entered:
+    # the signal that justified it has expired, it is paying funding it never
+    # budgeted for, and it is exposed to a market nothing analysed.
+    #
+    # Read by `position_monitor._check_price` as a TIME EXIT. Deliberately set
+    # near the TOP of the stated range rather than its median: this is a
+    # backstop against a stuck position, not a second profit target, and
+    # cutting winners early is how a 2:1 payoff gets destroyed.
+    #
+    # None means "no time bound is appropriate" and is never a default -- an
+    # absent value would silently restore the old no-exit behaviour, which is
+    # the bug this field exists to close.
+    max_holding_minutes: Optional[int]
     risk_profile: str
     indicators_used: List[str]
     entry_logic: str
@@ -112,10 +134,24 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="A sustained directional move with the fast EMA clear of the slow EMA.",
         worst_conditions="Choppy, range-bound price action — crossovers whipsaw and every one is a loss.",
         expected_holding_time="Hours to days",
+        # Hours to days -> 2 days. Wide, because exiting a trend-follower early is how its 2:1 payoff is destroyed.
+        max_holding_minutes=2880,
         risk_profile="~1:2 R:R, tolerates a wider stop because the entry is mid-trend",
         indicators_used=["EMA(12)", "EMA(26)"],
         entry_logic="Fast EMA crosses and holds above/below the slow EMA.",
-        exit_logic="ATR stop at 1.5x, target 3.0x, or the crossover reverses.",
+        # THE MULTIPLIERS ARE INTERPOLATED FROM `core/risk_manager`, NEVER
+        # RESTATED. This line used to read "ATR stop at 1.5x, target 3.0x"
+        # while the system placed 2.5x/5.0x — the same 1:2 ratio, but a
+        # different stop distance, holding time, position size and target hit
+        # rate. An external review flagged it, and it is exactly how
+        # `lib/riskManager.ts` and `core/risk_manager.py` drifted apart on
+        # these same two numbers once before. A strategy whose SPEC and whose
+        # EXECUTION disagree can look profitable in a backtest and behave
+        # differently in production.
+        exit_logic=(
+            f"ATR stop at {ATR_STOP_MULTIPLIER}x, target {ATR_TARGET_MULTIPLIER}x "
+            f"(from core/risk_manager), or the crossover reverses."
+        ),
         position_sizing_rule="Volatility-adjusted from the ATR stop distance (core/risk_manager).",
         active_regimes=TRENDING,
         historical_success_rate=None,
@@ -133,6 +169,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Range-bound price with RSI reaching an extreme and no directional trend.",
         worst_conditions="A strong trend. RSI can sit above 70 for the entire move, and every fade is a loss against a running market.",
         expected_holding_time="Minutes to hours",
+        # Minutes to hours -> 8h. A reversion that has not reverted in 8h is not reverting; the mean has moved.
+        max_holding_minutes=480,
         risk_profile="Tight stop, modest target; a high win rate with occasional large losers",
         indicators_used=["RSI(14)"],
         entry_logic="RSI below 30 (long) or above 70 (short), with no trending regime.",
@@ -157,6 +195,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Accelerating directional movement with MACD expanding away from its signal line.",
         worst_conditions="Low-volatility drift, where MACD crossovers are noise.",
         expected_holding_time="Hours",
+        # Hours -> 6h. Momentum that has not resolved in 6h has decayed into something else.
+        max_holding_minutes=360,
         risk_profile="~1:2 R:R",
         indicators_used=["MACD(12,26,9)"],
         entry_logic="MACD crosses its signal line in the direction of the histogram's expansion.",
@@ -178,6 +218,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="High liquidity and enough short-term volatility to cover fees and spread.",
         worst_conditions="Thin books or wide spreads — fees and slippage exceed the edge.",
         expected_holding_time="Seconds to minutes",
+        # Seconds to minutes -> 30m. The profile's own risk note is that costs eat the edge; an hours-long scalp is pure cost.
+        max_holding_minutes=30,
         risk_profile="Very tight stop; needs a high win rate to survive costs",
         indicators_used=["Short-window price change"],
         entry_logic="A short-window directional impulse.",
@@ -199,6 +241,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="A clear multi-day swing within a larger trend.",
         worst_conditions="Tight consolidation with no swing amplitude.",
         expected_holding_time="Days to weeks",
+        # Days to weeks -> 7 days. The longest horizon here, and funding is the binding cost rather than time.
+        max_holding_minutes=10080,
         risk_profile="Wide stop, large target; low trade frequency",
         indicators_used=["Swing highs/lows", "EMA"],
         entry_logic="Pullback to a swing level in the direction of the higher-timeframe trend.",
@@ -220,6 +264,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Price compressing into a range, then breaking out on expanding volume.",
         worst_conditions="A market already extended in the breakout direction — the move is over.",
         expected_holding_time="Hours to days",
+        # Hours to days -> 24h. A break that has not followed through within a day has failed, which the profile lists as its own failure mode.
+        max_holding_minutes=1440,
         risk_profile="~1:2 R:R; a meaningful fraction of breakouts fail",
         indicators_used=["Range high/low", "Volume"],
         entry_logic="Close beyond the recent range boundary with volume above baseline.",
@@ -241,6 +287,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Well-defined support and resistance holding repeatedly.",
         worst_conditions="A breakout. Buying support that is about to fail is the failure mode.",
         expected_holding_time="Hours",
+        # Hours -> 12h. A range trade that has not reached the opposite boundary in 12h is in a range that is breaking.
+        max_holding_minutes=720,
         risk_profile="Tight stop just beyond the boundary; modest target",
         indicators_used=["Support/resistance levels"],
         entry_logic="Reject from a range boundary back toward the middle.",
@@ -262,6 +310,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Sideways oscillation with no net direction.",
         worst_conditions="A sustained trend. A grid accumulates against a trending market and the losses compound.",
         expected_holding_time="Hours to days (multiple simultaneous levels)",
+        # Hours to days -> 2 days. Inventory accrues; an unbounded hold is the documented grid failure.
+        max_holding_minutes=2880,
         risk_profile="Many small wins; unbounded loss if the trend runs and levels keep filling",
         indicators_used=["Price levels", "Range width"],
         entry_logic="Ladder of orders across the range.",
@@ -284,6 +334,8 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="A genuine, persistent price difference across venues that exceeds fees plus transfer cost.",
         worst_conditions="Any apparent spread that is actually a stale feed. Most are.",
         expected_holding_time="Seconds",
+        # Seconds -> 15m. A spread that has not closed in minutes was never an arbitrage.
+        max_holding_minutes=15,
         risk_profile="Low directional risk in principle; execution and latency risk dominate in practice",
         indicators_used=["Multi-venue price comparison"],
         entry_logic="Spread beyond fees and estimated slippage on both legs.",
@@ -316,10 +368,12 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Price stretched more than 2% from the 30-candle volume-weighted mean with participation thinning.",
         worst_conditions="A trending market with sustained one-way volume — VWAP rises with price and the fade loses the whole way up.",
         expected_holding_time="Minutes to hours",
+        # Minutes to hours -> 8h. VWAP itself moves; a deviation measured 8h ago is stale.
+        max_holding_minutes=480,
         risk_profile="~1:2 R:R, tight stop because the entry is a stretch that should snap back quickly",
         indicators_used=["VWAP(30)", "volume"],
         entry_logic="Price deviates >2% from the 30-candle VWAP; enter against the deviation.",
-        exit_logic="Return to VWAP, or the ATR stop at 1.5x.",
+        exit_logic=f"Return to VWAP, or the ATR stop at {ATR_STOP_MULTIPLIER}x.",
         position_sizing_rule="Volatility-adjusted from the ATR stop distance (core/risk_manager).",
         active_regimes=(REGIME_RANGING, REGIME_HIGH_VOL),
         historical_success_rate=None,
@@ -337,10 +391,15 @@ STRATEGY_PROFILES: List[StrategyProfile] = [
         best_conditions="Realised range compressed below 70% of its baseline, then an expansion candle above 150%.",
         worst_conditions="Sustained high volatility — there is no squeeze to expand out of, and every large candle looks like a signal.",
         expected_holding_time="Minutes to hours",
+        # Minutes to hours -> 12h. An expansion that has not resolved has reverted to contraction.
+        max_holding_minutes=720,
         risk_profile="~1:2 R:R, and the stop is wide by construction because entry is on an expansion candle",
         indicators_used=["realised candle range", "30-candle range baseline"],
         entry_logic="Squeeze (recent range <70% of baseline) then expansion (>150%); direction from the expansion candle.",
-        exit_logic="ATR stop at 1.5x, target 3.0x.",
+        exit_logic=(
+            f"ATR stop at {ATR_STOP_MULTIPLIER}x, target {ATR_TARGET_MULTIPLIER}x "
+            f"(from core/risk_manager)."
+        ),
         position_sizing_rule="Volatility-adjusted — the expansion itself widens the stop and therefore shrinks the size.",
         active_regimes=(REGIME_RANGING, REGIME_HIGH_VOL),
         historical_success_rate=None,

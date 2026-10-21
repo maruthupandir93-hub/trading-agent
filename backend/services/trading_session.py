@@ -1281,6 +1281,32 @@ async def start_session(
     # repeated analysis, LLM budget and rate limit spent, and nothing to show. The
     # gate still protects the ENTRY; this just stops a doomed session from being
     # started at all, with a message the operator can act on.
+    # REFUSE A CONFIGURATION THAT HALTS ITSELF ON ORDINARY VARIANCE.
+    #
+    # Placed FIRST among the refusals, because it is a property of the ACCOUNT
+    # rather than of any symbol: no choice of instrument, allocation or
+    # leverage makes a self-defeating risk setting survivable, so checking it
+    # before the per-symbol work is both cheaper and clearer.
+    #
+    # Measured on the live session this came from: a stop-out cost ~12% of
+    # equity (the VaR budget the gateway sizes to) against a 30% drawdown
+    # killswitch, so 2.5 consecutive losses halted the account. The operator saw
+    # four losses in five trades and a stopped agent, and read it as broken
+    # strategies. At this system's 2:1 payoff the break-even win rate is 33%, so
+    # four losses in five is entirely ordinary — the configuration, not the
+    # strategy, is what ended the session.
+    #
+    # It never resizes anything. Silently trading a smaller size than the
+    # operator configured is the `simulation_mode` failure in a new place: they
+    # choose one risk and the system quietly runs another. It refuses and names
+    # every lever instead, at the moment the setting is chosen rather than four
+    # losses later.
+    from backend.services.risk_coherence import assess_current as _risk_coherence
+
+    _coherence = _risk_coherence()
+    if not _coherence.ok:
+        raise ValueError(_coherence.reason)
+
     _refusal = _untradeable_reason(symbol)
     if _refusal is not None:
         raise ValueError(

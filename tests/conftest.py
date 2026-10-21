@@ -264,6 +264,37 @@ def isolate_tradeable_universe(monkeypatch):
 # variables itself, in the test body or in a fixture, so it still exercises the
 # real refusal in both directions. A test body's `monkeypatch` runs after this
 # fixture, so it always wins.
+# THE SUITE MUST PIN A COHERENT RISK CONFIGURATION, NOT INHERIT ONE.
+#
+# `start_session` now refuses a configuration whose own drawdown killswitch
+# fires before `MIN_LOSSES_BEFORE_HALT` consecutive stop-outs
+# (`services/risk_coherence`). The SHIPPED DEFAULTS do not clear that bar --
+# MAX_PORTFOLIO_VAR_FRACTION 0.05 against MAX_DRAWDOWN_FROM_HWM 0.10 halts
+# after 2.0 losses -- which is precisely the finding that check exists to
+# surface, and it is why the check is not a one-line correction to one
+# operator's `.env`.
+#
+# The consequence for the suite is that eleven tests about COMPLETELY
+# DIFFERENT refusals (an untradeable symbol, a target below equity, a leverage
+# above the ceiling) started failing: `start_session` refused on risk coherence
+# before ever reaching the condition each test was written to check. They were
+# not wrong; they simply never pinned a risk configuration, so they inherited
+# whichever one happened to be in force.
+#
+# Same shape, and same remedy, as `isolate_write_auth` below and
+# `isolate_llm_configuration` further down: pin a KNOWN configuration so a test
+# exercises the thing it names. 0.03 against 0.30 survives ten losses, which
+# clears the bar with room, so no test is accidentally measuring this check.
+#
+# `tests/test_risk_coherence.py` is the file that OWNS this behaviour and sets
+# both variables itself in each test body, which runs after this fixture and
+# therefore wins.
+@pytest.fixture(autouse=True)
+def isolate_risk_coherence(monkeypatch):
+    monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.03")
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.30")
+
+
 @pytest.fixture(autouse=True)
 def isolate_write_auth(monkeypatch):
     monkeypatch.delenv("TRADES_API_KEY", raising=False)

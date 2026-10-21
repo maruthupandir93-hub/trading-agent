@@ -113,8 +113,16 @@ from backend.services.funding import estimate_funding
 #
 # +1R (one unit of initial risk) is the scale-out point: with the 2.5-ATR stop that
 # is roughly +1% on SOL, which is exactly the "1 to 2%" the operator wants to bank.
-# Both are env-tunable; a fraction of 0 disables scale-out entirely (back to the old
-# all-or-nothing behaviour) so it is fully opt-out.
+#
+# IT DEFAULTS TO 0 — OFF — AND THAT IS DELIBERATE, NOT AN OVERSIGHT. The
+# paragraphs above describe what scale-out is FOR; this says why it is not on.
+# The scale-out is gated on `PROFIT_TARGET_PCT() <= 0`, so it was dormant only
+# BECAUSE the fixed target was on. When that target was turned off, leaving this
+# at 0.5 would have WOKEN it and restored the exact break-even-runner scratch the
+# target had been introduced to remove. The two had to move together.
+#
+# Set both deliberately or neither. `PARTIAL_TP_FRACTION=0.5` with
+# `PROFIT_TARGET_PCT=0` reinstates the scale-out and the scratch with it.
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -173,15 +181,40 @@ def PARTIAL_TP_FRACTION() -> float:
 # runner this is meant to remove.
 # DEFAULT 2%, ON. Not 0.
 #
-# It shipped off so the change was opt-in, and that was the wrong default for
-# this system: 53.4% of its trades were closing at ~0.00 because the scale-out
-# left a runner sitting at break-even. The fixed target is what removes that, and
-# an operator who does not know to set it keeps the failure.
+# IT DEFAULTS TO 0 — OFF — AND THAT IS THE THIRD AND CURRENT DECISION.
 #
-# 2% is the operator's own figure, and under the default "account" basis it means
-# 2% of the margin deployed whatever leverage the session uses — a 2% price move
-# at 1x, 0.667% at 3x, 0.2% at 10x. Set it to 0 to go back to the ATR target plus
-# scale-out.
+# This comment used to describe the 2.0 default and was left behind when the
+# value changed, which an external review correctly flagged as a code/comment
+# mismatch. The CODE is right. Read the history before changing either:
+#
+#   shipped OFF  -> wrong: 53.4% of trades closed at ~0.00, because the
+#                   scale-out banked half at +1R and left the runner sitting at
+#                   break-even. A fixed target closes the WHOLE position and
+#                   removes the scratch.
+#   defaulted 2.0 -> also wrong, for a cost nobody had computed. The target is a
+#                   percentage of MARGIN, so the PRICE move it needs is
+#                   `PROFIT_TARGET_PCT / leverage`, while the stop stays at
+#                   2.5x ATR and does NOT shrink. They collide as leverage rises.
+#                   Measured on a live XRP/USDT session (ATR 0.504%, stop 1.26%):
+#
+#                       2.0% at 10x -> 0.20% target vs 1.26% stop -> 93.2% break-even
+#                       2.0% at  3x -> 0.67% target vs 1.26% stop -> 70.6% break-even
+#                       0 (ATR pair)-> 2.52% target vs 1.26% stop -> 36.0% break-even
+#
+#                   A 93% break-even is losing BY CONSTRUCTION. Measured live win
+#                   rate at the time: 54.5%.
+#   back to 0    -> the exit returns to the ATR pair, which is 2:1 by
+#                   construction at EVERY leverage and adapts to each
+#                   instrument's own volatility — the property a fixed
+#                   percentage cannot have.
+#
+# SO DO NOT "FIX" THIS MISMATCH BY TURNING THE TARGET BACK ON. At the 10x this
+# account runs, that sets a 93% break-even win rate.
+#
+# 0 DOES NOT MEAN "NO TARGET". Every position always carries an ATR stop (2.5x)
+# and an ATR target (5.0x), checked on every tick. This setting only ever added
+# a NEARER exit that overrode the ATR one. To keep 2:1 with a fixed target it
+# would have to be about `3.6 x leverage`.
 def PROFIT_TARGET_PCT() -> float:
     """The operator's fixed profit target; 0 hands the exit to the ATR pair."""
     return _env_float("PROFIT_TARGET_PCT", 0.0)
@@ -1857,6 +1890,34 @@ class PositionMonitorAgent(BaseAgent):
                 hit_target = pos.take_profit is not None and price <= pos.take_profit
 
             if not hit_stop and not hit_target:
+                # ---- TIME EXIT: this is no longer the trade that was entered --
+                #
+                # Checked FIRST among the non-stop exits, and only here: a tick
+                # that hit the stop or the target closes as "stop-loss" or
+                # "take-profit", because that is the honest reason and
+                # re-labelling it would corrupt the attribution the learning
+                # loop reads.
+                #
+                # Every profile declares `expected_holding_time` and nothing
+                # read it, so a Scalping position whose profile says "Seconds to
+                # minutes" ran over an hour on the live book and another ran 14
+                # hours. Past its horizon a position has stopped being the trade
+                # the signal justified: the setup has expired, it is paying
+                # funding it never budgeted for, and it is exposed to a market
+                # nothing analysed.
+                #
+                # This only ever CLOSES, so invariant 4 is untouched.
+                bound = self._max_holding_minutes(pos)
+                if bound:
+                    held = self._held_minutes(pos)
+                    if held is not None and held >= bound:
+                        logger.info(
+                            "%s held %.0f min, past the %d-min bound for %s — closing on time.",
+                            pos.symbol, held, bound, getattr(pos, "strategy", "?"),
+                        )
+                        await self._close(pos, price, "max-holding-time")
+                        continue
+
                 # ---- FIXED PROFIT TARGET: bank the whole position at +X% -----
                 #
                 # THE SCRATCH PROBLEM, MEASURED. Of 4,003 closed trades, 2,136
@@ -1926,6 +1987,53 @@ class PositionMonitorAgent(BaseAgent):
             # one would systematically overstate performance.
             reason = "stop-loss" if hit_stop else "take-profit"
             await self._close(pos, price, reason)
+
+    @staticmethod
+    def _max_holding_minutes(pos: "_Tracked") -> Optional[int]:
+        """The strategy's own holding bound, or None when there is none.
+
+        Reads `strategy_profiles`, which is where the horizon is DECLARED, so
+        the enforced bound and the documented one cannot drift -- the mistake
+        the ATR multipliers already made once across two files.
+
+        None for a position with no strategy. A manual position closes with
+        `strategy` NULL on purpose (a human's click was not chosen by an
+        algorithm), and inventing a horizon for it would close the operator's
+        own trade on a rule they never chose.
+        """
+        name = getattr(pos, "strategy", None)
+        if not name:
+            return None
+        try:
+            from backend.algorithms.strategy_profiles import get_profile
+
+            profile = get_profile(str(name))
+        except Exception:  # pragma: no cover - a missing profile is not fatal
+            return None
+        if profile is None:
+            return None
+        bound = getattr(profile, "max_holding_minutes", None)
+        return int(bound) if bound else None
+
+    def _held_minutes(self, pos: "_Tracked") -> Optional[float]:
+        """How long this position has been open, in minutes, or None.
+
+        Naive-UTC throughout, matching the rest of this module.
+        `position_store._as_naive_utc` already converts at the storage boundary
+        -- without it an aware `opened_at` raised AFTER the exchange had filled
+        a close, which is the bug that made a position un-closable.
+        """
+        opened = getattr(pos, "opened_at", None)
+        if opened is None:
+            return None
+        try:
+            return (datetime.datetime.utcnow() - opened).total_seconds() / 60.0
+        except TypeError:  # pragma: no cover - an aware datetime slipped through
+            logger.warning(
+                "Could not measure holding time for %s: opened_at is not naive UTC.",
+                pos.symbol,
+            )
+            return None
 
     def _r_multiple(self, pos: "_Tracked", price: float) -> Optional[float]:
         """Profit in units of INITIAL risk, or None when it cannot be computed.

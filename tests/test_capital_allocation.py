@@ -74,6 +74,23 @@ def _empty_ledger(monkeypatch):
     monkeypatch.setenv("SESSION_ONLY_TRADING", "false")
     monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "99")
 
+    # AND THE VaR BUDGET, for exactly the same reason as the two above.
+    #
+    # This file measures how LEVERAGE multiplies the notional. The CRO's VaR
+    # cap is a second, independent limit on the same quantity, and when it
+    # binds it flattens the very multiplication being asserted: at the suite's
+    # pinned 0.03 the 5x case came out 99.5 instead of 125, because the budget
+    # ran out before the leverage did. That is the cap working correctly and it
+    # is NOT what these tests are about — the capped range is asserted
+    # separately, as this file's own docstring says.
+    #
+    # Pinned loose rather than inherited. `tests/conftest.py` pins a COHERENT
+    # risk configuration for the whole suite (see `isolate_risk_coherence`), so
+    # a file that needs a different one has to say so; inheriting it is how
+    # these two tests silently started measuring the VaR cap instead of
+    # leverage. `tests/test_cro_var_limit.py` owns the cap's own behaviour.
+    monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.5")
+
 
 def _session(monkeypatch, fraction: float, leverage: int = 1) -> None:
     """Pin the running session's allocation AND leverage as the gateway sees them.
