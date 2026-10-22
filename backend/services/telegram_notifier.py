@@ -89,6 +89,11 @@ class TelegramNotifier:
 
     def __init__(self) -> None:
         self._approved: Dict[str, Dict[str, Any]] = {}
+        # STRONG REFERENCES TO IN-FLIGHT SENDS. The event loop holds only a
+        # weak one, so a bare `create_task` can be collected before the HTTP
+        # call completes and the alert never arrives -- invisible, because a
+        # missing alert looks exactly like a quiet market. See `_spawn`.
+        self._pending: set = set()
         self._token = _env("TELEGRAM_BOT_TOKEN")
         # One chat id per tab. Routing is by the event's own `tab`, so a real fill
         # can never land in the paper channel or vice versa.
@@ -138,11 +143,33 @@ class TelegramNotifier:
                 # dict assignment, so it costs the bus nothing.
                 self._remember_approval(event)
             elif etype == "ORDER_FILLED":
-                asyncio.create_task(self._safe(self._on_entry(event)))
+                self._spawn(self._on_entry(event))
             elif etype == "POSITION_CLOSED":
-                asyncio.create_task(self._safe(self._on_close(event)))
+                self._spawn(self._on_close(event))
         except Exception as exc:  # noqa: BLE001 - a notifier must not break delivery
             logger.debug("Telegram notifier could not schedule a message: %s", exc)
+
+
+    def _spawn(self, coro) -> None:
+        """Fire-and-forget, WITH A STRONG REFERENCE.
+
+        `asyncio.create_task(...)` on its own is not enough: the event loop
+        keeps only a WEAK reference to a running task, so a bare call can be
+        garbage-collected mid-flight and the alert simply never sends. The
+        Python docs say to save a reference, and this was the one place in the
+        backend that did not -- every other `create_task` here is held in
+        `worker_tasks`, `_watchers`, `_reflection_tasks` or an attribute.
+
+        Silent loss is the worst shape for this particular feature: the whole
+        point of the Telegram channel is an operator who is NOT watching a
+        dashboard, so a missing alert looks exactly like a quiet market.
+
+        The set is discarded on completion, so a 24/7 process does not grow a
+        task reference per fill.
+        """
+        task = asyncio.create_task(self._safe(coro))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
 
     async def _safe(self, coro) -> None:
         try:

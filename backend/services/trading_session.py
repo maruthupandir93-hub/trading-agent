@@ -702,21 +702,49 @@ async def _run_session(session_id: str) -> None:
                 _finish(session, "expired", f"placed {MAX_TRADES_PER_SESSION} trades without reaching the target")
                 break
 
-            # F30: the book this session measures must follow LIVE_TRADING.
+            # THE BOOK CHANGED, SO THIS SESSION'S TARGET AND FLOOR NO LONGER
+            # MEAN ANYTHING — AND IT USED TO CARRY ON AND REPORT "floored".
+            #
+            # F30 made the loop follow `LIVE_TRADING` so a toggled session
+            # stopped measuring the paper book while the graph traded the real
+            # one. That half is right. What it did NOT do is notice that the
+            # thresholds were derived from the OTHER account: `target_equity`
+            # and `floor_equity` were fixed at start from paper equity, and the
+            # very next line compared them against the exchange balance.
+            #
+            # On the operator's numbers a "$2 -> $5" paper session, switched to
+            # a real book holding a different amount, finished instantly as
+            # "floored" — a verdict about a loss that never happened, on an
+            # account the session had never traded.
+            #
+            # Re-basing them proportionally was the obvious alternative and is
+            # worse: it would invent a target the operator never chose and
+            # present it as theirs. Ending and saying exactly why leaves them
+            # to start a session against the book they actually want.
             cycle_tab = _tab_for_session()
             if cycle_tab != tab:
                 logger.warning(
-                    "SESSION %s SWITCHED BOOK: %s -> %s (LIVE_TRADING changed while it "
-                    "was running). Equity, the floor, the target and the fill count all "
-                    "now measure the %s book.",
-                    session.id, tab, cycle_tab, cycle_tab,
+                    "SESSION %s ENDED: the book changed %s -> %s (LIVE_TRADING was "
+                    "toggled while it was running). Its target %.2f and floor %.2f were "
+                    "measured against the %s book and cannot be applied to the %s one.",
+                    session.id, tab, cycle_tab,
+                    session.target_equity, session.floor_equity, tab, cycle_tab,
                 )
-                _note(
+                _finish(
                     session,
-                    f"book changed from {tab} to {cycle_tab} because live trading was "
-                    f"toggled; the floor and target now measure the {cycle_tab} book",
+                    "book-changed",
+                    (
+                        f"live trading was toggled, so this session's book changed from "
+                        f"{tab} to {cycle_tab}. Its target ({session.target_equity:.2f}) "
+                        f"and floor ({session.floor_equity:.2f}) were measured against "
+                        f"the {tab} book and say nothing about the {cycle_tab} one — "
+                        f"continuing would compare them against a different account. "
+                        f"Start a new session against the {cycle_tab} book. Open "
+                        f"positions are unaffected: the monitor keeps watching and "
+                        f"closing them."
+                    ),
                 )
-                tab = cycle_tab
+                break
 
             equity = await current_equity(tab)
             if equity is None:

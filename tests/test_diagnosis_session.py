@@ -289,6 +289,16 @@ def test_a_pending_row_with_no_timestamp_is_kept():
     mon._pending["old"] = {"symbol": "XRP/USDT"}
     mon._expire_stale_pending()
     assert "old" in mon._pending
+
+    # AND THE HALF THIS TEST USED TO MISS. Its reasoning was "the TTL will
+    # catch it once it is rewritten" — a RESTORED row is never rewritten, it
+    # was re-persisted undated on every boot, so it was IMMORTAL and
+    # `may_open_new_position` counted it against the single allowed slot. The
+    # row is now DATED on the first pass, so it survives the moment that
+    # matters and still expires on schedule.
+    assert mon._pending["old"]["approved_at"] > 0, (
+        "an undated pending row is still undatable, so it can never expire"
+    )
     mon._pending.clear()
 
 

@@ -920,6 +920,24 @@ class PositionMonitorAgent(BaseAgent):
                         "strategy": row.get("strategy"),
                         "run_id": row.get("run_id"),
                         "entry_context": row.get("entry_context"),
+                        # A RESTORED PENDING MUST BE ABLE TO EXPIRE.
+                        #
+                        # `_expire_stale_pending` filters on `approved_at`, and
+                        # this row never carried one -- the DB column is the
+                        # watch row, not the approval -- so the filter's `and`
+                        # short-circuited and a restored approval was
+                        # IMMORTAL. It was then re-persisted and re-restored on
+                        # every boot, and `may_open_new_position` counts it, so
+                        # one approval that never filled could occupy the
+                        # single allowed slot forever.
+                        #
+                        # Stamped with NOW rather than a guessed original time:
+                        # the real approval time is not recorded anywhere, and
+                        # inventing one would either expire it instantly or
+                        # never. Now means "this gets one more TTL to fill,
+                        # measured from when we noticed it" -- which is the
+                        # honest reading of a restart.
+                        "approved_at": time.time(),
                     }
                     pending += 1
                 continue
@@ -1741,9 +1759,42 @@ class PositionMonitorAgent(BaseAgent):
         if not self._pending:
             return
         cutoff = time.time() - _PENDING_TTL_S
+        # A MISSING STAMP IS ADOPTED, NOT IGNORED AND NOT DROPPED.
+        #
+        # Two earlier readings of this were each half right and the gap between
+        # them was a real bug.
+        #
+        #   "keep it"  -- the original: `if float(row.get("approved_at") or 0)
+        #       and ... < cutoff` short-circuited to False, so an undated row
+        #       could NEVER expire. Its justification was that the TTL "will
+        #       catch it once it is rewritten", and a restored row is never
+        #       rewritten -- it was re-persisted undated on every boot. So it
+        #       survived forever, and `may_open_new_position` counts it: one
+        #       approval that never filled held the single allowed slot against
+        #       every real entry, which is the F1 symptom by another route.
+        #
+        #   "drop it"  -- expiring it immediately instead. Also wrong: a fill
+        #       arriving just after would find no pending entry and be logged
+        #       UNPROTECTED, which is the one outcome this map exists to
+        #       prevent.
+        #
+        # Adopting it satisfies both. The row gets a full TTL measured from
+        # when we noticed it -- an honest reading of a restart -- and is then
+        # expirable like any other, so it cannot be immortal. Nothing is lost
+        # and nothing is held forever.
+        now = time.time()
+        for tar_id, row in self._pending.items():
+            if not float(row.get("approved_at") or 0.0):
+                row["approved_at"] = now
+                logger.info(
+                    "Pending TAR %s on %s carried no approval time; dating it now so "
+                    "it can expire rather than holding a position slot forever.",
+                    tar_id, row.get("symbol", "?"),
+                )
+
         stale = [
             tar_id for tar_id, row in self._pending.items()
-            if float(row.get("approved_at") or 0.0) and float(row["approved_at"]) < cutoff
+            if float(row.get("approved_at") or 0.0) < cutoff
         ]
         for tar_id in stale:
             row = self._pending.pop(tar_id, {})

@@ -264,9 +264,33 @@ class MessageBus:
                 # REFLECTION_COMPLETED were all lost. Reproduced: only
                 # `reflection-start` was delivered.
                 #
-                # Logged and skipped, exactly like any other failing
-                # subscriber. The cancellation still reaches the task that was
-                # cancelled; it just stops being contagious.
+                # AND THE SENTENCE THAT USED TO STAND HERE WAS WRONG.
+                #
+                # It said "the cancellation still reaches the task that was
+                # cancelled; it just stops being contagious". It does not.
+                # `CancelledError` is how the event loop ASKS a task to stop,
+                # and a task that catches it without re-raising simply does not
+                # stop. So the F64 fix traded one bug for another: a cancelled
+                # price-feed watcher kept running, and after `_reconcile`
+                # re-subscribed the symbol, TWO watchers published the same
+                # ticks -- every stop evaluated twice on doubled prices.
+                #
+                # The two cases are genuinely different and `cancelling()`
+                # (3.11+) tells them apart:
+                #
+                #   THIS task was asked to cancel  -> re-raise. Anything else
+                #       leaves a task the caller believes is dead still running.
+                #   a SUBSCRIBER's own inner task was cancelled -> log and
+                #       continue, which is the case F64 was written for: the
+                #       remaining subscribers must still receive the event.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    logger.warning(
+                        "Delivery of %s was cancelled while %s was handling it; "
+                        "propagating so this task actually stops.",
+                        topic, getattr(callback, "__qualname__", repr(callback)),
+                    )
+                    raise
                 logger.warning(
                     "Subscriber %s was CANCELLED while handling %s; the remaining "
                     "subscribers still receive it.",
