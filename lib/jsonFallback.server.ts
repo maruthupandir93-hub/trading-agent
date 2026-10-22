@@ -66,25 +66,46 @@ export function serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
 // gets an empty list deserves to know whether that means "nothing stored" or
 // "nothing can be stored here".
 const memory = new Map<string, unknown>();
-let readOnlyReason: string | null = null;
 
-/** Why the JSON fallback is not durable in this process, or null. */
+// PER FILE, NOT PROCESS-WIDE — and that distinction was a real bug.
+//
+// This used to be a single `readOnlyReason` string. One failed write on ANY
+// store latched it for the life of the process, and `readJson` consulted it
+// BEFORE touching the disk, so from that moment every JSON-backed store
+// returned the in-memory copy — which is empty for any file that had only
+// ever been read. Every store read EMPTY while the files on disk were
+// perfectly fine. On the trade log that reads as "you have no trades".
+//
+// A write failing on one path says nothing about another, so the reason is
+// recorded against the file it happened to.
+const unwritable = new Map<string, string>();
+
+/**
+ * Why JSON-backed storage is not durable in this process, or null.
+ *
+ * Names the affected stores rather than implying all of them: "nothing can be
+ * stored" and "this one store could not be stored" send a reader to different
+ * places.
+ */
 export function storageNote(): string | null {
-  return readOnlyReason;
+  if (unwritable.size === 0) return null;
+  const names = [...unwritable.keys()].sort().join(', ');
+  return (
+    `writes failed for ${names} (${[...unwritable.values()][0]}), so those stores ` +
+    `are held in memory for this process only and are NOT durable. Configure ` +
+    `DATABASE_URL for durable storage.`
+  );
 }
 
-function markReadOnly(e: unknown): void {
-  if (readOnlyReason !== null) return;
-  readOnlyReason =
-    `this deployment's filesystem is not writable (${
-      e instanceof Error ? e.message : String(e)
-    }), so JSON-backed stores are held in memory for this process only and are ` +
-    `NOT durable. Configure DATABASE_URL for durable storage.`;
-  console.warn(`[jsonFallback] ${readOnlyReason}`);
+function markUnwritable(name: string, e: unknown): void {
+  if (unwritable.has(name)) return;
+  const reason = e instanceof Error ? e.message : String(e);
+  unwritable.set(name, reason);
+  console.warn(`[jsonFallback] ${name} is not writable: ${reason}`);
 }
 
-async function ensureFile(file: string, empty: string): Promise<void> {
-  if (readOnlyReason !== null) return;
+async function ensureFile(name: string, file: string, empty: string): Promise<void> {
+  if (unwritable.has(name)) return;
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
     try {
@@ -93,7 +114,7 @@ async function ensureFile(file: string, empty: string): Promise<void> {
       await fs.writeFile(file, empty, 'utf8');
     }
   } catch (e) {
-    markReadOnly(e);
+    markUnwritable(name, e);
   }
 }
 
@@ -104,17 +125,23 @@ export function dataFile(name: string): string {
 /** Read and parse a JSON store, returning `fallback` on a missing or bad file. */
 export async function readJson<T>(name: string, fallback: T): Promise<T> {
   const file = dataFile(name);
-  await ensureFile(file, Array.isArray(fallback) ? '[]' : '{}');
-  if (readOnlyReason !== null) {
-    return (memory.has(name) ? (memory.get(name) as T) : fallback);
-  }
+  await ensureFile(name, file, Array.isArray(fallback) ? '[]' : '{}');
+
+  // THE DISK IS TRIED FIRST, ALWAYS.
+  //
+  // This used to return the in-memory copy whenever ANY write had ever failed,
+  // without reading the file — so one unrelated failure blanked every store
+  // while the files were perfectly readable. A file that exists and parses is
+  // the truth; what happened to some write is irrelevant to reading it.
   try {
     const raw = await fs.readFile(file, 'utf8');
     return JSON.parse(raw) as T;
   } catch {
-    // A corrupt or missing file returns the fallback rather than throwing: the
-    // caller's job is to serve a page, and a parse error should not 500 the
-    // whole route.
+    // Only now does the in-memory copy matter: a value THIS process wrote and
+    // could not persist is more current than a file that is missing or
+    // corrupt. Beyond that the fallback, because the caller's job is to serve
+    // a page and a parse error must not 500 the route.
+    if (memory.has(name)) return memory.get(name) as T;
     return fallback;
   }
 }
@@ -129,7 +156,7 @@ export async function readJson<T>(name: string, fallback: T): Promise<T> {
  * or the complete new one.
  */
 export async function writeJson<T>(name: string, value: T): Promise<void> {
-  if (readOnlyReason !== null) {
+  if (unwritable.has(name)) {
     memory.set(name, value);
     return;
   }
@@ -143,7 +170,7 @@ export async function writeJson<T>(name: string, value: T): Promise<void> {
     // The write is kept in memory so the rest of THIS request behaves
     // consistently, and the reason is recorded so a reader is not told an
     // empty store means nothing happened.
-    markReadOnly(e);
+    markUnwritable(name, e);
     memory.set(name, value);
   }
 }

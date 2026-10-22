@@ -314,7 +314,23 @@ def test_the_session_rereads_its_book_every_cycle():
 def test_the_refusals_run_before_the_cash_is_rewritten():
     """A second Start click with $2 set cash 10,000 -> 2 and THEN raised "a
     session is already running" -- and the session that was running ended
-    "floored" against a book it never agreed to."""
+    "floored" against a book it never agreed to.
+
+    STRENGTHENED: THE WRITE NOW COMES AFTER *EVERY* REFUSAL, NOT JUST THESE TWO.
+
+    This asserted that the write lands before `current_equity`, because the
+    session has to measure the amount the operator chose rather than the
+    book's previous cash. That ordering had a cost the original fix did not
+    close: the TARGET and FLOOR refusals run after `current_equity`, so a Start
+    with a target below the new amount still rewrote cash 10,000 -> 2 and
+    re-anchored the drawdown mark before refusing.
+
+    The equity is now DERIVED instead of measured-after-writing, which is exact
+    rather than an estimate: `set_paper_starting_amount` refuses while any
+    paper position is open, so on success the book is flat and its equity is
+    the amount. That frees the write to be the last statement that can change
+    anything, after the last statement that can refuse.
+    """
     from backend.services import trading_session as ts
 
     src = inspect.getsource(ts.start_session)
@@ -323,5 +339,14 @@ def test_the_refusals_run_before_the_cash_is_rewritten():
     funds = src.index("await set_paper_starting_amount(")
     assert already < funds, "the already-running refusal must precede the write"
     assert ceiling < funds, "the leverage refusal must precede the write"
-    # And it still lands before equity is measured, which is why it was early.
-    assert funds < src.index("equity = await current_equity(")
+
+    # EVERY other refusal too, which is what this test did not cover before.
+    for marker, name in (
+        ("there would be nothing for the session to do", "target-below-equity"),
+        ("_venue_minimum_refusal", "venue-minimum"),
+    ):
+        assert src.index(marker) < funds, f"the {name} refusal runs AFTER the write"
+
+    # And nothing is left measuring the book after it was written, because the
+    # amount IS the equity on a flat book.
+    assert "_assert_paper_amount_settable" in src

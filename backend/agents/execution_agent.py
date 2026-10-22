@@ -120,8 +120,45 @@ class ExecutionAgent(BaseAgent):
           * `not self.simulation_mode` — the backtest engine pins
             `simulation_mode=True` and must never place an order however a
             position is labelled.
+
+        FOR AN ENTRY. A CLOSE USES `close_routes_to_venue`, AND CONFLATING THE
+        TWO STRANDED REAL POSITIONS -- see that method.
         """
         return tab == "real" and not self.simulation_mode
+
+    def close_routes_to_venue(self, tab: str) -> bool:
+        """Does a CLOSE for THIS position go to a real exchange?
+
+        SEPARATE FROM `routes_to_venue` BECAUSE THE SECOND CONDITION IS AN
+        ENTRY QUESTION, AND USING IT HERE STRANDED REAL POSITIONS:
+
+            a REAL position is open, real money at the exchange
+            the operator turns LIVE_TRADING OFF
+            -> `simulation_mode` becomes True
+            -> the stop fires and the close takes the SIMULATED branch
+            -> the local book records a close and a realised P&L
+            -> THE EXCHANGE POSITION IS STILL OPEN and the operator believes
+               they are flat
+
+        Turning live trading off is what an operator does when they want LESS
+        exposure. It must never be the thing that leaves a position stranded,
+        and it must never report a close that did not happen -- the same
+        failure as the partial fill this file already refuses to call a close.
+
+        What each condition actually means:
+
+          `tab == "real"`      WHERE THE MONEY IS. Unchanged by any setting.
+          `_simulation_override`  NO EXCHANGE EXISTS. The backtest engine pins
+                               this explicitly and has no venue behind it, so
+                               it is the one thing that may stop a close.
+
+        `LIVE_TRADING` is deliberately NOT consulted. Invariant 4: "Closes/exits
+        are never blocked. Not by pause, not by risk checks, not by a Debate
+        veto. This holds for real money more, not less."
+        """
+        if self._simulation_override is True:
+            return False
+        return tab == "real"
 
     @property
     def simulation_mode(self) -> bool:
@@ -858,11 +895,24 @@ class ExecutionAgent(BaseAgent):
             tab, symbol, entry_side, float(qty), reason,
         )
         close_id = requests.setdefault(request_key, f"close_{uuid.uuid4().hex[:28]}")
-        # BY THE POSITION'S BOOK, not the global flag. A paper position closed
-        # through the live branch sends a reduce-only order to MAINNET, which
-        # trims the operator's REAL position in the same symbol if they hold one.
-        # See `routes_to_venue`.
-        to_venue = self.routes_to_venue(tab)
+        # BY THE POSITION'S BOOK, not the global flag — and for a CLOSE that
+        # means `close_routes_to_venue`, which does NOT consult LIVE_TRADING.
+        #
+        # Two failures, opposite directions, and this one predicate decides both:
+        #
+        #   paper closed through the live branch -> a reduce-only order reaches
+        #       MAINNET and trims the operator's REAL position in the same
+        #       symbol if they hold one.
+        #   REAL closed through the simulated branch -> the local book records
+        #       a close and a realised P&L WHILE THE EXCHANGE POSITION STAYS
+        #       OPEN. That is what happened whenever the operator turned
+        #       LIVE_TRADING off with something open: `simulation_mode` flipped
+        #       and the close stopped reaching the venue where the money was.
+        #
+        # Invariant 4 settles it: an exit is never blocked, "for real money
+        # more, not less". Only the backtest's explicit override can stop a
+        # close, because it has no exchange behind it at all.
+        to_venue = self.close_routes_to_venue(tab)
         # THE CONFIGURED VENUE, not a hardcoded Binance (F89). A Bybit
         # deployment recorded every fill as `binance_futures`, so the execution
         # record named a venue the order never reached. The mirror branch below

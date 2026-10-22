@@ -428,6 +428,43 @@ async def place_paper_trade(req: PaperTradeRequest) -> Dict[str, Any]:
         )
 
         if watched:
+            # A PARTIAL SELL OF A WATCHED POSITION IS REFUSED, NOT SILENTLY
+            # TURNED INTO A FULL CLOSE.
+            #
+            # `close_tracked` closes the WHOLE tracked position and never reads
+            # `req.qty`, so selling 1 coin of a 155-coin position closed all
+            # 155 — the operator asked to reduce and the system flattened them.
+            # Doing the opposite of a trading instruction is worse than
+            # declining it, and far worse than saying why.
+            #
+            # It is a refusal rather than a partial because a correct partial
+            # has to trim the watch row's quantity, move the resting stop and
+            # take-profit to the new size, and write a partial closed-trade row
+            # — that is `_take_partial`'s whole sequence, and half of it would
+            # leave the venue holding protective orders for a size that is no
+            # longer there.
+            held = next(
+                (
+                    float(p.get("qty") or 0)
+                    for p in monitor.snapshot_open()
+                    if str(p.get("symbol")) == req.symbol
+                    and str(p.get("tab", "paper")) == "paper"
+                ),
+                0.0,
+            )
+            if held > 0 and req.qty < held * 0.999:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Refusing to sell {req.qty} of the {held:g} {req.symbol} the "
+                        f"agent is monitoring: this panel can only close the position "
+                        f"in full, and closing it in full is not what you asked for. "
+                        f"Sell {held:g} to close it, or let the stop and target manage "
+                        f"it. A partial would leave the exchange holding protective "
+                        f"orders for a size that is no longer there."
+                    ),
+                )
+
             fill = await monitor.close_tracked(
                 req.symbol, "closed from the operator panel", price=price, tab="paper",
             )

@@ -157,21 +157,46 @@ def test_the_close_branch_is_chosen_by_the_tab_not_the_global_flag():
     operator holds a real position in the same symbol it closes part of the REAL
     one to satisfy a paper stop, and the paper book books its own simulated close
     on top, so both books move on one event and neither is right.
+
+    UPDATED, NOT WEAKENED: THE PREDICATE SPLIT IN TWO AND THIS TEST FOLLOWED.
+
+    The original assertion was `self.routes_to_venue(tab)`, and that predicate
+    is `tab == "real" and not self.simulation_mode`. The first term is this
+    test's whole point and is unchanged. The SECOND term turned out to be an
+    ENTRY question used on an exit, and it stranded real positions:
+
+        a REAL position is open, real money at the exchange
+        the operator turns LIVE_TRADING off
+        -> simulation_mode becomes True
+        -> the close took the SIMULATED branch
+        -> the local book recorded a close and a realised P&L while THE
+           EXCHANGE POSITION STAYED OPEN
+
+    So a close now uses `close_routes_to_venue`, which keeps "where is the
+    money" and drops "are new entries allowed" — invariant 4, exits are never
+    blocked, "for real money more, not less". Only the backtest's explicit
+    override can stop a close, because it has no exchange at all.
     """
     agent = ExecutionAgent(simulation_mode=None)
     src = inspect.getsource(ExecutionAgent.close_position)
-    assert "self.routes_to_venue(tab)" in src, (
+    assert "self.close_routes_to_venue(tab)" in src, (
         "the close must route by the position's own book"
     )
 
-    # And the predicate itself: BOTH terms, because each guards a different way
-    # of placing an order that should not exist.
+    # The ENTRY predicate, both terms, each guarding a different way of
+    # placing an order that should not exist.
     assert agent.routes_to_venue("paper") is False
     pinned = ExecutionAgent(simulation_mode=True)
     assert pinned.routes_to_venue("real") is False, (
         "an explicitly simulated agent (the backtest engine) must never route to "
         "a venue, whatever a position is labelled"
     )
+
+    # And the CLOSE predicate: paper still never reaches a venue, the backtest
+    # still cannot place an order, and a real close is no longer stoppable by
+    # a setting about new entries.
+    assert agent.close_routes_to_venue("paper") is False
+    assert pinned.close_routes_to_venue("real") is False
 
 
 def test_the_realised_pnl_still_comes_from_the_fill_not_the_trigger():

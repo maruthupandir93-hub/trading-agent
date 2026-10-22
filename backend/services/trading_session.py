@@ -1067,6 +1067,34 @@ def _finish(session: TradingSession, status: str, reason: str) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+
+async def _assert_paper_amount_settable(amount: float) -> None:
+    """Raise exactly what `set_paper_starting_amount` would, WITHOUT writing.
+
+    A dry run, so `start_session` can decide every refusal before it mutates
+    anything. The checks are duplicated rather than inferred because the real
+    setter must keep its own -- it is a public API an operator can call
+    directly -- and `tests/test_session_amounts.py` asserts the two agree, the
+    same arrangement the ATR multipliers and the watchlist seed already use.
+    """
+    from backend.services.portfolio_store import get_portfolio
+
+    if not isinstance(amount, (int, float)) or amount <= 0:
+        raise ValueError("the starting amount must be a positive number")
+
+    portfolio = await get_portfolio()
+    book = (portfolio or {}).get("paper") or {}
+    open_positions = [p for p in (book.get("positions") or []) if p.get("qty")]
+    if open_positions:
+        held = ", ".join(str(p.get("symbol")) for p in open_positions[:5])
+        raise ValueError(
+            f"cannot set the starting amount while paper positions are open ({held}). "
+            f"Rewriting cash underneath a position leaves an equity figure that is "
+            f"part old-basis and part new, and the next close would be measured "
+            f"against capital that never funded it. Close them first."
+        )
+
+
 async def set_paper_starting_amount(amount: float) -> float:
     """Set the PAPER book's cash, so a session can start from a chosen amount.
 
@@ -1412,14 +1440,26 @@ async def start_session(
             f"'{tab}' book. This ceiling is not operator-configurable."
         )
 
+    # EVERY REMAINING REFUSAL IS DECIDED BEFORE THE BOOK IS TOUCHED.
+    #
+    # F41 moved `set_paper_starting_amount` below the already-running and
+    # leverage checks, and that was not far enough: the TARGET and FLOOR checks
+    # still ran AFTER it, so a Start with a target below the new amount
+    # rewrote cash from 10,000 to 2, re-anchored the drawdown high-water mark,
+    # and only then refused. A refusal must leave the system exactly as it
+    # found it — and this one left the operator funded at an amount they never
+    # successfully started with.
+    #
+    # The equity the session WOULD measure is knowable without writing:
+    # `set_paper_starting_amount` REFUSES while any paper position is open, so
+    # on success the book is flat and its equity is exactly the amount. That is
+    # what makes a dry run exact rather than an estimate.
     if start_amount is not None:
-        # NOW. It still has to land before `current_equity` below, so the
-        # session measures the amount the operator chose rather than the
-        # book's previous cash — that ordering was the original reason this
-        # call sat so early, and it is preserved.
-        await set_paper_starting_amount(start_amount)
+        await _assert_paper_amount_settable(start_amount)
+        equity = float(start_amount)
+    else:
+        equity = await current_equity(tab)
 
-    equity = await current_equity(tab)
     if equity is None:
         raise ValueError(
             "current equity cannot be measured (no cash figure, or an open "
@@ -1471,6 +1511,15 @@ async def start_session(
         )
         if _why is not None:
             raise ValueError(_why)
+
+    # ---- EVERY REFUSAL IS PAST. ONLY NOW IS THE BOOK WRITTEN. ----------
+    #
+    # This is the last statement that can change anything, and it comes after
+    # the last statement that can refuse. A Start that fails now leaves the
+    # paper book, the drawdown high-water mark and the session list exactly as
+    # it found them.
+    if start_amount is not None:
+        await set_paper_starting_amount(start_amount)
 
     session = TradingSession(
         id=uuid.uuid4().hex[:12],

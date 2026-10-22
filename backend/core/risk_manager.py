@@ -62,6 +62,18 @@ NON_BLOCKING_STATUSES = ("pass", "warn", "delegated")
 # the per-trade limit unusable in practice.
 MAX_DAILY_LOSS_PCT = 5.0
 
+# WHAT SHARE OF THE DRAWDOWN BUDGET THE DAILY LIMIT MAY CONSUME.
+#
+# The daily limit is the softer brake -- "stop for today" against the CEO
+# mandate's "stop until a human intervenes" -- so it is only meaningful if it
+# is reached FIRST. Leverage scaling pushed it to 50% of equity at 10x while
+# the halt sits at 10-30%, which made it unreachable: the operator believed
+# they had two brakes and had one.
+#
+# Two thirds leaves the daily limit room to fire on a bad day while still
+# leaving the account a third of its drawdown budget before the hard halt.
+DAILY_LIMIT_SHARE_OF_DRAWDOWN = 0.67
+
 # One position may be at most 50% of equity in notional (the PositionSize check).
 # 100% total is the direct generalisation — two maximum-size positions. Expressed
 # in notional rather than margin so leverage cannot hide exposure: at 3x, 100%
@@ -705,6 +717,28 @@ def check_daily_loss(
     # are untouched. This is a soft cap on a measured day, and at 1x it is
     # byte-for-byte the original 5%.
     effective_limit = MAX_DAILY_LOSS_PCT * max(1.0, float(leverage or 1.0))
+
+    # AND IT MUST STILL FIRE BEFORE THE DRAWDOWN KILLSWITCH, OR IT IS DEAD CODE.
+    #
+    # Scaling alone made this unreachable. At 10x the limit becomes 50% of
+    # equity, while the CEO's drawdown mandate halts the account at
+    # MAX_DRAWDOWN_FROM_HWM -- 10% by default, 30% on this deployment. The
+    # account is halted long before a 50% daily loss can be measured, so the
+    # daily limit never fired at all and the operator had one brake where they
+    # believed they had two.
+    #
+    # A daily limit is the SOFTER, EARLIER brake: "stop for today" rather than
+    # "stop until a human intervenes". It only means anything if it is reached
+    # first, so it is capped at a fraction of the drawdown budget. The cap is
+    # a ceiling, never a raise -- at 1x this is byte-for-byte the original 5%.
+    try:
+        from backend.agents.ceo_agent import max_drawdown_fraction
+
+        halt_pct = max_drawdown_fraction() * 100.0
+        if halt_pct > 0:
+            effective_limit = min(effective_limit, halt_pct * DAILY_LIMIT_SHARE_OF_DRAWDOWN)
+    except Exception:  # pragma: no cover - a ceiling, never a gate
+        pass
 
     if loss_pct > effective_limit:
         scaled = (

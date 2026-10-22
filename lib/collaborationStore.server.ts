@@ -73,13 +73,22 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 async function readAll(): Promise<CollaborationRecord[]> {
   await ensureFile();
-  if (readOnlyReason !== null) return (memory ?? []) as CollaborationRecord[];
+
+  // THE DISK IS TRIED FIRST, EVEN AFTER A WRITE HAS FAILED.
+  //
+  // This used to short-circuit to `memory` the moment any write failed, so one
+  // failure made every subsequent read return the in-memory copy — empty for
+  // anything this process had not itself written — while the file on disk was
+  // perfectly readable. `lib/jsonFallback.server.ts` carried the identical bug
+  // and is fixed the same way; the two are separate stores with one lesson.
   try {
     const raw = await fs.readFile(DATA_FILE, 'utf8');
     return JSON.parse(raw) as CollaborationRecord[];
   } catch {
-    // A missing or malformed file is an empty list, never a 500 — the route
-    // that reads this is a page load.
+    // Only now does the in-memory copy matter: a value this process wrote and
+    // could not persist beats a file that is missing or malformed. Beyond that
+    // an empty list, never a 500 — the route that reads this is a page load.
+    if (memory !== null) return memory as CollaborationRecord[];
     return [];
   }
 }

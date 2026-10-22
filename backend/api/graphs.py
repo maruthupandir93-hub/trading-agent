@@ -408,13 +408,34 @@ async def stream_graph_progress(websocket: WebSocket, api_key: str = None) -> No
 
     Authenticated because it starts a graph run, which costs market data and model tokens.
     """
-    if auth_required():
-        required = os.getenv(ENV_VAR)
-        if not required:
-            pass # Shouldn't happen if auth_required is True, but safe fallback
-        elif not api_key or not hmac.compare_digest(api_key, required):
+    # FAILS CLOSED, AND IT USED TO FAIL OPEN -- the F6 shape, missed on this
+    # route because a WebSocket does not use the `require_write_auth`
+    # dependency the HTTP routes share.
+    #
+    # `if auth_required():` means the whole check was SKIPPED when
+    # TRADES_API_KEY was unset, so on a backend whose port 8000 is reachable
+    # from the internet anyone could open this socket and start full 24-node
+    # graph runs: market data, the 40/min model budget, and the operator's key
+    # spent by a stranger, with the run's reasoning streamed back to them.
+    #
+    # Same rule as `core.auth.require_write_auth`: an unconfigured key is a
+    # REFUSAL, and `ALLOW_UNAUTHENTICATED_WRITES` is the deliberate, noisy
+    # opt-out for a genuinely local process.
+    required = os.getenv(ENV_VAR)
+    if not required:
+        from backend.core.auth import open_writes_allowed
+
+        if not open_writes_allowed():
+            logger.error(
+                "Refused a /api/graphs/stream connection: %s is not set. This "
+                "socket starts graph runs, which spend market data and model "
+                "tokens, so it fails CLOSED.", ENV_VAR,
+            )
             await websocket.close(code=1008)
             return
+    elif not api_key or not hmac.compare_digest(api_key, required):
+        await websocket.close(code=1008)
+        return
 
     await websocket.accept()
     try:
