@@ -1,3 +1,16 @@
+# `asyncio` IS USED BY `handle_event` AND WAS NEVER IMPORTED.
+#
+# The F22 fix detached the reflection from the bus with
+# `asyncio.create_task(...)` so a slow model call could not stall delivery of
+# POSITION_CLOSED to the monitor. The import never came with it, so EVERY
+# closed trade raised `NameError: name 'asyncio' is not defined`.
+#
+# It was silent because `MessageBus.publish` swallows a subscriber exception
+# -- the same swallow that hid three NameErrors before this one. The visible
+# symptom was six closed trades producing ZERO reflections and ZERO
+# hypotheses, which reads exactly like an honest young system that has not
+# learned anything yet.
+import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 import os

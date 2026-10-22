@@ -284,9 +284,27 @@ async def prune_once() -> Dict[str, Any]:
                       FROM decisions d
                      WHERE d.outcome <> ALL($1::text[])
                        AND NOT EXISTS (
-                             SELECT 1 FROM trades t
-                              WHERE t.tar_id IS NOT NULL
-                                AND t.tar_id::text = d.tar_id::text
+                             -- `execution_quality`, NOT `trades`.
+                             --
+                             -- This read `t.tar_id = d.tar_id` and NEITHER
+                             -- TABLE HAS THAT COLUMN: `tar_id` exists only on
+                             -- `risk_events`, `execution_quality` and
+                             -- `monitored_positions`. So the whole statement
+                             -- raised every hour, nothing was ever pruned, and
+                             -- `decisions` grew without bound -- the exact
+                             -- growth problem this module was written to stop.
+                             --
+                             -- `decisions.id` IS the TAR id on the approval
+                             -- path (`supervisor_agent` passes
+                             -- `decision_id=str(tar.tar_id)`), and
+                             -- `execution_quality` is written on every fill
+                             -- carrying that same `tar_id`. So a decision whose
+                             -- id appears there demonstrably reached the
+                             -- exchange, which is the structural fact this
+                             -- check wanted in the first place.
+                             SELECT 1 FROM execution_quality eq
+                              WHERE eq.tar_id IS NOT NULL
+                                AND eq.tar_id::text = d.id::text
                            )
                 ),
                 keep AS (

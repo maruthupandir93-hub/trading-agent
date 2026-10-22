@@ -774,6 +774,12 @@ class ExecutionAgent(BaseAgent):
         # by a LATER position of the same size (F26). Optional: a caller
         # without one keeps the old, position-agnostic key.
         position_id: Optional[str] = None,
+        # When THIS position opened, in epoch milliseconds. Bounds the search
+        # for a venue-executed exit so a fill from an EARLIER trade on the
+        # same symbol can never be blended into this one's price -- a -$5 loss
+        # was measured booked as -$37.7 before this. Optional: without it the
+        # search still refuses to blend fills more than one close apart.
+        opened_ms: Optional[int] = None,
     ) -> Optional[float]:
         """Close an open position. Returns the fill price, or None on failure.
 
@@ -935,8 +941,16 @@ class ExecutionAgent(BaseAgent):
                     # the monitor's trigger price would invent a number, and the
                     # gap is real money (the live incident's trigger price was
                     # far past where it actually filled).
+                    # `since_ms` BOUNDS THE SEARCH TO THIS TRADE.
+                    #
+                    # Without it the unmatched fallback blended every reducing
+                    # fill in a seven-day window into one average -- a -$5 loss
+                    # was measured as -$37.7. A fill that predates this position
+                    # cannot be its exit.
                     venue_fill = await paper_testnet.exit_fill(
-                        symbol, order_ids=venue_order_ids or [],
+                        symbol,
+                        order_ids=venue_order_ids or [],
+                        since_ms=opened_ms,
                     )
                     close_exchange = f"{paper_testnet.venue_choice()}_testnet"
                     if venue_fill and (venue_fill.get("price") or 0) > 0:

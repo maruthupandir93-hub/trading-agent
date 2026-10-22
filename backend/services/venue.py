@@ -201,6 +201,52 @@ class SizingCheck:
     min_notional: Optional[float] = None
 
 
+
+def _position_margin(p: Dict[str, Any]) -> Optional[float]:
+    """Margin this position is holding, or None when it cannot be established.
+
+    THREE SOURCES, IN DESCENDING ORDER OF DIRECTNESS, because the two venues
+    populate ccxt's unified position differently and a missing field here is
+    the difference between a correct equity and a session that halts on a
+    healthy account:
+
+      1. `initialMargin` -- ccxt's unified field, what the position actually
+         locked. Preferred wherever the venue supplies it.
+      2. `collateral` -- what Bybit reports for an isolated position.
+      3. notional / leverage -- DERIVED, and only when both are readable.
+
+    None rather than 0.0 when none of them can be read. Zero would be a claim
+    that the position holds no margin, which would understate equity in exactly
+    the direction that ends a session early; None leaves the caller's figure as
+    the free balance it already was and the caller says so.
+    """
+    for key in ("initialMargin", "collateral"):
+        raw = p.get(key)
+        try:
+            if raw is not None and float(raw) > 0:
+                return abs(float(raw))
+        except (TypeError, ValueError):
+            continue
+
+    info = p.get("info") if isinstance(p.get("info"), dict) else {}
+    for key in ("positionInitialMargin", "positionIM", "isolatedMargin"):
+        raw = info.get(key)
+        try:
+            if raw is not None and float(raw) > 0:
+                return abs(float(raw))
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        notional = abs(float(p.get("notional") or 0.0))
+        leverage = float(p.get("leverage") or 0.0)
+        if notional > 0 and leverage > 0:
+            return notional / leverage
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 class Venue:
     """A single exchange, with a keyless public client and a keyed private one."""
 
@@ -1165,6 +1211,21 @@ class Venue:
                 "entryPrice": float(p["entryPrice"]) if p.get("entryPrice") else None,
                 "leverage": float(p["leverage"]) if p.get("leverage") else None,
                 "unrealizedPnl": float(p["unrealizedPnl"]) if p.get("unrealizedPnl") is not None else None,
+                # THE LOCKED MARGIN, AND IT WAS NEVER EMITTED.
+                #
+                # `trading_session.current_equity` reads `margin` /
+                # `initialMargin` off these rows to answer what a REAL account
+                # is worth: agent fills never write the local real book, so the
+                # venue is the only source of the margin a position is holding.
+                # The reader existed (F58); the field did not, so `locked` was
+                # always 0.0 and a healthy account read as its free cash alone.
+                #
+                # Measured consequence: $100 at 3x with $60 locked reports
+                # equity 40, trips a 50 floor, and the session finishes
+                # "floored" on a position that is perfectly fine. Same shape as
+                # every other finding here -- a value read at the decision
+                # point and never produced.
+                "margin": _position_margin(p),
                 "liquidationPrice": float(p["liquidationPrice"]) if p.get("liquidationPrice") else None,
             })
         return out

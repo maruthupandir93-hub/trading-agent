@@ -30,7 +30,10 @@ describing it as if it exists.
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from backend.core.auth import require_write_auth
+from backend.core.outbound_url import check as check_outbound_url
 from pydantic import BaseModel
 
 from backend.core.agent_os import get_agent_os
@@ -199,7 +202,22 @@ def _chat_completions_url(base_url: str) -> str:
 
 
 @router.post("/chat")
-async def chat_proxy(req: ChatProxyRequest):
+async def chat_proxy(
+    req: ChatProxyRequest,
+    # AUTHENTICATED, AND IT WAS NOT.
+    #
+    # This route makes THIS SERVER issue a POST to an address the CALLER
+    # chooses and streams the reply back. Unauthenticated, that is a
+    # server-side request forgery primitive with a READ channel: anyone who
+    # could reach port 8000 could reach 127.0.0.1, the VM's private network,
+    # or 169.254.169.254 — which on most cloud providers serves instance
+    # credentials — and get the body back.
+    #
+    # It is a write dependency rather than a read one because it SPENDS: the
+    # caller's key, the provider's rate limit, and this server's outbound
+    # connections.
+    _auth: None = Depends(require_write_auth),
+):
     """Stream a chat completion from an OpenAI-compatible provider.
 
     WHY THIS IS HERE AT ALL
@@ -237,6 +255,23 @@ async def chat_proxy(req: ChatProxyRequest):
 
     base_url = req.baseUrl or "https://integrate.api.nvidia.com/v1"
     url = _chat_completions_url(base_url)
+
+    # AND THE ADDRESS IS CHECKED, because auth alone is not the whole fix.
+    # An authenticated caller still must not be able to turn this server into
+    # a probe of its own network, and the dashboard's own base URLs are public
+    # provider endpoints that pass trivially. `LLM_BASE_URL_ALLOWLIST` narrows
+    # it further for an operator who wants to name the permitted hosts.
+    verdict = check_outbound_url(url)
+    if not verdict.ok:
+        logger.warning("Refused a chat proxy to %s: %s", url, verdict.reason)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refusing to fetch {verdict.host or url!r}: {verdict.reason}. "
+                f"This server will not make requests to its own network on a "
+                f"caller's behalf."
+            ),
+        )
     payload = {
         "model": req.model or "z-ai/glm-5.2",
         "messages": req.messages,

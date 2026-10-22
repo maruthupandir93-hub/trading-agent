@@ -215,10 +215,20 @@ async def open_position(symbol: str) -> Optional[Dict[str, Any]]:
     return {}
 
 
+# HOW FAR APART TWO FILLS CAN BE AND STILL BE THE SAME CLOSE.
+#
+# One close is several fills on a thin book -- the live incident was five,
+# seconds apart. Exits from DIFFERENT trades are minutes or days apart. This
+# is what separates "blend the sweep that closed this position" from "blend a
+# week of unrelated exits", which booked a -$5 loss as -$37.7.
+_ONE_CLOSE_WINDOW_MS = 120_000
+
+
 async def recent_exit_fill(
     symbol: str,
     *,
     order_ids: Optional[List[str]] = None,
+    since_ms: Optional[int] = None,
     lookback_ms: int = 7 * 24 * 60 * 60 * 1000,
 ) -> Optional[Dict[str, Any]]:
     """The venue's OWN fill for a close it executed without us, or None.
@@ -245,7 +255,14 @@ async def recent_exit_fill(
     never "nothing happened" -- the same rule `free_usdt` and `open_position`
     follow, and the caller must not treat it as a flat account.
     """
+    # NO FILL THAT PREDATES THIS POSITION MAY BE CONSIDERED.
+    #
+    # `since_ms` is when the trade opened. Without it the window is the old
+    # seven days, which is why the unmatched fallback below is additionally
+    # bounded to one close -- a seven-day blend is never a fill price.
     start = int(time.time() * 1000) - max(lookback_ms, 60_000)
+    if since_ms:
+        start = max(start, int(since_ms))
     async with httpx.AsyncClient(timeout=20.0) as client:
         ok, body = await _signed(
             client, "GET", "/fapi/v1/userTrades",
@@ -273,7 +290,29 @@ async def recent_exit_fill(
     if not chosen:
         # A REDUCING fill only. An opening fill in the window would otherwise be
         # reported as the exit, which is the entry price wearing the exit's name.
-        chosen = [r for r in rows if str(r.get("realizedPnl") or "0") not in ("0", "0.0", "")]
+        reducing = [
+            r for r in rows
+            if str(r.get("realizedPnl") or "0") not in ("0", "0.0", "")
+        ]
+        # AND ONLY THE MOST RECENT CLOSE, NOT EVERY CLOSE IN THE WINDOW.
+        #
+        # Without this the quantity-weighted mean below averaged every prior
+        # exit on the symbol into one price -- the reviewer measured a -$5 loss
+        # booked as -$37.7. One close is several fills seconds apart; anything
+        # further back belongs to a different trade and must not touch this
+        # one's price.
+        if reducing:
+            newest = max(int(r.get("time") or 0) for r in reducing)
+            chosen = [
+                r for r in reducing
+                if newest - int(r.get("time") or 0) <= _ONE_CLOSE_WINDOW_MS
+            ]
+            if len(chosen) != len(reducing):
+                logger.info(
+                    "%s: %d of %d reducing fills are within %.0fs of the latest; "
+                    "the rest belong to earlier trades and are excluded.",
+                    symbol, len(chosen), len(reducing), _ONE_CLOSE_WINDOW_MS / 1000,
+                )
     if not chosen:
         return None
 

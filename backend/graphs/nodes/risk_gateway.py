@@ -297,6 +297,24 @@ def _symbol_in_session(session, symbol: str) -> bool:
     return _norm_symbol(symbol) in set(_session_symbols(session))
 
 
+
+def _depth_cap(thesis: Any, snapshot: Any):
+    """The order book's own ceiling for this trade, or an unmeasured verdict.
+
+    Never raises: a sizing path that could die on a malformed book would turn
+    a market-data problem into a refused trade, and the VaR cap above already
+    bounds the loss.
+    """
+    from backend.algorithms.liquidity_cap import DepthVerdict, cap_for
+
+    try:
+        side = "buy" if str(getattr(thesis, "direction", "")).upper() == "LONG" else "sell"
+        return cap_for(side, snapshot)
+    except Exception as exc:  # pragma: no cover - a ceiling, never a gate
+        logger.debug("Depth cap unavailable: %s", exc)
+        return DepthVerdict(None, 0, f"unavailable ({type(exc).__name__})")
+
+
 def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     """Size, validate, and produce an inert execution plan. Deterministic."""
     decision = state.get("decision")
@@ -972,6 +990,45 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             )
             per_trade_margin = capped_margin
             notional = max_notional
+
+        # ---- AND THE BOOK'S OWN CAPACITY -------------------------------
+        #
+        # RISK SIZING IS PROPORTIONAL AND THAT IS ONLY HALF OF "WORKS AT ANY
+        # BALANCE". Every trade risks `equity x VaR`, so the percentage at
+        # stake is identical at $2 and at $2,000,000 — correct, and blind to
+        # the market. At $2m the live VaR sizes an $8,000,000 notional MARKET
+        # order on SOL/USDT, and nothing in this system checked whether such an
+        # order could fill: there was no maximum size check and no liquidity
+        # check anywhere.
+        #
+        # That order walks the whole visible book and fills percent away from
+        # the price the decision was made at — which makes the computed stop a
+        # fiction, because the position is already past it on arrival. A stop
+        # is a promise about how much a trade can lose, so an order that moves
+        # the market breaks that promise before the stop is ever tested. That
+        # is why this belongs here, beside the other risk limits, and not in
+        # execution.
+        #
+        # It reads the book the single fetch point already put on the snapshot,
+        # so it costs no market-data call and stays replay-safe (Section 39.4).
+        # An unreadable book leaves the size ALONE rather than refusing: the
+        # VaR cap and the venue minimum still apply, and turning a feed outage
+        # into a halt would be a worse failure than the one being prevented.
+        depth = _depth_cap(thesis, snapshot)
+        if depth.notional is not None and 0 < depth.notional < notional:
+            capped_margin = depth.notional / leverage
+            var_note += (
+                f" DEPTH-CAPPED: the book can only absorb {depth.notional:,.2f} "
+                f"notional within the slippage tolerance ({depth.reason}), so the "
+                f"order was sized down from {notional:,.2f}. A larger order would "
+                f"fill past its own stop."
+            )
+            logger.warning(
+                "Risk Gateway depth-capped %s: %.2f -> %.2f notional (%s).",
+                symbol, notional, depth.notional, depth.reason,
+            )
+            per_trade_margin = capped_margin
+            notional = depth.notional
 
         size = notional / thesis.entry_price
         sizing = {

@@ -246,6 +246,25 @@ def _persist() -> None:
         logger.error("Could not persist trading sessions: %s", exc)
 
 
+
+def _risk_coherence_for_resume():
+    """The risk verdict, or None when it cannot be obtained.
+
+    None means "do not block the resume on this". A session that was running
+    must not be killed by an import error in the checker — that would turn a
+    diagnostic into an outage, which is the opposite of what it is for. A
+    genuinely unmeasurable CONFIGURATION already returns ok=True with its
+    reason stated, so this None path is only about the check itself failing.
+    """
+    try:
+        from backend.services.risk_coherence import assess_current
+
+        return assess_current()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not re-check risk coherence on resume: %s", exc)
+        return None
+
+
 def resume_sessions_on_restart() -> bool:
     """Should a session that was running before a restart carry on?
 
@@ -304,8 +323,35 @@ def restore() -> int:
                 # watch list is restored separately, by
                 # `PositionMonitorAgent.restore`, and `main.py` does that
                 # BEFORE this — so a resumed session sees its open positions.
-                to_resume.append(session)
-                resumed += 1
+                # AND THE RISK CONFIGURATION IS RE-CHECKED, because a
+                # restart must not be a way around a refusal.
+                #
+                # `start_session` refuses a configuration whose own drawdown
+                # killswitch fires before MIN_LOSSES_BEFORE_HALT stop-outs.
+                # A session started BEFORE that check existed, or started when
+                # the numbers were coherent and resumed after an operator
+                # changed them, would otherwise come back trading on exactly
+                # the settings the system refuses to start.
+                #
+                # It is STOPPED rather than resumed-and-gated, matching what
+                # the operator would get if they tried to start it now. Open
+                # positions are unaffected: `PositionMonitorAgent` watches and
+                # closes them independently of any session, and stopping a
+                # session has never closed a position (invariant 4).
+                coherence = _risk_coherence_for_resume()
+                if coherence is not None and not coherence.ok:
+                    session.status = "stopped"
+                    session.stop_reason = (
+                        f"NOT resumed after the restart: {coherence.reason}"
+                    )
+                    session.finished_at = time.time()
+                    interrupted += 1
+                    logger.error(
+                        "Session %s was not resumed — %s", session.id, coherence.reason,
+                    )
+                else:
+                    to_resume.append(session)
+                    resumed += 1
             else:
                 session.status = "stopped"
                 session.stop_reason = (

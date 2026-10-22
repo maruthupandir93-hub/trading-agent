@@ -703,7 +703,33 @@ async def enable_live_trading(body: Dict[str, Any] = {}) -> Dict[str, Any]:
                 ),
             }
     except Exception as e:
-        logger.warning("Could not check venue credentials: %s", e)
+        # FAILS CLOSED. This used to log a warning and FALL THROUGH to
+        # `set_live_trading(True)`, so any unexpected error while checking
+        # readiness -- an import failure, a venue id typo, a ccxt change, a
+        # transient network fault inside `get_venue()` -- still turned real
+        # money on, and the response said "success".
+        #
+        # The whole purpose of this check is to refuse live trading that
+        # cannot place an order. "I could not determine whether it can" is not
+        # a pass; it is the one answer that must stop the switch. That is the
+        # same rule `require_write_auth` follows with an unset key, and the
+        # opposite of the True/False/None rule used for MEASUREMENTS -- here
+        # the cost of a wrong allow is real orders against a venue this
+        # process could not even describe.
+        logger.error(
+            "REFUSING to enable live trading: the venue credential check could "
+            "not be completed (%s: %s).", type(e).__name__, e,
+        )
+        return {
+            "status": "error",
+            "message": (
+                f"Cannot enable live trading: the venue readiness check could not "
+                f"be completed ({type(e).__name__}: {e}). Live trading stays OFF — "
+                f"a check that cannot run is not a check that passed. Fix the "
+                f"configuration and try again."
+            ),
+            "liveTradingEnabled": settings.LIVE_TRADING,
+        }
 
     settings.set_live_trading(True)
     logger.critical(

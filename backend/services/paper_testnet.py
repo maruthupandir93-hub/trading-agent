@@ -294,7 +294,9 @@ async def venue_flat(symbol: str) -> Optional[bool]:
     return None
 
 
-async def exit_fill(symbol: str, order_ids=None) -> Optional[Dict[str, Any]]:
+async def exit_fill(
+    symbol: str, order_ids=None, since_ms: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     """The venue's own fill for a close it executed without us, or None.
 
     Only the Binance demo adapter can answer this today; a venue that cannot is
@@ -308,7 +310,7 @@ async def exit_fill(symbol: str, order_ids=None) -> Optional[Dict[str, Any]]:
         reader = getattr(venue, "recent_exit_fill", None)
         if reader is None:
             return None
-        return await reader(symbol, order_ids=list(order_ids or []))
+        return await reader(symbol, order_ids=list(order_ids or []), since_ms=since_ms)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read the mirror's exit fill for %s: %s", symbol, exc)
         return None

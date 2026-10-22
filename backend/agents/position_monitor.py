@@ -76,6 +76,7 @@ order is the durable one.
 import asyncio
 import datetime
 import logging
+import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.core.agent_base import BaseAgent
@@ -89,6 +90,20 @@ from backend.models.events import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# A PROCESS-UNIQUE TOKEN FOR PROTECTIVE-ORDER IDS.
+#
+# Bybit requires `orderLinkId` to be unique across ALL orders ever placed, not
+# just open ones. The per-position counter that forms the rest of the id lives
+# in memory and restarts at 00, so without this a restart could re-ask for an
+# id the venue had already seen -- and a REFUSED stop leaves a real position
+# with no exchange-side protection.
+#
+# `secrets` rather than the clock: two processes started in the same second
+# (a restart loop, a blue/green deploy) would otherwise collide, which is
+# exactly the situation this is for.
+_RUN_TOKEN = secrets.token_hex(2)
 
 import os
 import time
@@ -804,15 +819,32 @@ class PositionMonitorAgent(BaseAgent):
             replacement could place a second order that then outlived the id
             the monitor was holding.
 
-        `sl_<24 hex of tar>_<nn>` stays inside Binance's 36-character limit and
-        inside Bybit's, and still greps back to the position it protects. The
-        counter is per position and in-memory; a restart starts at 00 again,
-        which is safe because the ids it would collide with were cancelled on
-        the way down or are cancelled by `stop_order_id` on restore.
+        `<kind>_<18 hex of tar>_<run>_<nn>` stays inside Binance's 36-character
+        limit and inside Bybit's, and still greps back to the position it
+        protects.
+
+        THE RUN TOKEN IS WHAT MAKES A RESTART SAFE, and the paragraph that used
+        to stand here was WRONG about that. It said an in-memory counter
+        restarting at 00 "is safe because the ids it would collide with were
+        cancelled on the way down or are cancelled by `stop_order_id` on
+        restore". Both of those can fail, and this module already treats one of
+        them as CRITICAL and KEEPS the id precisely because it can:
+
+            a tighten cancels the old stop and the cancel FAILS
+            the process restarts
+            the counter is 00 again, so the next stop for this position asks
+            for an id the venue has already seen
+            -> Bybit REFUSES it as a duplicate orderLinkId
+            -> the position is left with NO exchange stop, which is the exact
+               failure the resting stop exists to prevent
+
+        `_RUN_TOKEN` is drawn once per process from `secrets`, so two runs
+        cannot produce the same id for the same position however the counter
+        resets. It costs four characters and removes the whole class.
         """
         n = self._protective_seq.get(pos.tar_id, 0) + 1
         self._protective_seq[pos.tar_id] = n
-        return f"{kind}_{str(pos.tar_id)[:24]}_{n % 100:02d}"
+        return f"{kind}_{str(pos.tar_id)[:18]}_{_RUN_TOKEN}_{n % 100:02d}"
 
     def _replace_resting_stop_soon(self, pos: "_Tracked") -> None:
         """Schedule `_replace_resting_stop` from a SYNCHRONOUS caller.
@@ -2362,6 +2394,15 @@ class PositionMonitorAgent(BaseAgent):
                 # failed take-profit id cannot be inherited by a later position
                 # that happens to be the same size.
                 position_id=pos.tar_id,
+                # AND BOUND THE VENUE-FILL SEARCH TO THIS TRADE'S OWN LIFETIME.
+                #
+                # Without it the unmatched fallback blended every reducing fill
+                # in a seven-day window into one average price — a -$5 loss was
+                # measured booked as -$37.7. A fill that predates this position
+                # cannot possibly be its exit.
+                opened_ms=(
+                    int(pos.opened_at.timestamp() * 1000) if pos.opened_at else None
+                ),
             )
 
             if fill_price is None:

@@ -73,12 +73,30 @@ export function middleware(req: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Match all request paths except for the ones starting with:
-     * - api (API routes)
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
+     * EVERY PATH EXCEPT STATIC ASSETS AND THE HEALTH CHECK.
+     *
+     * `api` USED TO BE EXCLUDED HERE, and that made the operator's data
+     * publicly readable from the Vercel URL with no password at all:
+     * /api/trades, /api/stats, /api/decisions, /api/portfolio, /api/memory
+     * and the rest answer a plain GET. Verified live by the review.
+     *
+     * The old comment justified it as "API routes have their own
+     * TRADES_API_KEY auth", which was wrong twice over: the backend PROXY
+     * supplies that key rather than checking one (fixed separately), and the
+     * Next app's OWN read routes never had any auth to begin with. Reads were
+     * left open on the backend deliberately — the browser polls them and
+     * cannot hold a server secret — but that argument is about the
+     * BACKEND's port, not about a public internet URL.
+     *
+     * The browser replays its Basic credential automatically on same-origin
+     * requests once the middleware has challenged the page, so the dashboard
+     * keeps working with no code change. With DASHBOARD_PASSWORD unset the
+     * middleware returns `next()` immediately, so local development is
+     * unaffected.
+     *
+     * `/api/health` stays open on purpose: an uptime probe must not need a
+     * credential, and it returns no account data.
      */
-    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+    '/((?!api/health|_next/static|_next/image|favicon.ico).*)',
   ],
 };
