@@ -3524,6 +3524,116 @@ prices refresh every 2s and `sim-fallback` only appears after 12s of staleness,
 so the close retries almost immediately — against a price that exists. A
 venue-routed close is never affected.
 
+### "Avoid chasing an extended candle" — measured, and it is backwards here
+
+The review's Section 6C asks for a gate on late entries, and
+`strategy_profiles.Breakout` has named the same thing as its own worst
+condition since it was written: *"a market already extended in the breakout
+direction — the move is over."* Two independent sources agreeing, and nothing
+in the code enforcing it. `algorithms/entry_extension` measures how far price
+has already travelled, in ATR, from the swing the move began at.
+
+**NONE OF THE GATES BESIDE IT COVERED THIS**, which is why it looked like a
+real hole. The HTF gate refuses a COUNTER-trend entry and chasing is the
+opposite error — the direction agrees, the entry is just late. The fee gate
+refuses a stop too TIGHT; chasing produces one too WIDE. The volatility gate
+scales SIZE, and a late entry at a smaller size is still a late entry.
+
+**THEN IT WAS MEASURED BEFORE BEING SHIPPED ON, AND THE MEASUREMENT SAYS THE
+OPPOSITE.** `scripts/measure_entry_extension.py`, 17,157 signals over six
+instruments and 1,000 real 15m candles each, calling each strategy's REAL
+signal function and the REAL `assess` on bars up to and including the entry
+bar:
+
+    every signal          -0.0182R +/-0.0211   32.7%   17,157 trades
+    the gate would KEEP   -0.0503R +/-0.0259   31.7%   11,144 trades
+    the gate would BLOCK  +0.0412R +/-0.0361   34.7%    6,013 trades
+
+    gap -0.0915R, z = -4.04, surviving a correction for the comparisons made.
+    `evidence.required_gap(6013)` = 0.0371R, so the gap is 2.5x the smallest
+    this sample could detect.
+
+**THE GATE BLOCKS THE BETTER HALF.** Entering 3+ ATR into a move is momentum,
+and momentum is what has worked on these instruments — the same ledger that
+shows the range and mean-reversion strategies losing, and that showed the HTF
+gate removing a genuinely losing half.
+
+So `REQUIRE_ENTRY_PROXIMITY` defaults **OFF**, and that is the finding rather
+than a failure to build the gate. The result ran AGAINST the hypothesis, which
+is the only direction this kind of result is worth much: `core/evidence.py`
+exists because a throwaway script once turned three noise readings into
+findings, every one of them in the direction the author was hoping for.
+
+The EXTENSION IS STILL MEASURED and written into every entry-context snapshot,
+because turning a gate off must not also stop recording the data that would
+judge it — the arrangement `REQUIRE_HTF_ALIGNMENT` already uses. It is appended
+AFTER `context:` and before `strategy=`, so every frontend regex still matches.
+
+One limit, stated: this replays the DETERMINISTIC signal functions, not the
+nine-specialist panel, which needs an order book, a tape and news and cannot be
+replayed offline. It says the premise is wrong on what can be measured; it does
+not license the opposite gate.
+
+### The two rows of the review's measurement table that had nothing behind them
+
+Section 6 lists six things the agent should measure. Four already existed:
+regime and volatility are computed on every run, `execution_quality` records
+slippage, partial fills and latency, and liquidation distance is not merely
+measured but ENFORCED by `liquidation_safe_leverage`. Two did not.
+
+**ABSTENTION — `services/abstention.py`.** *"How often the agent correctly
+rejects weak or conflicting opportunities."* Arguably the most important row on
+a system that declines far more often than it trades: 1,995 rejections against
+a handful of fills was the live ratio when the scope gate was found.
+
+It measures the SHAPE of the abstention, not its size, and the distinction
+matters because this project has twice gone hunting for a fault that was not
+there — 10,001 cycles on a PAUSED system, and 46 of 50 decisions refused at
+0.00-0.12 against a 0.60 floor. So it reports WHICH GATE is binding (a funnel
+over `rejection_reasons`, with one example kept per bucket so `other` and
+`unstated` can be chased rather than merely counted) and HOW DECISIVE the
+refusals were. "The agent did not trade" is not a finding; "88% of refusals
+were the confidence floor and 2% were the venue minimum" is, and they have
+completely different remedies.
+
+**IT DOES NOT ESTIMATE WHETHER A REFUSED TRADE WOULD HAVE LOST**, deliberately.
+That needs the forward path of a trade never taken, simulated under the same
+stop and target — an in-sample counterfactual with all the flattery
+`strategy_priors` already warns about, reported beside real measurements where
+a reader could not tell them apart. `backtests/` is where a counterfactual
+belongs, with its caveats travelling alongside it.
+
+An unreadable `decisions` table reports `available: false`, never zeros —
+zeros would read as an agent that takes every trade it sees, which is both
+false and the more alarming of the two misreadings.
+
+**PERFORMANCE BY REGIME — `strategy_performance.by_regime()`.** The pooled
+expectancy is the right number for promotion and the wrong one for
+understanding: this project's own backtest shows the range strategies losing in
+a TRENDING window, which is a statement about the window as much as about the
+strategies, and one number cannot express that. It also reports PROFIT FACTOR,
+the review's own term, as `None` rather than infinity when nothing has been
+lost yet — infinity reads as a perfect record.
+
+The regime is recovered by parsing `regime=` out of `trades.entry_context`, and
+A SEPARATE COLUMN IS DELIBERATELY NOT BUILT: the snapshot already carries it for
+every row the gateway wrote, INCLUDING HISTORICAL ONES, so a new column would
+leave every existing trade NULL and the split would report "no data" on exactly
+the ledger it exists to analyse.
+
+**IT DOES NOT FEED SELECTION.** A per-regime sample is `MIN_SAMPLE` divided by
+the number of regimes, and steering on a handful of trades is how naive
+adaptive systems destroy themselves. `_track_record_score` reads the pooled
+rate and continues to; a test asserts `opportunity` never imports the split.
+
+**THE REST OF SECTION 6'S A-D GUIDANCE WAS ALREADY ENFORCED**, and it is worth
+recording that it was checked rather than assumed: strategy/regime suitability
+is scored from each profile's own `active_regimes` (A), a grid cannot
+accumulate inventory because `MAX_CONCURRENT_POSITIONS` is 1 and the range-break
+exit is the mandatory stop (B), and `Liquidity Crisis` sits in
+`BLOCKED_REGIMES` (D). Only 6C was missing — and 6C turned out to be wrong for
+this account.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -3633,7 +3743,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2487 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2520 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

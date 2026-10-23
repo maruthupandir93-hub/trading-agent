@@ -53,6 +53,7 @@ excludes it and says so, exactly as it does today.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -167,6 +168,118 @@ async def success_rate(strategy: str) -> Optional[float]:
     if entry is None or not entry["usable"]:
         return None
     return float(entry["winRate"])
+
+
+# How the regime is recovered from a closed trade. `trades.entry_context` is the
+# snapshot the Risk Gateway wrote at decision time, and `regime=<name>,` is one
+# of its fields -- the same text `learningDashboard.classifyEntryContext` and
+# `lib/viz/entryContext.ts` already parse.
+#
+# A SEPARATE COLUMN WOULD BE THE BETTER HOME and is deliberately not built
+# here: `entry_context` already carries this for every row the gateway wrote,
+# including historical ones, and adding a column would leave every existing
+# trade NULL -- so the regime split would report "no data" on exactly the
+# ledger it exists to analyse. Parsing reads the rows that exist.
+_REGIME_IN_CONTEXT = re.compile(r"regime=([^,]+)", re.I)
+
+
+def regime_of(entry_context: Optional[str]) -> Optional[str]:
+    """The market regime a trade was opened in, or None.
+
+    None when the row predates the snapshot or the field is absent. NOT a
+    default: attributing a trade to a regime it was not taken in would poison
+    exactly the measurement this feeds, and "unknown" is a real answer here.
+    """
+    if not entry_context:
+        return None
+    match = _REGIME_IN_CONTEXT.search(str(entry_context))
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+async def by_regime() -> Optional[Dict[str, Dict[str, Dict[str, Any]]]]:
+    """Realised stats per strategy, SPLIT BY THE REGIME THEY TRADED IN.
+
+    THE REVIEW'S SECTION 6: *"Strategy performance -- net expectancy, profit
+    factor, drawdown, win/loss size, and PERFORMANCE BY REGIME."* The pooled
+    figure `performance()` returns is the right number for promotion and the
+    wrong one for understanding: this project's own backtest shows the range
+    strategies losing in a trending window, which is a statement about the
+    WINDOW as much as about the strategies, and a pooled expectancy cannot
+    express that.
+
+    It does NOT feed selection. `_track_record_score` reads the pooled rate and
+    continues to: a per-regime sample is `MIN_SAMPLE` divided by the number of
+    regimes, and steering on a handful of trades is how naive adaptive systems
+    destroy themselves. This is for reading.
+
+    None when the database could not be read -- never `{}`.
+    """
+    from backend.core.db import get_db_pool
+
+    pool = get_db_pool()
+    if pool is None:
+        return None
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT strategy, pnl, entry_context
+                  FROM trades
+                 WHERE pnl IS NOT NULL AND strategy IS NOT NULL
+                """
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not read per-regime strategy performance: %s", exc)
+        return None
+
+    buckets: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for r in rows:
+        strategy = r["strategy"]
+        regime = regime_of(r["entry_context"]) or "unrecorded"
+        cell = buckets.setdefault(strategy, {}).setdefault(regime, {
+            "sampleSize": 0, "wins": 0, "totalPnl": 0.0, "_wins": [], "_losses": [],
+        })
+        pnl = float(r["pnl"])
+        cell["sampleSize"] += 1
+        cell["totalPnl"] += pnl
+        if pnl > 0:
+            cell["wins"] += 1
+            cell["_wins"].append(pnl)
+        else:
+            cell["_losses"].append(pnl)
+
+    for strategy, regimes in buckets.items():
+        for regime, cell in regimes.items():
+            n = cell["sampleSize"]
+            wins = cell["_wins"]
+            losses = cell["_losses"]
+            avg_win = (sum(wins) / len(wins)) if wins else 0.0
+            avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
+            rate = (cell["wins"] / n) if n else 0.0
+            cell["winRate"] = rate
+            cell["avgWin"] = avg_win
+            cell["avgLoss"] = avg_loss
+            cell["expectancy"] = rate * avg_win - (1 - rate) * avg_loss
+            # PROFIT FACTOR, the review's own term: gross wins over gross
+            # losses. None rather than infinity when nothing was lost -- a
+            # strategy with no losing trade yet has an UNMEASURED profit
+            # factor, and rendering infinity reads as a perfect record.
+            gross_loss = abs(sum(losses))
+            cell["profitFactor"] = (
+                round(sum(wins) / gross_loss, 4) if gross_loss > 0 else None
+            )
+            # Below MIN_SAMPLE this cell describes a handful of trades. Said on
+            # the cell itself, because a per-regime split is exactly where a
+            # reader is most tempted to over-read three outcomes.
+            cell["usable"] = n >= MIN_SAMPLE
+            cell.pop("_wins", None)
+            cell.pop("_losses", None)
+
+    return buckets
 
 
 def cached_performance() -> Optional[Dict[str, Dict[str, Any]]]:

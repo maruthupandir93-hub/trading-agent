@@ -107,6 +107,13 @@ GRAPH_REQUESTED_LEVERAGE = 1
 from backend.algorithms.market_context import assess as assess_alignment
 from backend.algorithms.market_context import build as build_market_context
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
+# SECTION 6C: how far into the move this entry sits. Pure and deterministic --
+# it reads candles `validate_market_data` already fetched, because a node that
+# fetched its own data would not be replay-safe (Section 39.4).
+from backend.algorithms.entry_extension import (
+    assess as assess_entry_extension,
+    gate_enabled as entry_proximity_required,
+)
 from backend.services.trading_session import (
     active_capital_fraction,
     active_session,
@@ -177,6 +184,28 @@ def _deployed_margin(positions: List[Dict[str, Any]]) -> float:
 # Refuse an entry that fights the 1h/4h consensus. Configurable because it is a
 # hypothesis about selectivity rather than a safety invariant — an operator
 # testing whether it helps must be able to turn it off without editing code.
+def _atr_for(state: Any) -> Optional[float]:
+    """The ATR the rest of this node already sizes against, or None.
+
+    Read from `technical_analysis` rather than recomputed: two copies of an ATR
+    is how `lib/riskManager.ts` and `core/risk_manager.py` drifted apart on the
+    stop multipliers, and a gate measuring against a DIFFERENT ATR than the one
+    that placed the stop would refuse trades for arithmetic nobody can
+    reproduce.
+    """
+    technical = state.get("technical_analysis") if hasattr(state, "get") else None
+    for attr in ("atr", "atr_value", "average_true_range"):
+        value = getattr(technical, attr, None)
+        if value is None and isinstance(technical, dict):
+            value = technical.get(attr)
+        try:
+            if value is not None and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 REQUIRE_HTF_ALIGNMENT: bool = (
     os.getenv("REQUIRE_HTF_ALIGNMENT", "true").strip().lower() == "true"
 )
@@ -190,6 +219,10 @@ def build_entry_context(
     volatility: Any,
     strategy: Optional[str],
     market_context: Any = None,
+    # HOW LATE THIS ENTRY WAS (Section 6C). Recorded even when the proximity
+    # gate is off, because turning a gate off must not also stop recording the
+    # data that would judge it -- the arrangement REQUIRE_HTF_ALIGNMENT uses.
+    entry_extension: Any = None,
 ) -> str:
     """A compact snapshot of what the agent saw, for the trade row.
 
@@ -245,6 +278,18 @@ def build_entry_context(
         described = market_context.describe()
         if described:
             bits.append(f"context: {described},")
+
+    # APPENDED AFTER `context:` FOR THE SAME REASON IT WAS. Every frontend
+    # regex is written against the fields that precede it; a new field at the
+    # END leaves all of them matching, while one inserted in the middle would
+    # silently stop a parser finding the value after it.
+    if entry_extension is not None:
+        try:
+            described = entry_extension.as_context()
+        except Exception:  # noqa: BLE001
+            described = ""
+        if described:
+            bits.append(f"{described},")
 
     if strategy:
         bits.append(f"strategy={strategy}")
@@ -688,6 +733,61 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                     },
                 )
             }
+
+    # ---- RIGHT DIRECTION, WRONG MOMENT (review Section 6C) ----------------
+    #
+    # *"Avoid chasing an extended candle where the stop is too far away or the
+    # reward-to-risk ratio has deteriorated."* `strategy_profiles.Breakout` has
+    # named this as its own worst condition since it was written — "a market
+    # already extended in the breakout direction, the move is over" — and
+    # nothing enforced it.
+    #
+    # NONE OF THE GATES AROUND IT COVERS IT. The HTF gate above refuses a
+    # COUNTER-trend entry; chasing is the opposite error, where the entry
+    # agrees with the trend and is simply late. The fee gate below refuses a
+    # stop too TIGHT; chasing produces one too WIDE. The volatility gate scales
+    # SIZE, and a late entry at a smaller size is still a late entry — what
+    # deteriorated is the payoff, not the dollar risk.
+    #
+    # PLACED AFTER THE HTF GATE AND BEFORE SIZING, for the reason the
+    # volatility gate gives: a refusal that is a property of WHERE PRICE IS
+    # must not be reachable by making the trade smaller.
+    #
+    # The context is BUILT unconditionally and only the REFUSAL is gated, so
+    # turning the gate off does not also stop recording the data that would
+    # judge it — the arrangement `REQUIRE_HTF_ALIGNMENT` already uses.
+    extension = None
+    if thesis is not None and snapshot is not None:
+        try:
+            extension = assess_entry_extension(
+                decision.direction,
+                (snapshot.candles.get("15m") if snapshot.candles else None),
+                entry_price=getattr(thesis, "entry_price", None),
+                stop_loss=getattr(thesis, "stop_loss", None),
+                atr=_atr_for(state),
+            )
+        except Exception as exc:  # noqa: BLE001 - a measurement, never a crash
+            logger.debug("Entry extension could not be measured: %s", exc)
+            extension = None
+
+    if extension is not None and extension.chasing and entry_proximity_required():
+        return {
+            "risk_assessment": RiskAssessment(
+                approved=False,
+                rejection_reasons=[
+                    f"chasing an extended move: {extension.reason}"
+                ],
+                checks={
+                    "EntryProximity": {
+                        "status": "reject",
+                        "detail": (
+                            f"{extension.reason}. This is NOT a counter-trend refusal "
+                            f"— the direction agrees with the move; the entry is late."
+                        ),
+                    }
+                },
+            )
+        }
 
     # ---- VOLATILITY GATE, before anything is sized ------------------------
     #
@@ -1254,6 +1354,7 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             # Restored: the HTF-trend and BTC-benchmark context, so the trade row
             # records WHY as well as WHAT. Safe when None.
             market_context=market_context,
+            entry_extension=extension,
         ),
         symbol=symbol,
         side=side,

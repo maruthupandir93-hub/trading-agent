@@ -52,6 +52,50 @@ Batch 7 — Issues 4, 7, 9, 11, 12, 13, 14.
 
 ---
 
+## Section 6 — "What your trading bot should learn to do better"
+
+Six measurement rows. Four already had something behind them, and that was
+**checked rather than assumed**: regime and volatility are computed on every
+run; `execution_quality` records slippage, partial fills and latency;
+liquidation distance is not merely measured but ENFORCED by
+`liquidation_safe_leverage`. Two did not.
+
+| Row | Status |
+|---|---|
+| Market regime | already computed per run |
+| Signal quality | HTF agreement and distance-from-invalidation already recorded |
+| Execution quality | `execution_quality`: slippage, partial fills, latency |
+| Risk | liquidation distance **enforced**, not just measured |
+| Strategy performance | pooled existed; **by regime** added (`by_regime()`, with profit factor) |
+| **Abstention** | **nothing at all → `services/abstention.py`** |
+
+The A–D regime guidance was likewise checked: strategy/regime suitability is
+scored from each profile's own `active_regimes` (A), a grid cannot accumulate
+inventory because `MAX_CONCURRENT_POSITIONS` is 1 (B), and `Liquidity Crisis`
+is in `BLOCKED_REGIMES` (D).
+
+**Only 6C was genuinely missing — and 6C turned out to be WRONG for this
+account.** The review asks for a gate on chasing an extended candle, and
+`strategy_profiles.Breakout` names the same thing as its own worst condition.
+`algorithms/entry_extension` measures it. Replayed through the real `assess`
+against 17,157 signals on six instruments
+(`scripts/measure_entry_extension.py`):
+
+```
+every signal          -0.0182R +/-0.0211   32.7%   17,157 trades
+the gate would KEEP   -0.0503R +/-0.0259   31.7%   11,144 trades
+the gate would BLOCK  +0.0412R +/-0.0361   34.7%    6,013 trades
+
+gap -0.0915R, z = -4.04, against a smallest-detectable gap of 0.0371R
+```
+
+The gate removes the **better** half. `REQUIRE_ENTRY_PROXIMITY` therefore
+defaults **OFF**; the extension is still measured and recorded on every entry,
+so a future ledger can disagree. The result ran against the hypothesis, which
+is the only direction this kind of result is worth much.
+
+---
+
 ## Still owed by the operator — none of these is a code change
 
 1. **Every configured LLM model must be verified alive.** The provider fails
@@ -119,10 +163,10 @@ Batch 7 — Issues 4, 7, 9, 11, 12, 13, 14.
 
 ---
 
-## Verification at the close of batch 7
+## Verification at the close of batch 8
 
 ```
-backend     2487 passed, 2 skipped
+backend     2520 passed, 2 skipped
 frontend    522 passed across 37 files
 tsc         clean
 next build  passes

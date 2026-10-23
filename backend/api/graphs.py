@@ -372,6 +372,26 @@ async def strategy_performance_summary() -> Dict[str, Any]:
     # strategy has a live record yet. The prior is superseded per strategy the
     # moment `strategy_performance` marks that strategy usable.
     out["backtestPrior"] = strategy_priors.status()
+
+    # BY REGIME, ALONGSIDE THE POOLED FIGURE (review Section 6).
+    #
+    # The pooled expectancy is the right number for promotion and the wrong one
+    # for understanding: this project's own backtest shows the range strategies
+    # losing in a TRENDING window, which is a statement about the window as much
+    # as about the strategies, and one number cannot express that.
+    #
+    # It does NOT feed selection — a per-regime sample is MIN_SAMPLE divided by
+    # the number of regimes, and steering on a handful of trades is how naive
+    # adaptive systems destroy themselves. None when the ledger could not be
+    # read, which is NOT the same as a strategy having no record.
+    out["byRegime"] = await strategy_performance.by_regime()
+
+    # WHAT THE AGENT DECLINED, AND WHY. The one row of the review's measurement
+    # table that had nothing behind it, and arguably the most important on a
+    # system that refuses far more often than it trades.
+    from backend.services import abstention as _abstention
+
+    out["abstention"] = await _abstention.metrics()
     return out
 
 
