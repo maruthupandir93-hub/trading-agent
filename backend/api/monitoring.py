@@ -26,6 +26,7 @@ comment cannot drift from the registry the way a hardcoded count would.
 """
 
 import os
+from typing import Any, Dict
 
 from fastapi import APIRouter
 
@@ -128,6 +129,17 @@ async def get_system_health():
         # them and mean nothing apart. A reader who sees only LIVE_TRADING=false
         # may conclude nothing is happening, when the agent may be trading paper
         # autonomously and monitoring positions.
+        # THE THREE PROTECTION STATES, reported separately (review Issue 11).
+        # `autonomy.positionMonitoringEnabled` below is ONE of them and was
+        # standing in for all three — see `_protection_states`.
+        "protection": _protection_states(),
+
+        # WHAT "REAL" MEANS, FOUR DIFFERENT WAYS (review Issue 9). The operator
+        # panel places unleveraged SPOT; the agent places leveraged linear
+        # PERPETUALS; the mirror places real orders at a demo venue; simulated
+        # paper places nothing. All four rendered as a tab label.
+        "executionPlanes": _planes_summary(),
+
         "autonomy": {
             "liveTrading": live_trading,
             "graphExecutionEnabled": graph_execution,
@@ -136,6 +148,133 @@ async def get_system_health():
             "summary": _autonomy_summary(live_trading, graph_execution, position_monitoring),
         },
     }
+
+
+def _planes_summary() -> Dict[str, Any]:
+    """Never let a description of the system break the health endpoint."""
+    try:
+        from backend.services.execution_planes import summary
+
+        return summary()
+    except Exception as exc:  # noqa: BLE001
+        return {"planes": [], "error": str(exc)}
+
+
+def _protection_states() -> Dict[str, Any]:
+    """THREE INDEPENDENT STATES, because one was standing in for all of them.
+
+    The review's Issue 11: *"monitor three independent states: mechanical stop
+    active, exchange-side stop confirmed, and graph-based position review
+    healthy. One status should not stand in for the others."*
+
+    What was reported was `positionMonitoringEnabled` — the flag that decides
+    whether the GRAPH's position-review decisions are ACTED on. An operator
+    reading it false reasonably concludes nothing is watching their positions,
+    and an operator reading it true reasonably concludes their stops rest at
+    the exchange. Both readings are wrong, in opposite and dangerous
+    directions:
+
+      MECHANICAL     `PositionMonitorAgent._check_price` compares every tick
+                     against every open position's stop and closes through the
+                     ungated path. It runs whatever that flag says. It needs
+                     TICKS, so a position in an unsubscribed instrument has no
+                     enforceable stop at all — which is why the subscription
+                     count is reported beside it.
+      EXCHANGE-SIDE  a reduce-only stop RESTING at the venue, which is the only
+                     thing that survives this process dying. Batch 5 made this
+                     an explicit per-position state rather than something
+                     inferred from `stop_order_id is None`, which three
+                     different outcomes all produced.
+      GRAPH REVIEW   the Phase-30 worker that can decide "the panel now argues
+                     against this position". A loop failing on every pass used
+                     to look identical to a healthy idle one.
+
+    Never raises: a status endpoint that 500s during an incident is the one
+    time it must not.
+    """
+    out: Dict[str, Any] = {}
+
+    # --- mechanical -------------------------------------------------------
+    try:
+        from backend.agents.position_monitor import (
+            PROTECTION_PARTIAL, PROTECTION_UNPROTECTED, PROTECTION_VENUE,
+            get_position_monitor,
+        )
+
+        positions = get_position_monitor().snapshot_open()
+        watched = len(positions)
+        with_stop = sum(1 for p in positions if p.get("stopLoss") is not None)
+        at_venue = sum(1 for p in positions if p.get("protection") == PROTECTION_VENUE)
+        partial = sum(1 for p in positions if p.get("protection") == PROTECTION_PARTIAL)
+        unprotected = sum(
+            1 for p in positions if p.get("protection") == PROTECTION_UNPROTECTED
+        )
+
+        subscribed = None
+        try:
+            from backend.services.live_market_data import watched_symbols as subscribed_symbols
+
+            subscribed = sorted(subscribed_symbols())
+        except Exception:  # noqa: BLE001
+            subscribed = None
+
+        # A POSITION WITH NO TICK FEED HAS NO ENFORCEABLE STOP, and the monitor
+        # still lists it as watched. That is the hardcoded-symbol-list bug this
+        # codebase has already paid for once, and nothing reported it.
+        unfed = None
+        if subscribed is not None:
+            feeds = {str(sym).split(":")[0].upper() for sym in subscribed}
+            unfed = [
+                p.get("symbol") for p in positions
+                if str(p.get("symbol") or "").split(":")[0].upper() not in feeds
+            ]
+
+        out["mechanical"] = {
+            "active": True,
+            "positionsWatched": watched,
+            "positionsWithAStop": with_stop,
+            "symbolsSubscribed": len(subscribed) if subscribed is not None else None,
+            "positionsWithNoTickFeed": unfed,
+            "healthy": watched == with_stop and not unfed,
+            "note": (
+                "every tick is compared against every open position's stop, and this "
+                "runs regardless of POSITION_MONITORING_ENABLED. It needs TICKS: a "
+                "position in an unsubscribed instrument is listed as watched and its "
+                "stop can never fire."
+            ),
+        }
+        out["exchangeSide"] = {
+            "confirmedAtVenue": at_venue,
+            "partiallyCovered": partial,
+            "unprotected": unprotected,
+            # Only a venue-confirmed stop survives this process dying.
+            "healthy": unprotected == 0 and partial == 0,
+            "note": (
+                "a reduce-only stop RESTING at the exchange is the only protection "
+                "that survives this process stopping. 'unprotected' means a REAL "
+                "position whose stop the venue refused; 'partiallyCovered' means the "
+                "venue accepted a stop for less than the position."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["mechanical"] = {"active": None, "error": str(exc)}
+        out["exchangeSide"] = {"confirmedAtVenue": None, "error": str(exc)}
+
+    # --- graph review -----------------------------------------------------
+    try:
+        from backend.workers.position_worker import get_position_worker
+
+        out["graphReview"] = get_position_worker().health()
+    except Exception as exc:  # noqa: BLE001
+        out["graphReview"] = {"healthy": None, "error": str(exc)}
+
+    out["note"] = (
+        "THREE INDEPENDENT MECHANISMS. One being healthy says nothing about the "
+        "others: the mechanical stop runs with POSITION_MONITORING_ENABLED off, "
+        "and a position the dashboard shows a stop for may have no order at the "
+        "venue behind it."
+    )
+    return out
 
 
 def _autonomy_summary(live: bool, graph_execution: bool, monitoring: bool) -> str:

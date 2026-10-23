@@ -371,6 +371,26 @@ async def place_order(req: PlaceOrderRequest) -> Dict[str, Any]:
     return {
         "ok": True,
         "exchangeOrderId": exchange_order_id,
+        # WHAT WAS ACTUALLY TRADED (review Issue 9). The UI calls this "Real",
+        # and the agent's plane is also called "Real", and they are different
+        # instruments: this is unleveraged SPOT with no position to rest a
+        # reduce-only order against, which is why `_register_real_position`
+        # refuses to hand a spot holding to the PERPETUAL position monitor.
+        # Stating it on the order itself means an operator reading a response —
+        # or a log of one — never has to infer it from a tab label.
+        "execution": {
+            "plane": "operator-spot",
+            "marketType": "SPOT",
+            "venue": req.exchange,
+            "network": "testnet" if req.testnet else "mainnet",
+            "leverage": None,
+            "restingProtectiveOrders": False,
+            "note": (
+                "SPOT, with the operator's own keys, unsupervised by invariant 1. "
+                "This is NOT the agent's leveraged perpetual plane and the position "
+                "monitor cannot close it."
+            ),
+        },
         # Whether anything in this process is enforcing the stop. Reported on
         # every order, including when no stop was asked for, because "nothing is
         # watching this position" is not something an operator should have to

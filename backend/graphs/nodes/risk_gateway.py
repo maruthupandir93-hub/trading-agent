@@ -131,6 +131,9 @@ from backend.agents.cro_agent import (
     max_portfolio_var_fraction,
 )
 
+# Named here so the refusal text and the variable cannot drift apart.
+REQUIRE_APPROVAL_VAR = "REQUIRE_STRATEGY_APPROVAL"
+
 # How much of the VaR budget the gateway actually spends when it caps a position.
 #
 # MODULE SCOPE ON PURPOSE: this is a number the CRO's verdict depends on, so it
@@ -387,6 +390,60 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                 },
             )
         }
+
+    # ---- RANKING WELL IS NOT HAVING BEEN SHOWN TO MAKE MONEY --------------
+    #
+    # The review's Issues 12 and 14. `strategy_scoring` answers "which of these
+    # is the most promising right now" and answers it well; nothing answered
+    # "has this strategy demonstrated a net edge over enough real closed
+    # trades", and the two were being settled by one number.
+    #
+    # IT RECORDS UNCONDITIONALLY AND GATES ONLY WHEN ASKED, and that asymmetry
+    # is the whole design. No strategy here has twenty closed real trades yet,
+    # so a gate on by default would stop real trading entirely until one does —
+    # a legitimate policy, and the OPERATOR's to choose rather than one this
+    # node imposes while they are not looking. The record runs either way, so
+    # every real entry's evidence says whether the strategy behind it had
+    # demonstrated an edge, and the question stays answerable afterwards on a
+    # deployment that never turns the gate on.
+    #
+    # PAPER IS NEVER GATED. Paper research is how a strategy earns a record in
+    # the first place; refusing the trades that would produce the evidence is a
+    # loop with no exit.
+    approval = None
+    try:
+        from backend.services import strategy_approval
+
+        approval = strategy_approval.assess_cached(getattr(thesis, "strategy", None))
+        if (
+            tab == "real"
+            and strategy_approval.gate_enabled()
+            and not approval.approved_for_real_money
+        ):
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[
+                        f"{approval.strategy or 'this trade'} is not approved for real "
+                        f"money: {approval.reason}"
+                    ],
+                    checks={
+                        "StrategyApproval": {
+                            "status": "reject",
+                            "detail": (
+                                f"{REQUIRE_APPROVAL_VAR} is on, so a REAL entry requires a "
+                                f"strategy with a demonstrated net edge. Status "
+                                f"{approval.status}. {approval.reason}."
+                            ),
+                        }
+                    },
+                )
+            }
+    except Exception as exc:  # noqa: BLE001
+        # A bookkeeping read must never stop a trade the risk model approves.
+        # "Could not measure" is not "measured and unprofitable" — the
+        # distinction this codebase has now paid for five times.
+        logger.debug("Strategy approval could not be assessed: %s", exc)
 
     # ---- THE FEE MUST NOT EAT THE EDGE (F61) ------------------------------
     #
@@ -1147,8 +1204,27 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             f"sizing rule: {sizing['rule']} — {sizing['detail']}",
         ],
         checks={
-            name: {"status": check.status, "detail": check.detail}
-            for name, check in validation.checks.items()
+            **{
+                name: {"status": check.status, "detail": check.detail}
+                for name, check in validation.checks.items()
+            },
+            # RECORDED ON EVERY APPROVAL, GATE OR NO GATE (review Issue 14).
+            #
+            # The whole point of separating "best available candidate" from
+            # "approved for real money" is lost if the distinction only exists
+            # when a flag is on. `status: "info"` because it is a STATEMENT, not
+            # a check that passed — CANDIDATE is the normal state here and must
+            # not render beside a passing risk check as though it were one.
+            **({
+                "StrategyApproval": {
+                    "status": "info",
+                    "detail": (
+                        f"{approval.status}: {approval.reason}. This is a statement "
+                        f"about EVIDENCE, not a risk check — the trade was sized and "
+                        f"validated normally."
+                    ),
+                }
+            } if approval is not None else {}),
         },
         stop_loss=thesis.stop_loss,
         take_profit=thesis.take_profit,

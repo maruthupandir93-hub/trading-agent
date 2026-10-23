@@ -86,6 +86,50 @@ from backend.services.fees import taker_rate
 SLIPPAGE_RATE_PER_LEG = 0.0002
 SLIPPAGE_VAR = "BACKTEST_SLIPPAGE_RATE"
 
+# FUNDING, WHICH THIS ENGINE USED TO LEAVE OUT ENTIRELY.
+#
+# The review's Issue 13: *"Perpetual funding, exchange fees, spread, partial
+# fills and adverse stop execution can change net expectancy."* Fees and
+# slippage were modelled; funding was named as deliberately unmodelled, and
+# that was defensible while trades lasted minutes. It stopped being defensible
+# the moment `max_holding_minutes` made multi-hour holds routine: funding is
+# charged every eight hours on both venues, so a position held through two
+# settlements pays twice regardless of outcome.
+#
+# 0.0001 (1 bp per 8h) is the long-run median on major USDT perpetuals — close
+# to the venues' own baseline, which is where the rate sits absent a strong
+# directional skew. It is an ASSUMPTION, exactly like the slippage rate, and
+# `scripts/run_backtests.py` says so in its output: a real funding series is
+# per-instrument, per-hour and signed, and modelling it properly means fetching
+# history this engine deliberately does not fetch.
+#
+# IT IS CHARGED TO BOTH SIDES. Funding is a transfer, so a short is PAID when
+# the rate is positive — but this is a magnitude with no series behind it, and
+# assuming the direction that flatters a backtest is the mistake
+# `backend/core/evidence.py` exists because of. Charging both sides is the
+# conservative reading and the only one this assumption supports.
+FUNDING_RATE_PER_INTERVAL = 0.0001
+FUNDING_INTERVAL_MINUTES = 8 * 60
+FUNDING_VAR = "BACKTEST_FUNDING_RATE"
+
+
+def funding_rate() -> float:
+    """Per-settlement funding as a fraction of notional. Read at call time.
+
+    `BACKTEST_FUNDING_RATE=0` turns it off and restores the previous
+    behaviour, which is what a study comparing against the stored 2026-09-06
+    results needs.
+    """
+    raw = os.getenv(FUNDING_VAR)
+    if not raw:
+        return FUNDING_RATE_PER_INTERVAL
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return FUNDING_RATE_PER_INTERVAL
+    return value if value >= 0 else FUNDING_RATE_PER_INTERVAL
+
+
 
 def slippage_rate() -> float:
     """Read at call time, never frozen at import (the `simulation_mode` rule)."""
@@ -156,6 +200,13 @@ class Trade:
     # the entry price on each of two legs, so a wider stop costs proportionally
     # less. That relationship is why this is per-trade and not a constant.
     fee_r: float = 0.0
+    # FUNDING FOR THIS TRADE, IN R, SEPARATE FROM THE FEE. Kept apart because
+    # they behave in opposite directions: the fee is paid once per round trip
+    # and shrinks as the stop widens, while funding accrues with TIME and is
+    # therefore worst on exactly the trades `max_holding_minutes` allows to run
+    # longest. A single "costs" number would hide which one a strategy is
+    # losing to, and they have different remedies.
+    funding_r: float = 0.0
 
 
 @dataclass
@@ -188,6 +239,10 @@ class StrategyResult:
     # keeps working.
     gross_expectancy_r: float = 0.0
     fee_r_per_trade: float = 0.0
+    # Reported separately from the fee for the reason `Trade.funding_r` gives:
+    # one is paid per round trip and one accrues with time, and which a
+    # strategy is losing to decides what to do about it.
+    funding_r_per_trade: float = 0.0
     # HOW THE TRADES ENDED, so a reader can tell WHICH exit policy produced
     # this expectancy. Two runs with the same number can be different
     # strategies: one that mostly reaches its target and one that mostly runs
@@ -433,11 +488,32 @@ def backtest_strategy(
         cost_rate = 2.0 * (taker_rate() + slippage_rate())
         fee_r = (cost_rate * entry / risk_per_unit) if risk_per_unit > 0 else 0.0
 
+        # FUNDING, ACCRUED OVER THE HOLD. Unlike the fee this scales with TIME,
+        # so it is worst on exactly the trades the holding bound lets run
+        # longest -- which is the half of the cost picture this engine was
+        # missing while its output was being used as evidence about which
+        # strategies work.
+        #
+        # Settlements are counted, not prorated: a venue charges the whole rate
+        # at each eight-hour mark and nothing in between, so a 30-minute trade
+        # that happens to straddle one pays in full and a 7-hour one that does
+        # not pays nothing. Prorating would understate the short holds and
+        # overstate the long ones. Without a candle interval the hold cannot be
+        # measured at all, and an unmeasurable cost is reported as zero rather
+        # than guessed -- the `note` below says when that happened.
+        funding_r = 0.0
+        if minutes_per_bar and risk_per_unit > 0:
+            held_minutes = max(0, exit_index - i) * minutes_per_bar
+            settlements = int(held_minutes // FUNDING_INTERVAL_MINUTES)
+            if settlements:
+                funding_r = settlements * funding_rate() * entry / risk_per_unit
+
         trades.append(Trade(
             direction="long" if long else "short",
             entry_index=i, exit_index=exit_index,
             entry_price=entry, exit_price=exit_price,
             outcome=outcome, r_multiple=round(r, 4), fee_r=round(fee_r, 6),
+            funding_r=round(funding_r, 6),
         ))
 
         # Resume scanning AFTER the exit — one position at a time.
@@ -474,9 +550,13 @@ def _summarise(name: str, trades: List[Trade], note: Optional[str] = None) -> St
     # strategies as profitable that keep about a third of that net and two as
     # break-even that are actually losing.
     avg_fee_r = (sum(t.fee_r for t in closed) / n_closed) if n_closed else 0.0
-    expectancy = gross_expectancy - avg_fee_r
+    avg_funding_r = (sum(t.funding_r for t in closed) / n_closed) if n_closed else 0.0
+    # NET MEANS NET OF EVERY COST MODELLED, and funding is one now. Reported
+    # beside the gross figure and beside each cost separately, which is the
+    # review's Issue 13: "report gross and net expectancy separately".
+    expectancy = gross_expectancy - avg_fee_r - avg_funding_r
     payoff = (avg_win / abs(avg_loss)) if avg_loss else None
-    total_r = sum(t.r_multiple - t.fee_r for t in closed)
+    total_r = sum(t.r_multiple - t.fee_r - t.funding_r for t in closed)
     n_time = sum(1 for t in closed if t.outcome == "time")
     time_share = (n_time / n_closed) if n_closed else 0.0
 
@@ -491,6 +571,7 @@ def _summarise(name: str, trades: List[Trade], note: Optional[str] = None) -> St
         expectancy_r=round(expectancy, 4),
         gross_expectancy_r=round(gross_expectancy, 4),
         fee_r_per_trade=round(avg_fee_r, 6),
+        funding_r_per_trade=round(avg_funding_r, 6),
         payoff=round(payoff, 4) if payoff is not None else None,
         total_r=round(total_r, 4),
         open_at_end=open_at_end,

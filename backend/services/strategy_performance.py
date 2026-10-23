@@ -169,6 +169,21 @@ async def success_rate(strategy: str) -> Optional[float]:
     return float(entry["winRate"])
 
 
+def cached_performance() -> Optional[Dict[str, Dict[str, Any]]]:
+    """The cached stats WITHOUT touching the database. None when nothing is cached.
+
+    For callers inside a graph node. `validate_market_data` is the single fetch
+    point (Section 39.4) and a node that reached for the database mid-run would
+    not be replay-safe: a resumed checkpoint would reason over a different
+    ledger than the original decision.
+
+    None means "not cached", which is NOT "this strategy has no record" — the
+    distinction this codebase has paid for in four other places. A caller that
+    cannot tell must report that it could not tell.
+    """
+    return _cache["data"]
+
+
 def reset_cache() -> None:
     """Test hook, and used after a reset so a cleared ledger is not still cached."""
     _cache.update({"at": 0.0, "data": None})
