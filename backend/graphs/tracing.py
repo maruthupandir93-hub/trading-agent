@@ -185,15 +185,41 @@ def _trim_old_traces() -> None:
                 pass
 
 
-def list_recent_runs(limit: int = 50) -> List[Dict[str, Any]]:
-    """Recent run traces, newest first. Used by the monitoring API."""
+def list_recent_runs(limit: int = 50, graph: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Recent run traces, newest first. Used by the monitoring API.
+
+    `graph` FILTERS BY FILENAME, BEFORE ANY FILE IS READ, and that is the point
+    rather than an optimisation.
+
+    The caller used to over-fetch the newest 200 traces and filter the parsed
+    results. `position_monitoring` runs once per tick per open position while
+    `trade_analysis` runs once per decision interval, so the newest 200 are
+    almost always ALL monitoring — and a request for `trade_analysis` came back
+    EMPTY while 250 of its traces sat on disk. The per-graph retention cap
+    (F12) kept the files; nothing made them reachable.
+
+    The graph tag has been in the filename since F12 (`<ts>_<graph>_<runid>`),
+    so selecting the right files first is exact. It also stops the reader
+    opening 200 JSON files to discard most of them.
+    """
     if not os.path.isdir(TRACE_DIR):
         return []
     out: List[Dict[str, Any]] = []
+    wanted = _safe_tag(graph) if graph else None
     try:
-        names = sorted(
-            (f for f in os.listdir(TRACE_DIR) if f.endswith(".json")), reverse=True
-        )[:limit]
+        candidates = []
+        for f in os.listdir(TRACE_DIR):
+            if not f.endswith(".json"):
+                continue
+            if wanted is not None:
+                parts = f.split("_", 2)
+                # A legacy file (no graph tag) cannot be attributed, so it is
+                # excluded from a FILTERED request rather than guessed into
+                # one. An unfiltered request still returns it.
+                if len(parts) != 3 or parts[1] != wanted:
+                    continue
+            candidates.append(f)
+        names = sorted(candidates, reverse=True)[:limit]
         for name in names:
             try:
                 with open(os.path.join(TRACE_DIR, name), encoding="utf-8") as fh:

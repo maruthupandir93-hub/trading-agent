@@ -173,6 +173,9 @@ class ConfidenceAgent(BaseAgent):
                     symbol=event.symbol,
                     calibrated_confidence=0.0,
                     breakdown={"raw": raw, "calibrated": 0.0},
+                    # None on a NEUTRAL debate: there is no side, and the
+                    # reader must not invent one.
+                    direction=None,
                 )
             )
             return
@@ -235,6 +238,10 @@ class ConfidenceAgent(BaseAgent):
                 symbol=event.symbol,
                 calibrated_confidence=calibrated,
                 breakdown=breakdown,
+                # CARRIED, so the portfolio correlation cap can tell a short
+                # from a long. It read a field that did not exist and defaulted
+                # to LONG on every event.
+                direction=event.winning_direction,
             )
         )
 

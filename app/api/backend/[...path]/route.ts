@@ -74,6 +74,28 @@ export const dynamic = 'force-dynamic';
 //     breaks" would not be a fix. Set DASHBOARD_PASSWORD to restore writes.
 // ---------------------------------------------------------------------
 
+
+/**
+ * Has the operator deliberately opted into an open write surface?
+ *
+ * THE BACKEND HONOURS THIS AND THE FRONTEND DID NOT, so the escape hatch was
+ * half-wired: on a genuinely local deployment the operator set
+ * ALLOW_UNAUTHENTICATED_WRITES, the backend began accepting writes, and this
+ * proxy went on refusing them with a message about DASHBOARD_PASSWORD. The
+ * documented way out of the fail-closed default did not work end to end.
+ *
+ * Parsed EXACTLY as `backend/core/auth.open_writes_allowed` parses it —
+ * trimmed, lowercased, and matching the same four truthy spellings. Two halves
+ * of one application disagreeing about what a flag means is the shape this
+ * codebase keeps paying for, and a security flag is the worst place for it:
+ * "on" to one side and "off" to the other is a hole nobody can see from
+ * either.
+ */
+function openWritesAllowed(): boolean {
+  const raw = (process.env.ALLOW_UNAUTHENTICATED_WRITES ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 function incomingPasswordOk(req: Request): boolean {
   const required = process.env.DASHBOARD_PASSWORD;
   if (!required) return false; // caller must handle the unset case separately
@@ -120,7 +142,7 @@ async function forward(req: Request, ctx: Ctx, method: 'GET' | 'POST' | 'PUT' | 
     if (!incomingPasswordOk(req)) {
       return unauthorized('Authentication required for the backend proxy.');
     }
-  } else if (method !== 'GET') {
+  } else if (method !== 'GET' && !openWritesAllowed()) {
     return unauthorized(
       'This action changes trading state and is refused because DASHBOARD_PASSWORD ' +
         'is not set. The backend proxy attaches the server API key, so it must not ' +

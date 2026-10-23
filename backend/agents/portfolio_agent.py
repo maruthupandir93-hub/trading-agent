@@ -176,7 +176,23 @@ class PortfolioAgent(BaseAgent):
                 # that assumes every position is long counts a hedging long and
                 # ignores a same-direction short, which is the wrong way round
                 # for both.
-                side = (getattr(event, "direction", None) or "LONG").upper()
+                # THE DEFAULT IS NOW ONLY REACHED WHEN THERE GENUINELY IS NO
+                # SIDE, and it is logged when it is.
+                #
+                # This read `getattr(event, "direction", None)` against an
+                # event that did not DECLARE the field, so the `or "LONG"`
+                # fired on every single call and F77's correlation fix was
+                # inert — every short was still evaluated as a long. The field
+                # is declared and carried now; a None here means a NEUTRAL
+                # debate, which has no side to cap.
+                raw_side = getattr(event, "direction", None)
+                if raw_side is None:
+                    logger.debug(
+                        "No direction on the calibrated confidence for %s (a neutral "
+                        "debate); the correlation cap is evaluated as LONG.",
+                        event.symbol,
+                    )
+                side = (raw_side or "LONG").upper()
                 if side not in ("LONG", "SHORT"):
                     side = "LONG"
                 result = evaluate_portfolio_risk(event.symbol, side)

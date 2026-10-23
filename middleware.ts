@@ -23,11 +23,26 @@ export function middleware(req: NextRequest) {
     //    against a prefix. The operator's password worked for a shorter
     //    string than they set.
     // 3. `===` on a secret returns early at the first differing byte.
+    // 4. `atob` ALONE LOCKED OUT EVERY NON-ASCII PASSWORD.
+    //
+    //    `atob` returns a BYTE string: each UTF-8 byte becomes one character.
+    //    A password containing any character outside ASCII therefore decodes
+    //    to mojibake and never equals the real one, so the operator is
+    //    challenged forever by a password they typed correctly — with no error
+    //    anywhere saying why.
+    //
+    //    `app/api/backend/[...path]/route.ts` already did this correctly with
+    //    `Buffer.from(value, 'base64').toString('utf-8')`, so the two halves of
+    //    the same gate disagreed about what the password WAS. Buffer does not
+    //    exist in the Edge runtime, so the bytes are decoded explicitly.
     const value = basicAuth.split(' ')[1];
     let decoded: string | null = null;
     if (basicAuth.toLowerCase().startsWith('basic ') && value) {
       try {
-        decoded = atob(value);
+        const binary = atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+        decoded = new TextDecoder('utf-8').decode(bytes);
       } catch {
         decoded = null;
       }
@@ -40,10 +55,17 @@ export function middleware(req: NextRequest) {
       // Not constant time in the cryptographic sense — the Edge runtime has no
       // `timingSafeEqual` — but it does not return early on the first
       // mismatching byte, which is the practical leak.
-      if (pwd.length === requiredPassword.length) {
+      // Compared as UTF-8 BYTES, so a password whose characters differ in
+      // JavaScript's UTF-16 representation but not in what was actually sent
+      // cannot slip through, and vice versa. The two sides are now decoded the
+      // same way, which is the half that was broken.
+      const encoder = new TextEncoder();
+      const got = encoder.encode(pwd);
+      const want = encoder.encode(requiredPassword);
+      if (got.length === want.length) {
         let diff = 0;
-        for (let i = 0; i < pwd.length; i += 1) {
-          diff |= pwd.charCodeAt(i) ^ requiredPassword.charCodeAt(i);
+        for (let i = 0; i < got.length; i += 1) {
+          diff |= got[i] ^ want[i];
         }
         if (diff === 0) {
           return NextResponse.next();

@@ -198,10 +198,21 @@ async def list_runs(
     """
     from backend.graphs.tracing import list_recent_runs
 
-    # Over-fetch before filtering so `limit` means "give me this many of the graph
-    # I asked for", not "look at this many and keep whatever matches".
+    # THE GRAPH FILTER IS PUSHED DOWN TO THE FILENAME; the symbol one cannot be.
+    #
+    # Over-fetching 200 and filtering the parsed results did not work:
+    # `position_monitoring` runs once per tick per open position while
+    # `trade_analysis` runs once per decision interval, so the newest 200 were
+    # almost always ALL monitoring and a `trade_analysis` request came back
+    # EMPTY while 250 of its traces sat on disk. The per-graph retention cap
+    # kept the files; nothing made them reachable.
+    #
+    # `graph` is in the filename, so `list_recent_runs` selects exactly those
+    # files. `symbol` is only inside the JSON, so it still filters after the
+    # read — but now over a pool that is already the right graph, which is what
+    # makes the over-fetch sufficient.
     if graph or symbol:
-        pool = list_recent_runs(limit=200)
+        pool = list_recent_runs(limit=200, graph=graph)
         runs = [
             r for r in pool
             if (not graph or r.get("graph") == graph)

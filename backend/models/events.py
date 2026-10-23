@@ -154,6 +154,23 @@ class ConfidenceCalibratedEvent(BaseEvent):
     symbol: str
     calibrated_confidence: float
     breakdown: Dict[str, float]
+    # WHICH WAY THE DEBATE CONCLUDED, AND IT WAS NEVER CARRIED.
+    #
+    # `portfolio_agent` reads `getattr(event, "direction", None) or "LONG"` to
+    # size a correlation cap — the F77 fix for "a cap that assumes every
+    # position is long counts a hedging long and ignores a same-direction
+    # short". The field it reads did not exist on this event, so the default
+    # was taken EVERY time and F77 changed nothing: every short was still
+    # evaluated as a long.
+    #
+    # DECLARED, not just passed. Pydantic v2 silently ignores an undeclared
+    # keyword argument, which is exactly how `TarApprovedEvent` lost
+    # `strategy`, `run_id` and `entry_context` while every reader's defensive
+    # `getattr` made the chain look like it was working.
+    #
+    # Optional with no default direction: a NEUTRAL debate has no side, and
+    # inventing LONG for it is the bug this replaces.
+    direction: Optional[Literal['LONG', 'SHORT']] = None
 
 class RiskEvaluatedEvent(BaseEvent):
     event_type: Literal['RISK_EVALUATED'] = 'RISK_EVALUATED'

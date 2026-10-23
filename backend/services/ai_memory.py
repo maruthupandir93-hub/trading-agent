@@ -189,8 +189,21 @@ async def reset_tab_stats(tab: str = "paper") -> Dict[str, Any]:
         for key in ("total_trades", "wins", "losses"):
             totals[key] += int(stats.get(key) or 0)
         totals["total_pnl"] += float(stats.get("total_pnl") or 0.0)
+    # A PERCENTAGE, LIKE EVERY OTHER WRITER OF THIS FIELD.
+    #
+    # This computed the FRACTION while `record_trade` and
+    # `record_closed_trade` both write `(wins / total) * 100`, so after a reset
+    # `global_stats.win_rate` silently changed units: a 60% win rate became
+    # 0.6. Nothing validates the field, so every reader quietly took the
+    # hundred-fold error — `supervisor_agent._measured_win_rate` feeds KELLY
+    # SIZING, which would then size as though the strategy almost never won,
+    # and the Telegram close alert reported "0.6%" on a winning account.
+    #
+    # Two spellings of one quantity in one file is the same hazard as the ATR
+    # multipliers across two files; `tests/test_review_batch4.py` asserts all
+    # three writers agree.
     totals["win_rate"] = (
-        totals["wins"] / totals["total_trades"] if totals["total_trades"] else 0.0
+        (totals["wins"] / totals["total_trades"]) * 100 if totals["total_trades"] else 0.0
     )
     memory["global_stats"] = totals
 

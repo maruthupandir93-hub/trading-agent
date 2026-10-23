@@ -361,6 +361,15 @@ _CLOSE_FAILURE_ALERT = 10
 # short enough that a refused one does not accumulate for months (F65).
 _PENDING_TTL_S = 3600.0
 
+# How many extra replacement passes one trailing stop may trigger.
+#
+# A fast trail can tighten again while the retry is still at the venue, so one
+# extra pass is not always enough — but an unbounded loop would spin a cancel
+# and a place per tick against the key's rate budget, which is what the
+# coalescing exists to prevent. Three bounds it while covering any realistic
+# move; the in-process monitor enforces the true level throughout either way.
+_MAX_STOP_REPLACE_PASSES = 3
+
 
 class _Tracked:
     """One open position being watched."""
@@ -525,6 +534,10 @@ class PositionMonitorAgent(BaseAgent):
         # client id per placement, and a strong reference to the in-flight task.
         self._stop_locks: Dict[str, asyncio.Lock] = {}
         self._stop_replacing: set = set()
+        # Tighten requests that arrived while a replacement was already at the
+        # venue. Without this they were dropped and the exchange kept the older,
+        # WIDER stop — see `_replace_resting_stop_soon`.
+        self._stop_dirty: set = set()
         self._stop_tasks: set = set()
         self._protective_seq: Dict[str, int] = {}
         super().__init__()
@@ -868,14 +881,47 @@ class PositionMonitorAgent(BaseAgent):
         # the venue's rate budget, and they raced (F24). One in flight is enough
         # — it re-reads `pos.stop_loss` after taking the lock, so it carries the
         # newest level rather than the one that scheduled it.
+        # ...BUT A REQUEST THAT ARRIVES MID-FLIGHT MUST NOT BE DROPPED.
+        #
+        # Coalescing alone lost the tightest stop. The in-flight replacement
+        # re-reads `pos.stop_loss` when it takes the lock, which covers a
+        # tighten arriving BEFORE that moment — and a tighten arriving AFTER
+        # it, while the cancel/place pair is at the venue, simply returned
+        # here. The exchange was then left holding a LOOSER stop than the one
+        # the monitor believes it has.
+        #
+        # In-process that is invisible, because `_check_price` enforces the
+        # tighter level on every tick. It matters exactly when the resting stop
+        # matters: if this process dies, the venue executes the stale, wider
+        # level — which is the window the resting stop exists to close, so
+        # losing the update there defeats the feature.
+        #
+        # Trailing edge: mark it dirty, and re-run once when the in-flight
+        # attempt finishes. One extra pass, never a queue per tick.
         if pos.tar_id in self._stop_replacing:
+            self._stop_dirty.add(pos.tar_id)
             return
         self._stop_replacing.add(pos.tar_id)
 
         async def _run() -> None:
             try:
                 await self._replace_resting_stop(pos)
+                # Re-read in a loop rather than once: the venue call is slow
+                # enough that a fast trail can tighten again while the retry
+                # itself is running. Bounded by `_MAX_STOP_REPLACE_PASSES` so a
+                # pathological trail cannot spin against the rate budget.
+                for _ in range(_MAX_STOP_REPLACE_PASSES):
+                    if pos.tar_id not in self._stop_dirty:
+                        break
+                    self._stop_dirty.discard(pos.tar_id)
+                    logger.debug(
+                        "%s: a tighten arrived during the stop replacement; "
+                        "running once more so the venue holds the newest level.",
+                        pos.symbol,
+                    )
+                    await self._replace_resting_stop(pos)
             finally:
+                self._stop_dirty.discard(pos.tar_id)
                 self._stop_replacing.discard(pos.tar_id)
 
         task = loop.create_task(_run())
