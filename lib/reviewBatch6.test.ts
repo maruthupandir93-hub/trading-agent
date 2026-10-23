@@ -185,3 +185,43 @@ describe('controls that fail quietly', () => {
     expect(block.slice(0, 1400)).toContain('NOT backed up');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue 4 — exchange secrets over a plain-HTTP hop
+// ---------------------------------------------------------------------------
+
+describe('credentials crossing the backend hop', () => {
+  const src = read('app/api/backend/[...path]/route.ts');
+
+  it('refuses a credential-bearing body over plain HTTP', () => {
+    // The file's own header says this hop being server-to-server "is what
+    // makes plain http OK". That is true of MARKET DATA and false of
+    // CREDENTIALS: Vercel to the Oracle box is the public internet, and
+    // nothing about a request being made by a server encrypts it. `TradePanel`
+    // posts the operator's apiKey and apiSecret in the body of
+    // `/api/operator/exchange/order`, and those are trading keys on a real
+    // account.
+    expect(src).toContain('CREDENTIAL_KEYS');
+    expect(src).toContain('apiSecret');
+    expect(src).toContain('421');
+  });
+
+  it('does not refuse a loopback backend, where no network is crossed', () => {
+    // Refusing there would break local development for a risk that does not
+    // exist.
+    expect(src).toMatch(/127\\\.0\\\.0\\\.1|localhost/);
+  });
+
+  it('names the opt-out for what it permits', () => {
+    // So switching it on is a decision rather than an accident — the same rule
+    // ALLOW_UNAUTHENTICATED_WRITES follows.
+    expect(src).toContain('ALLOW_PLAINTEXT_EXCHANGE_SECRETS');
+  });
+
+  it('leaves every other route alone', () => {
+    // Only credential-bearing bodies are refused; flattening this into "no
+    // writes over http" would break the whole dashboard for a risk confined to
+    // two routes.
+    expect(src).toContain('only credential-bearing bodies are refused');
+  });
+});

@@ -3313,6 +3313,217 @@ pinned a risk configuration, so they inherited whichever was in force.
 `tests/conftest.py::isolate_risk_coherence` pins a coherent one, exactly as
 `isolate_write_auth` and `isolate_llm_configuration` do.
 
+### The external review, and the identifier that stopped meaning what it meant
+
+A third-party review (October 2026) produced 14 numbered issues and a further
+36. All are fixed or explicitly declined. Most had the shape this file already
+names — *a value is carried to the decision point and then not used* — but one
+variant recurred often enough to be worth its own note:
+
+**AN IDENTIFIER WAS REPOINTED AND ITS READERS WERE NOT.** F88 changed
+`PositionClosedEvent.trade_id` from the TAR id to the CLOSING ROW's id, for a
+correct reason: `reflections.trade_id` is a foreign key into `trades`, and a
+`manual-<hex>` TAR is not in that table, so every reflection on a manual trade
+was rejected by the constraint. Two readers were using `trade_id` AS the TAR:
+
+    telegram_notifier  caches the approved terms keyed by tar_id and joins
+                       them on the close. The lookup has missed on every close
+                       since, so the P&L message silently lost its "% of
+                       margin" — the figure that says whether the result was
+                       worth the capital.
+    reflection_agent   puts it on the receipt as `tar_id`, which
+                       `assess_execution_quality` looks up in
+                       `execution_quality.tar_id`. A trade row id in a tar_id
+                       column finds nothing, so EVERY reflection graded its own
+                       execution "unavailable" — which reads as "no reference
+                       price was recorded".
+
+Neither failed. Both produced a plausible, honest-looking absence. The event
+DECLARES `tar_id` now, and the usual Pydantic caveat applies: the test that
+caught the fix had been passing a raw `uuid.uuid4()` as `tar_id` for years and
+nothing complained, because v2 drops an undeclared keyword in silence.
+
+**A GUARD THAT REFUSED REAL HOSTS.** `lib/ssrfGuard.ts` tested
+`h.startsWith('fc')` on a bare hostname to catch the `fc00::/7` unique-local
+range — so `fcc.gov` and `fdic.gov` were refused as private addresses, with a
+message about probing our own network. An IPv6 literal always contains a colon;
+a DNS name need not. The same file's `/api/mcp-status` caller followed
+redirects, so a public host could 302 it into `169.254.169.254` and have the
+status and latency reported back — the probe the guard exists to refuse,
+reached by asking politely.
+
+**THE PROXY COULD WALK OUT OF `/api`, UNDER A COMMENT SAYING IT COULD NOT.**
+`encodeURIComponent` does not encode a dot: `.` and `..` are unreserved and
+come back unchanged. `/api/backend/%2e%2e/openapi.json` was rebuilt as
+`<backend>/api/../openapi.json` and normalised by `new URL()`. Encoding was
+never the right tool — the job is to REFUSE a traversal segment, and then to
+assert the resolved path still starts with `/api/`.
+
+**EXCHANGE SECRETS WERE CROSSING A PLAIN-HTTP HOP.**
+`lib/api/backendProxy.server.ts` says this hop being server-to-server "is what
+makes plain http OK". That is true of MARKET DATA and false of CREDENTIALS:
+Vercel to the Oracle box is the public internet, and `TradePanel` posts the
+operator's `apiKey`/`apiSecret` in the body of `/api/operator/exchange/order`.
+The proxy now REFUSES a credential-bearing body over a non-https, non-loopback
+backend origin — refuses rather than warns, because it is the only point in the
+path that can see both the secret and the scheme it is about to cross.
+`ALLOW_PLAINTEXT_EXCHANGE_SECRETS` is the named opt-out for a genuinely private
+link. **Browser localStorage still holds those keys in plain text**, which
+`components/ExchangeAccounts.tsx` states plainly and which remains true.
+
+**THE SECOND CORRUPTION OF `ai_memory.json` WAS PERMANENT.** The quarantine
+used a fixed `.corrupt` path and skipped the move when one existed, so a second
+corruption left the damaged file at the live path. `_load_memory` then returned
+`{}` forever, and `record_closed_trade` begins `if not memory: return` — so
+every close after that was dropped and the win rate, the Kelly input and the
+daily-loss check froze at zero for the life of the deployment. The FIRST
+corruption only recovered by accident: `os.replace` clears the path, so the next
+load took the does-not-exist branch. Making the move always succeed is what
+turns that accident into the rule.
+
+**A STREAMED RUN LOST EIGHT SPECIALISTS OUT OF NINE.** `stream_run` accumulated
+the graph's deltas with a plain `dict.update`, which applies no reducer. The
+specialists run in ONE parallel superstep and each writes `specialist_findings`,
+so the accumulated state kept whichever the loop saw last.
+`graphs/state.merge_delta` applies the state's own reducers, discovered through
+`get_type_hints(..., include_extras=True)` — NOT `__annotations__`, which under
+`from __future__ import annotations` holds strings and so finds no `Annotated`
+at all, returning an empty map. That failure mode is the bug being fixed wearing
+a different hat, and it was caught by driving the function rather than reading
+it.
+
+**THE BACKTEST'S HOLDING FLOOR MOVED WITH THE DATA.**
+`effective_holding_minutes` took the candle interval the backtest had measured,
+so on 1h candles the floor became `8 x 60 = 480` minutes while the live monitor
+applied `8 x 15 = 120`. That is the Issue E defect reintroduced INSIDE the one
+function written to prevent it. The floor is a property of the LIVE DECISION
+CADENCE; the candle interval is only ever an input to converting minutes into
+bars.
+
+**THE MANUAL STOP-SIDE CHECK POINTED AT A FIELD THAT DOES NOT EXIST.** Both
+operator request models carry a `_stop_on_the_right_side` validator reading
+`limitPrice` / `price`, and NEITHER MODEL DECLARES EITHER — so both returned on
+their first line, while each one's comment said the other layer would catch it
+and the monitor had no such check. `position_monitor.stop_side_fault` is the
+real one: called by the paper route BEFORE it books (where refusing costs
+nothing) and by `track_manual_position` after a venue fill, where it RECORDS
+`PROTECTION_UNPROTECTED` rather than refusing — the position is already open,
+and refusing to track it would leave it open AND unwatched.
+
+### Three states, four planes, and two claims that were being settled by one number
+
+**POSITION PROTECTION IS THREE INDEPENDENT MECHANISMS**, and
+`positionMonitoringEnabled` was standing in for all of them. It decides whether
+the GRAPH's review decisions are ACTED on, and nothing else:
+
+    MECHANICAL     `_check_price` compares every tick against every open stop
+                   and runs whatever that flag says. It needs TICKS, so a
+                   position in an unsubscribed instrument is listed as watched
+                   while its stop can never fire.
+    EXCHANGE-SIDE  a reduce-only stop RESTING at the venue — the only
+                   protection that survives this process dying.
+    GRAPH REVIEW   the Phase-30 worker. `start()` catches every cycle exception
+                   so one bad pass cannot kill the loop, which meant a loop
+                   failing on EVERY pass looked identical to a healthy idle one.
+
+`GET /api/monitoring`'s `protection` block reports all three separately, and the
+worker records `consecutive_failures` so the third is answerable at all.
+
+**"REAL" MEANS TWO DIFFERENT INSTRUMENTS**, and that was already load-bearing
+in code before it was visible anywhere. `api/operator_exchange` pins
+`defaultType: "spot"` deliberately; the agent trades leveraged linear
+perpetuals. A spot holding has no position for a reduce-only order to reduce, so
+the perpetual monitor cannot close one — which is why that route already
+REFUSES to register a spot position with it. Both rendered as the word "Real".
+`services/execution_planes` states, per plane, the venue, market type, network,
+account, position mode and what protective orders actually exist.
+
+**RANKING WELL IS NOT HAVING BEEN SHOWN TO MAKE MONEY.** `strategy_scoring`
+answers "which of these is most promising right now" and answers it well.
+Nothing answered "has this demonstrated a net edge over enough real closed
+trades", and one number — a 0.2 track-record weight inside a score whose other
+0.8 is conditions-fit — was settling both. `services/strategy_approval`
+separates them: a live sample at `MIN_SAMPLE`, a positive expectancy AFTER costs
+(`trades.pnl` is a real fill's realised P&L, so the venue's own fees are inside
+it), and the clock not ending most trades.
+
+**A BACKTEST CAN NEVER APPROVE.** This file's rule is "a backtest INFORMS; it
+does not deploy", and that module is where it stops being advice:
+`strategy_priors` says in four places that its evidence is in-sample, gross of
+the costs measured since, and taken over a mostly trending window. A live closed
+trade is out-of-sample by construction; nothing else here is.
+
+**THE GATE IS OFF BY DEFAULT AND THE RECORD IS NOT**, and the asymmetry is the
+design. No strategy here has twenty closed real trades, so
+`REQUIRE_STRATEGY_APPROVAL=true` stops real trading entirely until one does — a
+legitimate policy and the OPERATOR's to choose, not one the Risk Gateway imposes
+unasked. What runs unconditionally is the RECORD: every approval carries a
+`StrategyApproval` check at `status: "info"`, so the question stays answerable
+afterwards on a deployment that never turns the gate on. It reads the CACHE,
+never a query — a node that read the ledger mid-run would not be replay-safe.
+
+**THE BACKTEST MODELS FUNDING NOW.** It was named as deliberately unmodelled,
+which was defensible while trades lasted minutes; `max_holding_minutes` made
+multi-hour holds routine and funding settles every eight hours regardless of
+outcome. Settlements are COUNTED, not prorated — a venue charges the whole rate
+at each mark and nothing in between, so prorating would understate a 30-minute
+trade that straddles one and overstate a 7-hour one that does not. It is charged
+to BOTH sides: funding is a transfer and a short is paid when the rate is
+positive, but this is a magnitude with no signed series behind it, and assuming
+the direction that flatters a backtest is the mistake `core/evidence.py` exists
+because of. `BACKTEST_FUNDING_RATE=0` reproduces the stored 2026-09-06 cost
+model. Fee and funding are reported SEPARATELY: one is paid per round trip and
+shrinks as the stop widens, the other accrues with time, and which a strategy is
+losing to decides what to do about it.
+
+**ONE REVIEW ITEM IS DECLINED, AND THE REASON IS A STATED DECISION.** Issue 7
+asks that one authoritative validator govern "every automated AND MANUAL entry".
+It already governs both automated paths — `trade_scope`'s header records what
+happened when it did not — but invariant 1 deliberately scopes supervision to
+AI-originated trades: *"supervising agents means supervising agents, not
+overriding the operator."* The manual plane keeps the two limits that are
+properties of the ACCOUNT rather than supervision rules — the leverage ceiling
+and a stop that can actually fire — and is otherwise unsupervised on purpose.
+
+### The write gate has two halves, and the banner could only see one
+
+`writeBlocker` read `GET /api/admin/status`, which reports the BACKEND's
+`TRADES_API_KEY`. The frontend's `DASHBOARD_PASSWORD` is checked by
+`app/api/backend/[...path]/route.ts` and nothing reported it. So the
+configuration that actually happens on a first deploy — backend key set,
+dashboard password not — rendered NO banner while every control returned 401,
+and with both missing the banner named only `TRADES_API_KEY`, so an operator who
+fixed that one saw no change at all. That is the "two gates, and fixing one
+looks identical to fixing neither" failure recorded above, reached through the
+UI built to prevent it. `GET /api/proxy-status` reports the frontend's half as
+BOOLEANS ONLY — the presence of a secret is the fact the UI needs; the secret is
+not — and needs no auth for the same reason.
+
+Two controls were also failing in silence. `togglePause` awaited its fetch and
+never read `res.ok`, so a 401 or a 503 resolved normally, the reload showed the
+unchanged state, and a SAFETY CONTROL appeared to do nothing with no error
+anywhere. The portfolio mirror's `.catch(() => {})` catches a thrown fetch and
+nothing else, while its comment claimed failures were logged — and the server
+copy is what a cleared browser store or a second device loads from, so a
+silently refused write loses paper trades at exactly the moment the local copy
+stops being available.
+
+### A local-book close is a RECORD of an exit, not the exit
+
+The F25 fabricated-price guard refuses a `sim-fallback` price on entries and
+exempted every close, reasoning that invariant 4 is absolute and "the close
+books at whatever the executor fills at". With no connected exchange there IS no
+executor: `sellPaper(symbol, qty, params.price)` books the realised P&L at
+exactly that number, so an invented price wrote a fabricated exit and P&L into
+the ledger that feeds the win rate and expectancy permanently.
+
+The two invariants do not actually collide. Invariant 4 protects the ability to
+EXIT A POSITION; a row in the browser's ledger is a record of an exit, and
+nothing is trapped by declining to write one at a number nobody measured. Real
+prices refresh every 2s and `sim-fallback` only appears after 12s of staleness,
+so the close retries almost immediately — against a price that exists. A
+venue-routed close is never affected.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -3389,7 +3600,7 @@ refactor.
 
 ```bash
 npx tsc --noEmit -p tsconfig.json   # must be clean
-npm run test                        # vitest; 35 files / 498 tests, must all pass
+npm run test                        # vitest; 37 files / 522 tests, must all pass
 npm run build                       # catches route/provider issues tsc won't
 ```
 
@@ -3397,7 +3608,7 @@ npm run build                       # catches route/provider issues tsc won't
 Vitest run alongside `tsc` or `next build` on a memory-constrained
 machine loses workers and prints `Test Files 23 passed (29)` — six files
 that never ran, on a line that reads as a pass. Run alone it is
-deterministic (35/35, 498/498). The
+deterministic (37/37, 522/522). The
 count in the header is there so a short run is recognisable as short.
 
 **`next.config.js` caps the build worker count, and that is load-bearing
@@ -3422,7 +3633,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2294 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2487 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

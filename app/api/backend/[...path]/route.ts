@@ -96,6 +96,24 @@ function openWritesAllowed(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+/**
+ * Field names that carry an exchange secret. Matched against the raw body
+ * rather than a parsed one: a body this route cannot parse is exactly the
+ * case where guessing its shape is wrong, and a substring test cannot be
+ * defeated by nesting the field one level deeper.
+ *
+ * `apiSecret` alone would be enough for the panels that exist today.
+ * `apiKey` and `passphrase` are included because a key without its secret is
+ * still an identifier worth not broadcasting, and a future venue may use a
+ * passphrase.
+ */
+const CREDENTIAL_KEYS = ['apiSecret', 'apiKey', 'passphrase', 'privateKey'];
+
+function allowPlaintextSecrets(): boolean {
+  const raw = (process.env.ALLOW_PLAINTEXT_EXCHANGE_SECRETS ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 function incomingPasswordOk(req: Request): boolean {
   const required = process.env.DASHBOARD_PASSWORD;
   if (!required) return false; // caller must handle the unset case separately
@@ -205,6 +223,44 @@ async function forward(req: Request, ctx: Ctx, method: 'GET' | 'POST' | 'PUT' | 
 
   try {
     const body = method === 'GET' || method === 'DELETE' ? undefined : await req.text();
+
+    // EXCHANGE SECRETS MAY NOT CROSS A PLAIN-HTTP HOP (review Issue 4).
+    //
+    // The header above says this hop being server-to-server "is what makes
+    // plain http OK", and that is true of MARKET DATA and false of
+    // CREDENTIALS. Vercel to the Oracle box is the public internet: nothing
+    // about the request being made by a server encrypts it. `TradePanel`
+    // posts the operator's apiKey and apiSecret in the body of
+    // `/api/operator/exchange/order`, and those are trading keys on a real
+    // account.
+    //
+    // REFUSED, not warned. A warning on a page nobody re-reads does not stop
+    // a secret leaving, and this is the only point in the path that can see
+    // both the secret and the scheme it is about to cross.
+    //
+    // The opt-out exists because a laptop talking to a backend on
+    // 127.0.0.1 crosses no network at all, and refusing there would break
+    // local development for a risk that does not exist. It is named for what
+    // it permits, so switching it on is a decision rather than an accident.
+    if (body && !allowPlaintextSecrets()) {
+      const origin = backendOrigin();
+      const encrypted = origin.startsWith('https://');
+      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(origin);
+      if (!encrypted && !loopback && CREDENTIAL_KEYS.some((k) => body.includes(k))) {
+        return Response.json(
+          {
+            error:
+              'Refused: this request carries exchange API credentials and the backend ' +
+              'hop is plain HTTP, so they would cross the network in clear text. Put ' +
+              'TLS on the backend (BACKEND_INTERNAL_URL starting https://), or set ' +
+              'ALLOW_PLAINTEXT_EXCHANGE_SECRETS=true if that hop is genuinely a ' +
+              'private link you trust. Market data and every other route are ' +
+              'unaffected — only credential-bearing bodies are refused.',
+          },
+          { status: 421 },
+        );
+      }
+    }
     const upstream = await fetch(target.toString(), {
       method,
       headers,
