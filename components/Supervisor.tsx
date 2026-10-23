@@ -483,19 +483,49 @@ export function SupervisorProvider({ children }: { children: React.ReactNode }) 
     // single execution path for every AI-originated trade, which makes it the
     // right place to refuse.
     //
-    // CLOSES ARE EXEMPT (invariant 4). Refusing to let the system out of a
-    // position because its price feed is stale is the harmful direction: the
-    // position is already open, and the close books at whatever the executor
-    // fills at, not at this number.
-    if (params.side === 'buy') {
+    // CLOSES THAT GO TO A VENUE ARE EXEMPT (invariant 4). Refusing to let the
+    // system out of a position because its price feed is stale is the harmful
+    // direction: the position is already open, and the close books at whatever
+    // the exchange fills at, not at this number.
+    //
+    // A LOCAL-BOOK CLOSE IS A DIFFERENT THING, AND THE EXEMPTION USED TO COVER
+    // IT TOO. With no connected exchange, `sellPaper(symbol, qty, params.price)`
+    // and `removeRealPosition(symbol, params.price)` BOOK A REALISED P&L at
+    // exactly this number — there is no executor to defer to, so the invented
+    // price is the exit price and the fabricated P&L goes into the ledger that
+    // feeds the win rate and expectancy permanently. That is invariant 6 being
+    // violated by the same path invariant 4 was protecting.
+    //
+    // The two invariants do not actually collide here. Invariant 4 protects the
+    // ability to EXIT A POSITION; a row in the browser's ledger is a RECORD of
+    // an exit, not the exit itself, and nothing is trapped by declining to
+    // write one at a number nobody measured. The real prices refresh every 2s
+    // and `sim-fallback` only appears after 12s of staleness, so the close
+    // retries almost immediately — against a price that exists.
+    const routesToVenue =
+      params.tab === 'real' && Boolean(preferredExchange) && isExchangeConnected(preferredExchange!);
+    if (params.side === 'buy' || !routesToVenue) {
       const quote = tradeablePrice(ticks[params.symbol]);
       if (!quote.ok) {
-        console.warn(`Supervisor refused ${params.symbol}: ${quote.reason}`);
+        const what =
+          params.side === 'buy'
+            ? `Supervisor refused ${params.symbol}: ${quote.reason}`
+            : `Supervisor deferred the ${params.symbol} close: ${quote.reason}. The ` +
+              `position stays open; nothing routes to an exchange here, so booking it ` +
+              `would write a fabricated exit price and P&L into the ledger.`;
+        console.warn(what);
         return {
           decision: {
             approved: false,
             urgency: 'normal',
-            reasons: [`No usable price: ${quote.reason}`],
+            reasons: [
+              params.side === 'buy'
+                ? `No usable price: ${quote.reason}`
+                : `Close deferred, not blocked: ${quote.reason}. This close is a ledger ` +
+                  `write with no exchange behind it, so booking it at a simulated price ` +
+                  `would fabricate the exit price and the realised P&L. It retries as ` +
+                  `soon as a real tick arrives.`,
+            ],
             conflictNotes: [],
             cautionNotes: [],
             explainable: null,

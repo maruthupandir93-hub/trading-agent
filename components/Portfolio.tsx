@@ -96,14 +96,38 @@ export function PortfolioProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hydrated) return;
     saveLS(LS_KEYS.portfolio, portfolio);
-    // Mirror to the server. A failure is logged rather than surfaced: the local
-    // copy is already correct, so a dropped sync degrades durability, not
-    // correctness, and blocking a trade on it would be worse.
+    // Mirror to the server. A failure does not block a trade — the local copy
+    // is already correct, so a dropped sync degrades durability, not
+    // correctness — but it IS said, and it was not (#24).
+    //
+    // `.catch(() => {})` catches a thrown fetch and NOTHING ELSE. A 401, a 413
+    // or a 500 resolves normally, so the one case that actually happens on a
+    // deployment — the write being refused — was discarded in silence, and the
+    // comment above claimed "a failure is logged" while nothing logged
+    // anything. The cost is not theoretical: the server copy is what a new
+    // browser, a cleared localStorage or a second device loads from, so a
+    // silently failing mirror loses paper trades at exactly the moment the
+    // local copy stops being available.
     fetch('/api/portfolio', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ portfolio }),
-    }).catch(() => {});
+    })
+      .then((res) => {
+        if (!res.ok) {
+          console.warn(
+            `Portfolio mirror to the server was refused (HTTP ${res.status}). The local ` +
+              `copy is correct, but it is NOT backed up — a cleared browser store or a ` +
+              `second device would not see these trades.`,
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn(
+          'Portfolio mirror to the server did not complete:',
+          err instanceof Error ? err.message : err,
+        );
+      });
   }, [portfolio, hydrated]);
 
   async function refreshTradeLog() {

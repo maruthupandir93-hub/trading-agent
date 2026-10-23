@@ -14,7 +14,7 @@
 // or POST /api/admin/live-trading/disable.
 // ---------------------------------------------------------------------
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useAppState } from '@/components/AppState';
 import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
@@ -23,7 +23,10 @@ import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
 import { ExitRulesPanel } from '@/components/operator/ExitRulesPanel';
 import { TestnetPanel } from '@/components/operator/TestnetPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
-import { describeWriteRefusal, writeBlocker, type BackendAuthStatus } from '@/lib/writeBlocker';
+import {
+  describeWriteRefusal, writeBlocker,
+  type BackendAuthStatus, type ProxyWriteStatus,
+} from '@/lib/writeBlocker';
 import { useBackend } from '@/lib/realtime/useRealtime';
 
 interface TradingModeData {
@@ -33,6 +36,38 @@ interface TradingModeData {
   credentialsConfigured?: boolean;
   executionTab?: string;
   ordersRoutedTo?: string;
+}
+
+/**
+ * The FRONTEND's half of the write gate, read once on mount.
+ *
+ * Not through `useBackend` — that goes through the proxy, which is the very
+ * thing being asked about, so a proxy refusing writes would also be the path
+ * used to discover it. This is a plain local Next route (`/api/proxy-status`)
+ * and a GET, which the proxy allows anyway.
+ *
+ * `null` while it has not answered, which `writeBlocker` reads as "not asked"
+ * rather than "fine" — the same rule the backend's `writesPossible` follows.
+ */
+function useProxyWriteStatus(): ProxyWriteStatus | null {
+  const [status, setStatus] = useState<ProxyWriteStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    fetch('/api/proxy-status', { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json) => {
+        if (live && json) setStatus(json as ProxyWriteStatus);
+      })
+      .catch(() => {
+        // Unreachable is a different problem with a different message. Leaving
+        // it null means the banner says nothing rather than naming a variable
+        // that may be perfectly well set.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return status;
 }
 
 export default function SettingsPage() {
@@ -51,7 +86,12 @@ export default function SettingsPage() {
   // real-money service -- but discovering it from a toast after clicking is the
   // failure `VenueSwitchPanel` already avoids by rendering its blocker above
   // its control. Same rule here, for the same reason.
-  const blocker = writeBlocker(admin.data?.auth);
+  //
+  // BOTH GATES, because either one alone refuses every write and the two look
+  // identical from the operator's side (#23). `/api/proxy-status` is the
+  // frontend's own half — it reports booleans only, never a secret.
+  const proxyAuth = useProxyWriteStatus();
+  const blocker = writeBlocker(admin.data?.auth, proxyAuth);
   const polymarket = useBackend<{ enabled?: boolean; gateMeaning?: string }>(BACKEND_PATHS.polymarket, { intervalMs: 60_000 });
 
   const live = tradingMode.data?.liveTradingEnabled === true;

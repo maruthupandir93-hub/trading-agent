@@ -58,7 +58,9 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from backend.graphs.contracts import NodeContract, NodeContractViolation, validate_node_output
-from backend.graphs.state import NodeError, TradingState, TriggerReason, new_state
+from backend.graphs.state import (
+    NodeError, TradingState, TriggerReason, merge_delta, new_state,
+)
 from backend.graphs.tracing import NodeTrace, RunTrace, record_run
 from backend.llm.budget import RunBudget
 
@@ -527,7 +529,22 @@ async def stream_run(
             # DIFFERENT run than the one the operator had just watched.
             for node, delta in update.items():
                 if isinstance(delta, dict):
-                    accumulated.update(delta)
+                    # THROUGH THE STATE'S OWN REDUCERS (#30).
+                    #
+                    # This was `accumulated.update(delta)`, which applies no
+                    # reducer at all. The nine specialists run in ONE parallel
+                    # superstep and each writes `specialist_findings`, so a
+                    # flat update kept whichever the loop saw LAST and the
+                    # `done` summary reported one specialist out of nine.
+                    # `unavailable`, `errors` and `nodes_visited` lost the same
+                    # way — a run that recorded five reasons for not trading
+                    # displayed one, which reads as the graph having little to
+                    # say rather than as a merge that discarded it.
+                    #
+                    # The reducers were declared on `TradingState` and correct
+                    # the whole time; LangGraph applies them to its own state
+                    # and nothing applied them to this copy.
+                    merge_delta(accumulated, delta)
                 seen += 1
                 payload: Dict[str, Any] = {
                     "node": node,

@@ -8,6 +8,42 @@ logger = logging.getLogger(__name__)
 
 MEMORY_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "ai_memory.json")
 
+# How many damaged copies to keep. Enough to investigate a repeat; few enough
+# that a process corrupting the file every minute cannot fill a disk with it.
+MAX_QUARANTINE_COPIES = 5
+
+
+def _quarantine_path() -> str:
+    """A UNIQUE name for each damaged copy.
+
+    A fixed `.corrupt` path made the SECOND corruption unrecoverable: the move
+    was skipped because the destination existed, so the damaged file stayed at
+    the live path and every subsequent read returned {} forever. See the
+    caller.
+    """
+    import time as _t
+
+    return f"{MEMORY_FILE}.corrupt.{int(_t.time())}"
+
+
+def _trim_quarantines() -> None:
+    """Keep only the most recent `MAX_QUARANTINE_COPIES`. Never raises."""
+    try:
+        directory = os.path.dirname(MEMORY_FILE) or "."
+        base = os.path.basename(MEMORY_FILE) + ".corrupt"
+        copies = sorted(
+            (f for f in os.listdir(directory) if f.startswith(base)),
+            reverse=True,
+        )
+        for stale in copies[MAX_QUARANTINE_COPIES:]:
+            try:
+                os.remove(os.path.join(directory, stale))
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load_memory() -> Dict[str, Any]:
     if not os.path.exists(MEMORY_FILE):
         return {
@@ -38,10 +74,28 @@ def _load_memory() -> Dict[str, Any]:
         # The file is PRESERVED and the failure is loud. A quarantined copy is
         # recoverable; an overwritten one is not, and this file holds the only
         # record of the account's win rate.
-        quarantine = f"{MEMORY_FILE}.corrupt"
+        # THE SECOND CORRUPTION USED TO BE PERMANENT (#31).
+        #
+        # This quarantined to a FIXED `.corrupt` path and skipped the move when
+        # one already existed — so a second corruption left the damaged file
+        # exactly where it was. `_load_memory` then returned {} on every call,
+        # and `record_closed_trade` begins `if not memory: return`, so it never
+        # wrote and never repaired: every close after that was silently
+        # dropped, and the win rate, the Kelly input and the DAILY-LOSS CHECK
+        # all stayed frozen at zero for the life of the deployment.
+        #
+        # The first corruption recovered only by accident — `os.replace` clears
+        # the path, so the next load took the "file does not exist" branch and
+        # returned a fresh skeleton. Making the move ALWAYS succeed is what
+        # turns that accident into the rule.
+        #
+        # A unique suffix per incident, bounded so a repeatedly-corrupting
+        # deployment cannot fill the disk with copies of a small JSON file.
+        quarantine = _quarantine_path()
         try:
-            if os.path.exists(MEMORY_FILE) and not os.path.exists(quarantine):
+            if os.path.exists(MEMORY_FILE):
                 os.replace(MEMORY_FILE, quarantine)
+                _trim_quarantines()
                 moved = f" The damaged file was moved to {quarantine}."
             else:
                 moved = ""

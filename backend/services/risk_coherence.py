@@ -89,6 +89,11 @@ def min_losses_before_halt() -> int:
     return value
 
 
+SAFE = "SAFE"
+UNSAFE = "UNSAFE"
+UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class RiskCoherence:
     """The verdict, with every number that produced it.
@@ -107,6 +112,34 @@ class RiskCoherence:
     losses_to_trip: Optional[float]
     required: int
     reason: str
+    # SAFE | UNSAFE | UNKNOWN — the review's Issue 5.
+    #
+    # `ok` alone collapses two very different situations into one answer, and
+    # the collapse is right for one caller and wrong for another. "I measured
+    # the configuration and it survives eight losses" and "I could not
+    # establish the risk budget at all" are both `ok=True` here, which is
+    # correct for REPORTING and for paper research — an unmeasurable setting
+    # is not evidence of an unsafe one, and refusing on it would halt the
+    # system whenever an env var was being changed.
+    #
+    # It is NOT sufficient for authorising a LIVE entry. There, "I do not know
+    # what a stop-out costs" is a reason to decline: the whole point of the
+    # check is that the operator has chosen a coherent risk policy, and an
+    # unknown policy has not been chosen.
+    #
+    # So the three states are carried separately and `ok` keeps its existing
+    # meaning. `live_ok` is the stricter predicate; nothing silently changes
+    # behaviour for the paper path.
+    verdict: str = "UNKNOWN"
+
+    @property
+    def live_ok(self) -> bool:
+        """May a REAL-money session start on this configuration?
+
+        Only a measured, coherent one. UNKNOWN is refused here and allowed by
+        `ok` — see `verdict`.
+        """
+        return self.verdict == SAFE
 
 
 def assess(
@@ -141,10 +174,13 @@ def assess(
             drawdown_limit=drawdown_limit or 0.0,
             losses_to_trip=None,
             required=required,
+            verdict=UNKNOWN,
             reason=(
                 "risk coherence could not be measured: the VaR fraction or the drawdown "
                 "limit is unset or non-positive, so how many losses would trip the "
-                "killswitch is unknown rather than unsafe"
+                "killswitch is unknown rather than unsafe. Paper research may proceed; "
+                "a REAL-money session may not, because an unknown risk budget is not a "
+                "chosen one"
             ),
         )
 
@@ -158,6 +194,7 @@ def assess(
             drawdown_limit=float(drawdown_limit),
             losses_to_trip=losses_to_trip,
             required=required,
+            verdict=SAFE,
             reason=(
                 f"a stop-out costs about {loss_per_stop * 100:.1f}% of equity and the "
                 f"drawdown killswitch allows {drawdown_limit * 100:.0f}%, so it takes "
@@ -172,6 +209,7 @@ def assess(
         drawdown_limit=float(drawdown_limit),
         losses_to_trip=losses_to_trip,
         required=required,
+        verdict=UNSAFE,
         reason=(
             f"This configuration halts itself on ordinary variance. A stop-out costs "
             f"about {loss_per_stop * 100:.1f}% of equity (the VaR budget the gateway "

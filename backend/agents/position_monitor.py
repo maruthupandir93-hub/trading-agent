@@ -519,6 +519,53 @@ class _Tracked:
             self.protected_qty = 0.0
 
 
+def stop_side_fault(side: str, entry_price: float, stop_loss: Optional[float]) -> Optional[str]:
+    """Is this stop on the WRONG side of its entry? Returns why, or None.
+
+    WHY IT LIVES HERE AND NOT ON THE REQUEST MODEL (#22).
+
+    `operator_trade.PaperTradeRequest` and `operator_exchange.PlaceOrderRequest`
+    both carry a `_stop_on_the_right_side` validator, and NEITHER HAS EVER RUN.
+    Both read `getattr(self, "limitPrice", None) or getattr(self, "price", None)`
+    and neither model declares either field, so `entry` was always None and the
+    validator returned on its first line. Its own docstring said "a market order
+    has no entry price here, so the monitor's own check is what catches it" —
+    and the monitor had no such check, so a stop on the wrong side was accepted
+    by both planes while two comments claimed it could not be.
+
+    A stop on the wrong side is not weak protection, it is none: it is either
+    already triggered or unreachable, and in the first case the position would
+    be closed on the very next tick at a loss the operator never intended.
+
+    Pure, so it can be used BEFORE anything is booked (the paper route, which
+    knows the fill price before it writes) and AFTER a venue fill (the exchange
+    route, where the position already exists and refusing it would leave it
+    open AND unwatched — the same reasoning a refused resting stop follows).
+    """
+    if stop_loss is None:
+        return None
+    try:
+        entry = float(entry_price)
+        stop = float(stop_loss)
+    except (TypeError, ValueError):
+        return None
+    if not (entry > 0) or not (stop > 0):
+        return None
+    if side == "buy" and stop >= entry:
+        return (
+            f"a LONG's stop ({stop:.8g}) must sit BELOW its entry ({entry:.8g}); "
+            f"above it the stop is already triggered and would close the position "
+            f"on the next tick"
+        )
+    if side == "sell" and stop <= entry:
+        return (
+            f"a SHORT's stop ({stop:.8g}) must sit ABOVE its entry ({entry:.8g}); "
+            f"below it the stop is already triggered and would close the position "
+            f"on the next tick"
+        )
+    return None
+
+
 def _venue_backed(pos: "_Tracked") -> bool:
     """Is there a REAL exchange order standing behind this position?
 
@@ -1644,6 +1691,21 @@ class PositionMonitorAgent(BaseAgent):
         """
         import uuid as _uuid
 
+        # THE STOP SIDE IS CHECKED HERE, BECAUSE NOWHERE ELSE WAS (#22).
+        #
+        # Both request models carry a validator for this and neither has ever
+        # run — see `stop_side_fault`. This is the first point where the entry
+        # price certainly exists.
+        #
+        # IT RECORDS RATHER THAN REFUSES. By the time an exchange-routed manual
+        # trade reaches here the position is already open and the money has
+        # moved; refusing to track it would leave it open AND unwatched, which
+        # is the same trade-off a refused resting stop makes and resolves the
+        # same way. The caller that can still refuse — the paper route, which
+        # knows the fill price before it writes anything — calls
+        # `stop_side_fault` itself and never gets this far.
+        fault = stop_side_fault(side, entry_price, stop_loss)
+
         tar_id = f"manual-{_uuid.uuid4().hex[:12]}"
         self._open[tar_id] = _Tracked(
             tar_id=tar_id,
@@ -1660,6 +1722,18 @@ class PositionMonitorAgent(BaseAgent):
             peak_price=entry_price,
             worst_price=entry_price,
         )
+        if fault:
+            # NOT "protected". The vocabulary exists precisely so a position
+            # whose stop cannot work is not rendered beside one whose stop the
+            # venue is holding.
+            self._open[tar_id].protection = PROTECTION_UNPROTECTED
+            self._open[tar_id].protected_qty = 0.0
+            logger.critical(
+                "MANUAL %s %s is tracked with an UNUSABLE STOP: %s. The position is "
+                "watched, but this level is not protection — fix it with a tighten "
+                "or close the position by hand.",
+                side, symbol, fault,
+            )
         logger.info(
             "Monitoring MANUAL %s %s %s from %s (stop %s, target %s). %d position(s) watched.",
             side, qty, symbol, entry_price, stop_loss, take_profit, len(self._open),
@@ -2866,6 +2940,11 @@ class PositionMonitorAgent(BaseAgent):
                     strategy=pos.strategy,
                     run_id=pos.run_id,
                     entry_context=pos.entry_context,
+                    # THE TAR, SEPARATELY FROM `trade_id`. Since F88 those are
+                    # two different identifiers and the readers that need the
+                    # TAR were quietly given the other one — see the field's
+                    # comment on `PositionClosedEvent`.
+                    tar_id=pos.tar_id,
                 )
             )
             return float(fill_price)

@@ -203,6 +203,99 @@ def _compare(
     return out
 
 
+async def _reconcile_mirror(monitor) -> List[Discrepancy]:
+    """Compare the MIRRORED PAPER book against the demo exchange it lives on.
+
+    WHY THIS IS A SEPARATE PASS AND NOT A WIDER FILTER
+    --------------------------------------------------
+    A mirrored paper position is a real order at a demo venue, and that venue
+    is NOT `get_venue()` — it is `paper_testnet.get_venue()`, which for Binance
+    is a direct signed-REST facade because ccxt cannot reach the demo host at
+    all. Pointing one comparison at both books would ask the mainnet account
+    about positions it has never heard of and report every single one as a
+    phantom, which is the false alarm that teaches an operator to ignore the
+    one alert that means a liquidation.
+
+    IT ASKS PER SYMBOL, through `paper_testnet.venue_flat`, because that is the
+    one reader both venue shapes implement (`BinanceTestnetVenue.open_positions`
+    takes a symbol; `Venue.open_positions` answers for the whole account) and it
+    already carries the True/False/None distinction this module is built on.
+
+    ONLY A POSITION WITH A VENUE-SIDE ARTEFACT IS COMPARED. `protection` says
+    whether the exchange actually confirmed an order for it. A paper position
+    opened while the mirror was OFF has no counterpart at the demo venue, and
+    asking about it would report a phantom for a position that was never
+    supposed to be there — the same mistake in a smaller place.
+
+    REPORTS ONLY, exactly as the rest of this module does. It never closes,
+    opens or forgets anything; the close path's own `venue_flat` check (F1) is
+    what settles a position the venue has already closed, and it runs with the
+    full context of that trade.
+    """
+    out: List[Discrepancy] = []
+    try:
+        from backend.services import paper_testnet
+
+        if not paper_testnet.active():
+            return out
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Mirror reconciliation skipped: %s", exc)
+        return out
+
+    try:
+        from backend.agents.position_monitor import (
+            PROTECTION_PARTIAL, PROTECTION_VENUE,
+        )
+        venue_side = (PROTECTION_VENUE, PROTECTION_PARTIAL)
+    except Exception:  # noqa: BLE001
+        venue_side = ("venue", "partial")
+
+    try:
+        rows = [
+            p for p in monitor.snapshot_open()
+            if p.get("tab") != "real" and p.get("protection") in venue_side
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read the watch list for mirror reconciliation: %s", exc)
+        return out
+
+    venue_id = f"{paper_testnet.venue_choice()}-testnet"
+    for row in rows:
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        try:
+            flat = await paper_testnet.venue_flat(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Mirror reconciliation could not read %s: %s", symbol, exc)
+            continue
+
+        # None is "could not ask", NOT "the venue holds nothing". Collapsing
+        # those is the distinction this codebase has now paid for four times.
+        if flat is not True:
+            continue
+
+        out.append(Discrepancy(
+            kind="missing_at_venue",
+            symbol=symbol,
+            severity="critical",
+            detail=(
+                f"{symbol} is open on the PAPER book with a confirmed order at "
+                f"{venue_id}, and that account now holds nothing in it. Its resting "
+                f"stop or take-profit has almost certainly fired. Until the monitor's "
+                f"next close attempt settles the book, this position is counted "
+                f"against the concurrent-position limit while no longer existing — "
+                f"which is what kept a session frozen for four days (F1)."
+            ),
+            local=row,
+            venue={"flat": True, "venue": venue_id},
+        ))
+
+    for d in out:
+        logger.critical("RECONCILIATION (%s): %s", d.kind, d.detail)
+    return out
+
+
 async def reconcile() -> ReconciliationReport:
     """Ask the venue what it holds and compare. Never raises."""
     from backend.agents.position_monitor import get_position_monitor
@@ -216,10 +309,33 @@ async def reconcile() -> ReconciliationReport:
     # a phantom.
     local = [p for p in monitor.snapshot_open() if p.get("tab") == "real"]
 
+    # THE MIRRORED PAPER BOOK IS COMPARED TOO, AND IT WAS NOT (#16).
+    #
+    # F7 made the LOOP wake up for a mirrored book — correctly, because a
+    # mirrored paper position holds a real resting stop at the demo exchange
+    # and F1 is what happens when nothing notices it firing. But `reconcile()`
+    # still filtered to `tab == "real"` and still asked `get_venue()`, the
+    # MAINNET client. So on a mirror-only deployment the loop ran every minute
+    # and compared an empty list against an account that has never heard of
+    # these positions: the comparison that would have caught F1 on its first
+    # minute still did not happen.
+    #
+    # It is a SEPARATE pass rather than a wider filter because the two books
+    # live at two different exchanges. Merging them into one `_compare` would
+    # ask the mainnet venue about demo positions and report every one of them
+    # as a phantom — the false alarm that teaches an operator to ignore the
+    # one alert that means a liquidation.
+    mirror = await _reconcile_mirror(monitor)
+
     if not venue.has_credentials():
+        # The mirror's findings still stand. A deployment with no mainnet keys
+        # and an active mirror is the normal paper configuration, and returning
+        # here used to discard the only comparison it could make.
         return ReconciliationReport(
-            ok=True, checked_at=time.time(), venue_id=venue.id,
+            ok=not any(d.severity == "critical" for d in mirror),
+            checked_at=time.time(), venue_id=venue.id,
             venue_positions=None, local_positions=len(local),
+            discrepancies=mirror,
             error="no venue credentials configured, so the venue could not be asked",
         )
 
@@ -230,13 +346,14 @@ async def reconcile() -> ReconciliationReport:
         return ReconciliationReport(
             ok=False, checked_at=time.time(), venue_id=venue.id,
             venue_positions=None, local_positions=len(local),
+            discrepancies=mirror,
             error=(
-                "the venue could not be reached, so nothing was compared. This is NOT "
-                "a report that the venue holds nothing."
+                "the real venue could not be reached, so the REAL book was not "
+                "compared. This is NOT a report that the venue holds nothing."
             ),
         )
 
-    discrepancies = _compare(local, venue_positions)
+    discrepancies = _compare(local, venue_positions) + mirror
 
     for d in discrepancies:
         log = logger.critical if d.severity == "critical" else logger.warning

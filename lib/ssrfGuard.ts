@@ -56,6 +56,19 @@ function isPrivateIPv4(host: string): boolean {
 
 function isPrivateIPv6(host: string): boolean {
   const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  // IT MUST ACTUALLY BE AN IPv6 LITERAL FIRST.
+  //
+  // The unique-local test below was a bare `startsWith('fc')`, and a DNS NAME
+  // is not an address: `fcc.gov` starts with "fc", so the guard refused it as
+  // a private IPv6 range. So did `fdic.gov`, and any host whose label begins
+  // with those two letters. The refusal text then told the operator the server
+  // would not probe its own network, about a public government website.
+  //
+  // An IPv6 literal always contains a colon — there is no other way to write
+  // one — so requiring one costs nothing and removes a whole class of false
+  // refusal. The dotted IPv4-mapped forms below are reached through that same
+  // colon, so they are unaffected.
+  if (!h.includes(':')) return false;
   if (h === '::1' || h === '::') return true;
   if (h.startsWith('fe80:')) return true;        // link-local
   if (h.startsWith('fc') || h.startsWith('fd')) return true;  // unique local

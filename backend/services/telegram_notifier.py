@@ -294,7 +294,19 @@ class TelegramNotifier:
         direction = self._direction(side)
         held = self._held(getattr(event, "held_seconds", None))
         strategy = getattr(event, "strategy", None)
-        terms = self._approved.pop(str(getattr(event, "trade_id", "") or ""), {}) or {}
+        # KEYED ON THE TAR, which is what `_remember_approval` stored.
+        #
+        # This popped `trade_id`, and since F88 that is the CLOSING TRADE ROW's
+        # id rather than the TAR — so the lookup missed on every close, the
+        # "% of margin" line silently disappeared from every P&L message, and
+        # the cached entry was never dropped. `trade_id` is kept as a fallback
+        # for an event published before the field existed, where the two were
+        # still the same value.
+        terms = (
+            self._approved.pop(str(getattr(event, "tar_id", "") or ""), None)
+            or self._approved.pop(str(getattr(event, "trade_id", "") or ""), {})
+            or {}
+        )
 
         won = pnl is not None and pnl > 0
         flat = pnl is not None and pnl == 0

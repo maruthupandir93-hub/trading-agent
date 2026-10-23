@@ -231,8 +231,47 @@ class OrderStream:
         from backend.services.venue import _credentials, configured_venue
         from backend.core.config import settings
 
-        venue_id = configured_venue()
-        testnet = bool(settings.USE_TESTNET)
+        # WHICH VENUE'S ORDERS ARE ACTUALLY OURS TO WATCH (#16).
+        #
+        # `venue_backed_book_exists()` returns True for two very different
+        # reasons, and this method only ever handled one of them. With
+        # LIVE_TRADING OFF and the testnet mirror on, the orders standing
+        # behind this process's book are at the MIRROR's demo account — and
+        # this built a client for `configured_venue()` with mainnet
+        # credentials and watched the MAINNET order feed. It reported itself
+        # "connected" while observing an account whose orders have nothing to
+        # do with the book it is meant to be covering.
+        #
+        # Worse on Binance, which is the default mirror: ccxt's
+        # `set_sandbox_mode(True)` is HARD-REFUSED for binance futures
+        # ("testnet/sandbox mode is not supported for futures anymore"), which
+        # is the whole reason `services/binance_testnet` is a direct REST
+        # client with one hardcoded host. There is no ccxt.pro socket that can
+        # reach it, so there is nothing honest to connect to — and connecting
+        # to mainnet instead is the one outcome worse than not connecting.
+        #
+        # Bybit's sandbox IS reachable through ccxt, so a bybit mirror gets a
+        # real stream against its own testnet credentials.
+        live = bool(settings.LIVE_TRADING)
+        if live:
+            venue_id = configured_venue()
+            testnet = bool(settings.USE_TESTNET)
+        else:
+            from backend.services import paper_testnet
+
+            venue_id = paper_testnet.venue_choice()
+            testnet = True
+            if venue_id == "binance":
+                logger.warning(
+                    "Order stream NOT started: the only venue-backed book here is the "
+                    "BINANCE demo mirror, and ccxt refuses sandbox mode for binance "
+                    "futures — there is no socket to its demo host. Connecting to the "
+                    "configured mainnet venue instead would report 'connected' while "
+                    "watching an unrelated account. The once-a-minute reconciliation "
+                    "covers the mirrored book instead."
+                )
+                return None
+
         key, secret = _credentials(venue_id, testnet=testnet)
         if not key or not secret:
             logger.warning(

@@ -63,6 +63,14 @@ export interface BackendAuthStatus {
   note?: string;
 }
 
+/** The `GET /api/proxy-status` payload: the FRONTEND's half of the gate. */
+export interface ProxyWriteStatus {
+  dashboardPasswordSet?: boolean;
+  proxyHasBackendKey?: boolean;
+  openWritesAllowed?: boolean;
+  proxyWritesPossible?: boolean;
+}
+
 export interface WriteBlocker {
   /** One line, suitable for a banner heading. */
   title: string;
@@ -100,11 +108,44 @@ const DASHBOARD_PASSWORD_BLOCKER: WriteBlocker = {
  * when the backend predates `writesPossible` — in that last case `undefined`
  * means "this backend cannot tell us", which must not be read as "blocked".
  */
-export function writeBlocker(auth: BackendAuthStatus | null | undefined): WriteBlocker | null {
-  if (!auth) return null;
-  if (auth.writesPossible === undefined) return null;
-  if (auth.writesPossible) return null;
-  return BACKEND_KEY_BLOCKER;
+const BOTH_BLOCKER: WriteBlocker = {
+  title: 'Every write is refused: BOTH gates are unconfigured.',
+  where: 'both',
+  steps: [
+    ...BACKEND_KEY_BLOCKER.steps,
+    ...DASHBOARD_PASSWORD_BLOCKER.steps,
+    'Both are required. Fixing one changes nothing visible, which is why they are named together here.',
+  ],
+};
+
+export function writeBlocker(
+  auth: BackendAuthStatus | null | undefined,
+  // THE FRONTEND'S OWN HALF, WHICH THIS COULD NOT SEE (#23).
+  //
+  // It read only the backend's status, so the configuration that actually
+  // happens on a first deploy — backend key set, DASHBOARD_PASSWORD not —
+  // rendered NO banner while every control returned 401 from the proxy. And
+  // with both missing it named only TRADES_API_KEY, so an operator who fixed
+  // that one saw no change at all: the "two gates, and fixing one looks
+  // identical to fixing neither" failure, reached through the UI built to
+  // prevent it.
+  //
+  // Optional, and `undefined` means "not asked yet" rather than "fine" — the
+  // same rule `writesPossible` already follows, for the same reason.
+  proxy?: ProxyWriteStatus | null,
+): WriteBlocker | null {
+  const backendBlocked = Boolean(auth && auth.writesPossible === false);
+  const frontendBlocked = Boolean(proxy && proxy.proxyWritesPossible === false);
+
+  if (backendBlocked && frontendBlocked) return BOTH_BLOCKER;
+  if (backendBlocked) return BACKEND_KEY_BLOCKER;
+  if (frontendBlocked) return DASHBOARD_PASSWORD_BLOCKER;
+
+  // A BACKEND THAT CANNOT TELL US IS NOT A BLOCKED ONE. `writesPossible`
+  // absent means an older backend; an unreachable one is a different problem
+  // with a different message, and claiming a missing variable would send the
+  // operator to the wrong file.
+  return null;
 }
 
 /**

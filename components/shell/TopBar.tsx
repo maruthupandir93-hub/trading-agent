@@ -37,6 +37,7 @@ import { Num } from '@/components/ui/primitives';
 import { ThemeToggle } from '@/components/ui/Theme';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
 import { useBackend, useRealtimeConnected, useStreamAge } from '@/lib/realtime/useRealtime';
+import { describeWriteRefusal } from '@/lib/writeBlocker';
 
 import { EmergencyStopModal } from './EmergencyStopModal';
 
@@ -78,6 +79,16 @@ function Item({ label, children, title }: { label: string; children: React.React
 export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
   const [estopOpen, setEstopOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // WHY A FAILED PAUSE NEEDS SOMEWHERE TO GO (#24). `togglePause` awaited the
+  // fetch and never looked at `res.ok`, so a 401 (no DASHBOARD_PASSWORD) or a
+  // 503 (no TRADES_API_KEY) resolved normally, the reload showed the unchanged
+  // state, and the button simply appeared to do nothing. That is the same
+  // symptom F20 was reported as and only half-fixed: the credentials were
+  // corrected, the silence was not.
+  //
+  // Pause is a safety control. "It did nothing and said nothing" is the worst
+  // possible outcome for one.
+  const [pauseError, setPauseError] = useState<string | null>(null);
 
   const admin = useBackend<AdminStatus>(BACKEND_PATHS.adminStatus, { intervalMs: 10_000 });
   const exchange = useBackend<ExchangeStatus>('/api/exchange/status', { intervalMs: 30_000 });
@@ -116,8 +127,9 @@ export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
   async function togglePause() {
     if (busy) return;
     setBusy(true);
+    setPauseError(null);
     try {
-      await fetch(backendProxyPath(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), {
+      const res = await fetch(backendProxyPath(paused ? BACKEND_PATHS.resume : BACKEND_PATHS.pause), {
         method: 'POST',
         // NO Authorization HEADER. Setting one stops the browser attaching its
         // cached dashboard (Basic) credentials, and the proxy accepts only
@@ -131,10 +143,25 @@ export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
         // is what sends the credentials the browser already holds.
         credentials: 'same-origin',
       });
+      // A REFUSAL IS AN OUTCOME, NOT A NON-EVENT (#24). `res.ok` was never
+      // read, so every refusal looked identical to a successful no-op.
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.detail === 'string' ? body.detail : body?.error ?? '';
+        } catch {
+          detail = '';
+        }
+        setPauseError(describeWriteRefusal(res.status, detail));
+      }
       await admin.reload();
-    } catch {
+    } catch (err) {
       // The reload reflects reality either way; without the catch a thrown fetch
-      // would leave the button stuck busy.
+      // would leave the button stuck busy. It is still SAID, because "the
+      // request never left" and "the request was refused" are different facts
+      // and neither is "nothing happened".
+      setPauseError(err instanceof Error ? err.message : 'the request did not complete');
     } finally {
       setBusy(false);
     }
@@ -208,6 +235,15 @@ export function TopBar({ onAskAgent }: { onAskAgent: () => void }) {
           >
             {busy ? '…' : paused ? 'Resume' : 'Pause'}
           </button>
+          {pauseError ? (
+            <span
+              className="text-xs max-w-[28rem] truncate"
+              style={{ color: 'var(--negative)' }}
+              title={pauseError}
+            >
+              {pauseError}
+            </span>
+          ) : null}
           <button
             type="button"
             className="chip"

@@ -151,11 +151,41 @@ async function forward(req: Request, ctx: Ctx, method: 'GET' | 'POST' | 'PUT' | 
     );
   }
 
-  // Rebuilt from the decoded segments rather than pasted from the raw URL, so a
-  // caller cannot walk out of /api with `..` or smuggle a second host in.
+  // IT COULD WALK OUT OF /api, AND THE COMMENT HERE SAID IT COULD NOT.
+  //
+  // `encodeURIComponent` does NOT encode a dot — `.` and `..` are unreserved
+  // characters and come back unchanged. So a request to
+  // `/api/backend/%2e%2e/openapi.json` arrived as the segments ['..',
+  // 'openapi.json'], was rebuilt as `<backend>/api/../openapi.json`, and `new
+  // URL()` then normalised it to `<backend>/openapi.json` — the backend's full
+  // OpenAPI schema, every route and every parameter, through a proxy whose
+  // GETs are open when DASHBOARD_PASSWORD is unset.
+  //
+  // Encoding was never the right tool: the job is to refuse a traversal
+  // segment, not to spell it differently. A path segment that is `.`, `..`, or
+  // carries a separator is not something any backend route has, so it can only
+  // be an attempt to leave the prefix.
+  for (const segment of segments) {
+    if (segment === '.' || segment === '..' || segment.includes('/') || segment.includes('\\')) {
+      return Response.json(
+        { error: 'Invalid backend path: a path segment may not traverse directories.' },
+        { status: 400 },
+      );
+    }
+  }
   const safe = segments.map((s) => encodeURIComponent(s)).join('/');
   const incoming = new URL(req.url);
   const target = new URL(`${backendOrigin()}/api/${safe}`);
+
+  // BELT AND BRACES, because the check above is a blocklist and this is the
+  // property that actually matters. If any future encoding quirk produces a
+  // path outside the prefix, it stops here rather than reaching the backend.
+  if (!target.pathname.startsWith('/api/')) {
+    return Response.json(
+      { error: 'Invalid backend path: it resolves outside /api.' },
+      { status: 400 },
+    );
+  }
   incoming.searchParams.forEach((value, key) => target.searchParams.set(key, value));
 
   const headers: Record<string, string> = { Accept: 'application/json' };

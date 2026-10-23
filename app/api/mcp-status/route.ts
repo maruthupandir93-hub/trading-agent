@@ -37,12 +37,41 @@ export async function POST(req: Request) {
 
   const started = Date.now();
   try {
+    // REDIRECTS ARE NOT FOLLOWED, AND THAT IS THE SECOND HALF OF THE GUARD.
+    //
+    // `checkOutboundUrl` vets the address the caller NAMED. `fetch` follows up
+    // to twenty redirects by default and vets none of them, so a public host
+    // an attacker controls could answer 302 to http://169.254.169.254/ and
+    // this route would faithfully report the status and latency of the cloud
+    // metadata service — the exact probe the guard above exists to refuse,
+    // reached by asking politely.
+    //
+    // A redirect is REPORTED rather than chased. The question this route
+    // answers is "is this MCP server reachable", and a server that redirects
+    // elsewhere has answered it: the status is real and the operator can see
+    // where it pointed. Re-vetting and re-fetching the target would be a
+    // second request this route has no reason to make.
     const res = await fetch(url, {
       method: 'GET',
+      redirect: 'manual',
       signal: AbortSignal.timeout(4000),
       headers: { 'User-Agent': 'Mozilla/5.0 (QUANT-terminal MCP status check)' },
     });
-    return Response.json({ reachable: true, status: res.status, latencyMs: Date.now() - started });
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    return Response.json({
+      reachable: true,
+      status: res.status,
+      latencyMs: Date.now() - started,
+      ...(location
+        ? {
+            redirectedTo: location,
+            note:
+              'This server redirected. The redirect was NOT followed — a caller-chosen ' +
+              'URL that redirects into a private address would otherwise turn this ' +
+              'reachability check into a probe of our own network.',
+          }
+        : {}),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unreachable';
     return Response.json({ reachable: false, error: message, latencyMs: Date.now() - started });

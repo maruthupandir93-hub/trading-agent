@@ -380,6 +380,31 @@ class PositionClosedEvent(BaseEvent):
     strategy: Optional[str] = None
     run_id: Optional[str] = None
     entry_context: Optional[str] = None
+    # THE POSITION'S OWN TAR, WHICH `trade_id` STOPPED BEING (F88).
+    #
+    # `trade_id` used to be `pos.tar_id` and is now the CLOSING ROW's id, for a
+    # good reason: `reflections.trade_id` is a foreign key into `trades`, and a
+    # `manual-<hex>` TAR is not in that table, so every reflection on a manual
+    # trade was rejected by the constraint. But two readers had been using
+    # `trade_id` AS the tar id and were silently handed a different identifier:
+    #
+    #   telegram_notifier  caches the approved terms keyed by tar_id and joins
+    #                      them on the close. The lookup has missed on every
+    #                      close since, so the P&L line lost its "% of margin"
+    #                      — the one figure that says whether the result was
+    #                      worth the capital — and the cache entry was never
+    #                      dropped.
+    #   reflection_agent   puts it on the receipt as `tar_id`, which
+    #                      `assess_execution_quality` uses to look up the
+    #                      persisted execution score. Looking up a trade row id
+    #                      in a tar_id column finds nothing, so every reflection
+    #                      graded its own execution "unavailable".
+    #
+    # DECLARED, not just passed. Pydantic v2 drops an undeclared keyword in
+    # silence — the `TarApprovedEvent` lesson, and the reason that one disabled
+    # the whole learning loop while every defensive `getattr` made the chain
+    # look like it worked.
+    tar_id: Optional[str] = None
 
 # 8c. TRIGGER_FIRED — Phase 31 (spec Section 14)
 #

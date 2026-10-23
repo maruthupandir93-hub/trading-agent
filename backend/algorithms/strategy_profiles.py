@@ -535,9 +535,7 @@ MIN_HOLDING_BARS = 8
 ANALYSIS_BAR_MINUTES = 15
 
 
-def effective_holding_minutes(
-    agent: str, bar_minutes: Optional[float] = None
-) -> Optional[int]:
+def effective_holding_minutes(agent: str) -> Optional[int]:
     """The holding bound actually applied, floored so it stays a backstop.
 
     READ BY BOTH the live `position_monitor` and `core/strategy_backtest`. One
@@ -545,8 +543,21 @@ def effective_holding_minutes(
     from production is precisely the Issue E defect this area was fixed for --
     a backtest would then measure a strategy production does not run.
 
-    `bar_minutes` lets the backtest pass the interval it actually measured from
-    the candles; the live path uses the analysis timeframe.
+    IT TAKES NO TIMEFRAME, AND IT USED TO (#29). The backtest passed the
+    interval it had measured from its own candles, so the floor moved with the
+    DATA: on 1h candles the floor became 8 x 60 = 480 minutes while the live
+    monitor applied 8 x 15 = 120. A Scalping position was therefore bounded at
+    two hours in production and at eight in the backtest that was supposed to
+    measure production — four times the horizon, on the one function written
+    because "a backtest applying a different bound from production is precisely
+    the Issue E defect this area was fixed for".
+
+    The floor is a property of the LIVE DECISION CADENCE, not of whatever
+    candles a study happens to use: the system re-decides on 15m bars, so eight
+    bars is two hours whether a backtest is run on 15m, 1h or 4h data. The
+    candle interval is still used by the caller, AFTER this, to convert these
+    minutes into a number of bars — which is the only thing it was ever a
+    legitimate input to.
 
     None when the strategy has no profile or declares no bound -- never a
     guessed default, because a manual position closes with `strategy` NULL by
@@ -559,8 +570,7 @@ def effective_holding_minutes(
     declared = getattr(profile, "max_holding_minutes", None)
     if not declared:
         return None
-    per_bar = bar_minutes if (bar_minutes and bar_minutes > 0) else ANALYSIS_BAR_MINUTES
-    return int(max(declared, MIN_HOLDING_BARS * per_bar))
+    return int(max(declared, MIN_HOLDING_BARS * ANALYSIS_BAR_MINUTES))
 
 
 

@@ -1,454 +1,339 @@
-# External review — verified, and what was done
-
-**Reviewed and resolved 2026-10-21.** The original review is preserved below
-each item as *Claim*; what follows is what the code actually says, checked
-against the source and the committed evidence rather than accepted or dismissed.
-
-Three claims were confirmed and fixed. Two were confirmed as **stale comments
-where the code is right**, and in one of those the obvious remedy — making the
-code match the comment — would have made this account lose money faster. Two
-were already fixed before the review and were read from the comments that
-record the history. One is true, unfixable by code, and is the most important
-sentence in this document.
-
----
-
-## The headline, because it reframes everything else
-
-> *"in the live server there is all of them all loses 1/5, 4 trades is totally
-> loss with more amount losses"*
-
-**Four losses in five trades is an ordinary outcome for this system, and the
-loss SIZE is a configuration bug that is now fixed.** Those are two different
-findings and only the second was a defect.
-
-This system places a fixed **2:1** payoff (a 2.5× ATR stop against a 5.0× ATR
-target). At 2:1, break-even is a **33% win rate**, so **about two trades in
-three are designed to lose**. The per-trade loss probability near break-even is
-~0.64, which makes four losses in a row a **1-in-6** event — routine variance.
-Five trades cannot distinguish a profitable strategy from a worthless one, which
-the review itself says in its first finding.
-
-What was genuinely wrong is how much each loss cost:
-
-| | live value | consequence |
-|---|---|---|
-| `MAX_PORTFOLIO_VAR_FRACTION` | **0.12** | a stop-out costs **~12% of the account** |
-| `MAX_DRAWDOWN_FROM_HWM` | **0.30** | the killswitch fires at 30% |
-| **losses needed to halt** | **2.5** | the session ends on a routine streak |
-
-So four losses ≈ **half the account**, and the agent halted — exactly what was
-observed. `backend/agents/ceo_agent.py` already carried this arithmetic in a
-comment (*"losses needed to trip 3.8 → FOUR consecutive stop-outs … a limit
-certain to fire within the first handful of trades stops being a disaster brake
-and becomes a scheduled outage"*). **Nothing acted on it.** Now something does.
-
-`backend/services/risk_coherence.py` refuses to start a session whose own
-limits cannot survive `MIN_LOSSES_BEFORE_HALT` (8) consecutive stop-outs, at the
-moment the setting is chosen rather than four losses later. It never resizes
-anything — silently trading a smaller size than the operator configured is the
-`simulation_mode` failure in a new place — it refuses and names all three
-levers, which are **not** equivalent:
-
-1. **Lower `MAX_PORTFOLIO_VAR_FRACTION` to ≤ 0.037.** The only one that reduces risk.
-2. **Raise `MAX_DRAWDOWN_FROM_HWM` to ≥ 0.96.** Accepts a deeper drawdown instead of avoiding one.
-3. **Fund the account further.** 0.12 was set to clear the venue's $5 minimum
-   order on a ~$2 book; past ~$25 that constraint disappears and a safe VaR
-   fraction clears it anyway.
-
-**AND THE SHIPPED DEFAULTS ARE SELF-DEFEATING TOO**, which is why this is a
-check rather than a one-line correction to one operator's `.env`. The defaults
-are `MAX_PORTFOLIO_VAR_FRACTION=0.05` against `MAX_DRAWDOWN_FROM_HWM=0.10`:
-
-```
-losses to halt = 0.10 / 0.05 = 2.0
-P(2 consecutive losses at a 33% break-even) = 0.64^2 = 41%
-```
-
-A brake that fires two fifths of the time is not a disaster brake. Any
-combination the operator picks is now measured against the same bar, including
-the defaults, so the number has to be chosen deliberately rather than inherited:
-
-| VaR fraction | a stop-out costs | halts after | at 30% drawdown |
-|---|---|---|---|
-| 0.12 *(live)* | 12.0% | 2.5 losses | refused |
-| 0.08 | 8.0% | 3.8 | refused |
-| 0.05 *(default)* | 5.0% | 6.0 | refused |
-| **0.0375** | 3.8% | **8.0** | **accepted** |
-| 0.03 | 3.0% | 10.0 | accepted |
-
-**Recommended: (1) plus (3).** `docs/DIAGNOSIS_2026-10-15_REMEDIATION.md`
-already records that funding past ~$5 is strictly safer than raising the VaR
-fraction, and this is the same trade-off with the cost now measured.
-
----
-
-## P1 — "Strategy selection is not proof of profitability"
-
-> *Claim: the four closed trades were all losers; Breakout accounted for most
-> of the loss; the sample is too small to rank strategies.*
-
-**CONFIRMED, and it cannot be fixed by code.** It is the honest constraint on
-everything else here. Four trades is not evidence about Breakout; at a 33%
-break-even, four losses from one strategy is unremarkable.
-
-This is already enforced structurally and stays that way:
-`strategy_performance.MIN_SAMPLE = 20` **real closed trades** before a measured
-win rate may steer selection, and no record scores NEUTRAL (0.5) rather than
-zero — zero would permanently freeze out every strategy that has not traded yet,
-including the one that would have worked.
-
-What exists to answer the question properly: `scripts/run_backtests.py` (all
-eleven strategies, real klines, fees charged, results committed under
-`backtests/<date>/`), `scripts/sweep_risk_model.py` (60/40 in/out-of-sample
-split), and `backend/core/evidence.py`, which attaches a standard error to every
-expectancy and applies a Bonferroni correction — it exists because three
-readings on an earlier sample looked decisive and were all noise (z = +1.01,
-−0.78, +0.03).
-
-**The measured edge after every fix to date is about +0.05R per trade, and it is
-not yet distinguishable from zero on a second window.** No change in this
-document alters that.
-
----
-
-## P1 — "Position duration does not match the strategy label"
-
-> *Claim: a Scalping trade stayed open over an hour; others ~9 hours; the
-> monitored position over 14 hours.*
-
-**CONFIRMED — and the cause was worse than mislabelling. FIXED.**
-
-`position_monitor` had exactly three exits — stop, target, partial scale-out —
-and **no concept of time anywhere in the codebase**. Meanwhile every profile has
-carried `expected_holding_time` since Section 11.3 as **prose nothing read**.
-The same shape this project has recorded a dozen times: a value declared where
-it is consumed and never produced.
-
-It is a loss source, not untidiness. Past its horizon a position is no longer
-the trade the signal justified — the setup has expired, it is paying funding
-nobody budgeted for, and it is exposed to a market nothing analysed. A
-`Scalping` profile whose own risk note says it *"needs a high win rate to
-survive costs"*, held 14 hours, is pure cost.
-
-Every profile now carries an enforceable `max_holding_minutes`, derived from the
-same sentence so the two cannot drift:
-
-| | bound | | bound |
-|---|---|---|---|
-| Arbitrage | 15 min | Range | 12 h |
-| Scalping | 30 min | VolatilityBreakout | 12 h |
-| Momentum | 6 h | Breakout | 24 h |
-| MeanReversion / VWAP | 8 h | Trend / Grid | 2 d |
-| | | Swing | 7 d |
-
-Four properties, each pinned by `tests/test_max_holding_time.py`:
-
-- **The bound is near the TOP of each stated range, not its median.** This is a
-  backstop against a stuck position, not a second profit target — cutting
-  winners early is exactly how a 2:1 payoff is destroyed.
-- **A tick that hits the stop still closes as `stop-loss`.** Re-labelling it
-  would corrupt the attribution the learning loop reads.
-- **A manual position gets no horizon imposed on it.** It closes with `strategy`
-  NULL by design; inventing one would close the operator's own trade on a rule
-  they never chose.
-- **It only ever closes**, through the same ungated `_close` the stop uses, so
-  invariant 4 is untouched.
-
----
-
-## P1 — "The persisted learning history is incomplete"
-
-> *Claim: zero rows in `reflections`, `debate_records`, `hypotheses`,
-> `strategy_versions`.*
-
-**THE SYMPTOM IS CONFIRMED. MY FIRST DIAGNOSIS OF ITS CAUSE WAS WRONG, and
-correcting it is the finding.**
-
-I first reported that three of the four tables had **no writer anywhere**, and
-recommended adding INSERTs. That was produced by searching `backend/` only.
-Searching the whole repository:
-
-| table | writers |
-|---|---|
-| `reflections` | `backend/agents/reflection_agent.py`, `lib/reflectionStore.server.ts`, `scripts/import_json_to_postgres.py` |
-| `debate_records` | `lib/debateStore.server.ts`, `scripts/import_json_to_postgres.py` |
-| `hypotheses` | `lib/hypothesisStore.server.ts`, `scripts/import_json_to_postgres.py` |
-| `strategy_versions` | `lib/strategyVersionStore.server.ts`, `scripts/import_json_to_postgres.py` |
-
-**Every one of them has a writer. They are the BROWSER's tables**, and
-`lib/debateStore.server.ts` even reads back and `UPDATE`s them. This is the
-"two data stores, both real — do not consolidate them" split CLAUDE.md
-describes: Postgres is authoritative for the backend agent, and these four are
-written by the Next.js side.
-
-So the rows are zero because **the browser-side features that produce them have
-not been used on this deployment**, not because nothing can produce them.
-
-**AND ADDING THE BACKEND INSERTs I FIRST RECOMMENDED WOULD HAVE BEEN A REAL
-BUG** — the exact two-writers corruption CLAUDE.md records for the `positions`
-table, where a second writer means "the operator's next save deletes every
-position the agent holds". A backend writer on `debate_records` would collide
-with `debateStore.server.ts`'s own `INSERT`/`UPDATE` cycle on the same ids.
-
-One further correction, because the two are different concepts and I conflated
-them: `strategy_versions` is a **parameter-optimiser** table (`objective`,
-`algorithm ∈ grid|random|genetic|bayesian`, `params`, `train_metrics`,
-`test_metrics`). It has nothing to do with `core/strategy_versions.signal_version()`,
-which is a revision counter for rejecting stale backtest priors. The backend's
-own optimiser, `agents/optimizer_agent.optimize_strategy`, has **no callers** —
-so writing rows there would mean fabricating optimisation runs that never
-happened (invariant 6).
-
-**What the review actually wanted is already satisfied by the backend's own
-chain**: `trades.strategy`, `trades.run_id` and `trades.entry_context` travel
-plan → TAR → CRO → approval → row, so *which strategy made each trade* and
-*what the market looked like when it was chosen* are both recorded, and
-`reflections` has a live backend writer for *why it won or lost*.
-
----
-
-## Issue A — "Execution and risk controls may not be applied consistently"
-
-> *Claim: the risk gateway's comments identify a second submission path through
-> the supervisor agent that historically traded without the same scope checks.*
-
-**ALREADY FIXED — the review read the comment that records the history.**
-
-`supervisor_agent._consider_trade` refuses outright while
-`GRAPH_EXECUTION_ENABLED=true` (the live setting), with the reason recorded in
-`decisions` so *"why did this not trade?"* stays answerable. Verified at
-`backend/agents/supervisor_agent.py:449`. Exits are untouched, because
-`_consider_trade` only ever opens and closes belong to the position monitor
-(invariant 4).
+Full Trading Bot Review — Latest Code, Remaining Risks, and Profitability Improvements
+I’ll keep this review strictly read-only. I will not edit files, push commits, change your Supabase data, deploy your server, or place exchange orders.
 
-The review is right that a comment describing a fixed bug reads as a live one.
-That is a real cost of this codebase's commenting style and the reason each such
-note now says plainly that it is history.
-
-The review's broader checklist is largely satisfied already: `execution_service`
-re-validates at the execution boundary, claims its idempotency basis **before**
-the first `await` (two tasks once both passed the duplicate test and opened one
-position twice), and refuses an open with no stop (invariant 3).
-
----
-
-## Issue B — "Position-monitor defaults contradict their own documentation"
-
-> *Claim: the comments describe a 2% profit target and partial profit-taking as
-> enabled, while the code defaults both to 0.*
-
-**CONFIRMED — the mismatch is real, the COMMENTS were stale, and the CODE is
-right. FIXED by correcting the comments.**
-
-This one matters because the obvious remedy is backwards. **Do not turn these
-on.** The setting was reversed twice and each step corrected the one before:
-
-| | result |
-|---|---|
-| shipped OFF | wrong — 53.4% of trades closed at ~0.00 (the scale-out left a runner at break-even) |
-| defaulted 2.0 | **also wrong** — the target is a % of *margin*, so the price move it needs is `PROFIT_TARGET_PCT / leverage`, while the stop stays at 2.5× ATR and does not shrink |
-| back to 0 | current — the exit returns to the ATR pair, 2:1 by construction at every leverage |
-
-Measured on a live XRP/USDT session (ATR 0.504%, stop 1.26%):
-
-```
-2.0% at 10x  ->  0.20% target vs 1.26% stop  ->  93.2% break-even
-2.0% at  3x  ->  0.67% target vs 1.26% stop  ->  70.6% break-even
-0 (ATR pair) ->  2.52% target vs 1.26% stop  ->  36.0% break-even
-```
-
-**At the 10× this account runs, turning the target back on sets a 93%
-break-even win rate — losing by construction.** Measured live win rate at the
-time: 54.5%.
-
-`0` does not mean "no target": every position always carries an ATR stop (2.5×)
-and an ATR target (5.0×), checked on every tick. And `PARTIAL_TP_FRACTION` had
-to move with it — the scale-out is gated on `PROFIT_TARGET_PCT <= 0`, so it was
-dormant only *because* the target was on.
-
----
-
-## Issue C — "Strategy profiles and executable risk settings disagree"
-
-> *Claim: profiles describe a 1.5-ATR stop and 3-ATR target; the risk manager
-> uses 2.5 and 5.0.*
-
-**CONFIRMED. FIXED — and the review undercounted it.**
-
-The prose is not executable, so this was never a live divergence in placed
-orders. It is still exactly the failure the review names: *a strategy can appear
-successful in a backtest while behaving differently in production*, and it is
-the third time these two numbers have drifted apart in this codebase.
-
-The fix is structural rather than a correction. `exit_logic` now **interpolates**
-`ATR_STOP_MULTIPLIER` / `ATR_TARGET_MULTIPLIER` from `core/risk_manager` instead
-of restating them, and `tests/test_spec_matches_execution.py` fails if anyone
-restates them again. **That test immediately found two more instances the review
-missed** — `VWAP` and `VolatilityBreakout` both quoted 1.5× — which is the
-argument for a test over a correction.
-
----
-
-## Issue D — "Some strategies are simple signal generators"
-
-> *Claim: three bullish candles, an MA comparison, RSI thresholds and wick
-> rejection are features, not complete trading systems.*
-
-**TRUE AS WRITTEN, and partly answered by the surrounding system rather than by
-the signal functions.** A signal function here is deliberately one input, not a
-trading system: eligibility is `active_regimes` + `BLOCKED_REGIMES`, sizing and
-the stop are the Risk Gateway's, costs are charged by `services/fees`, and the
-nine-specialist panel can and does refuse a setup the scorer proposed.
-
-Two of the review's seven requirements were genuinely missing and are now
-present: **(5) when to exit early** is the time exit above, and **(7) which data
-proves an advantage** is `backtests/` plus the `MIN_SAMPLE` floor.
-
-The rest is a research programme, not a defect list. The honest status is that
-this system's own backtest already says four of eleven strategies are
-net-negative in the window measured, and `services/strategy_priors` carries that
-into selection — shrunk halfway to neutral, because the backtest is in-sample
-and gross of slippage.
-
----
-
-## Issue E — "The backtest and the live system need to agree"
-
-> *Claim: verify closed candles, realistic entry, conservative same-candle
-> resolution, costs, no look-ahead, identical selection and sizing.*
-
-**MOSTLY ALREADY SATISFIED; ONE REAL GAP, now asserted by a test.**
-
-Confirmed already correct: the backtest **imports** the live
-`ATR_STOP_MULTIPLIER`/`ATR_TARGET_MULTIPLIER` rather than restating them; it
-**charges the real taker fee** and subtracts it from reported expectancy; an
-**ambiguous bar assumes the stop**; and it feeds each strategy's **real**
-`STRATEGY_FUNCTIONS[name]` over a trailing window, so selection logic is shared
-rather than reimplemented.
-
-**The genuine gap: the backtest models a pure ATR stop/target pair and does not
-model the live exit policy** — `PROFIT_TARGET_PCT`, `PARTIAL_TP_FRACTION`,
-`TRAILING_STOP_R`, or the new `max_holding_minutes`. With all of them at their
-defaults the two agree today (the ATR pair *is* the live policy), which is why
-the stored backtests remain valid evidence. They stop agreeing the moment an
-operator sets any of them.
-`test_spec_matches_execution.py::test_the_backtest_does_not_yet_model_the_live_exit_policy`
-fails if one is turned on, so divergence becomes a deliberate act with a visible
-consequence instead of a silent one.
-
-Still not modelled, and stated rather than hidden: **slippage and funding**. The
-Bybit/Binance demo mirror exists precisely because a simulated fill reports both
-as zero.
-
----
-
-## Sections 3–7 — strategy design, regimes, risk, metrics, learning
-
-These are a **research programme**, and the review says so itself (*"these are
-strategy-design recommendations, not claims that any strategy will necessarily
-be profitable"*). They are not defects and are not treated as fixed.
-
-Two points worth recording, because acting on them wrongly would cost money:
-
-- **Section 5A's "evaluate 0.25–0.5% per trade"** is the right direction and is
-  what the risk-coherence refusal now pushes toward from the opposite end. Note
-  the interaction the review could not have known: on a ~$2 book, a VaR fraction
-  that small produces orders **below the venue's $5 minimum**, so they are
-  approved and then silently refused at quantisation. Lowering risk and funding
-  the account are the same decision here.
-- **Section 7's identifier chain** is largely built: `run_id`, `strategy`,
-  `entry_context` and the TAR id already travel with every graph-path trade. The
-  missing links are `debate_records` and `strategy_versions` above.
-
----
-
-## The live measurement, and the claim it did NOT support
-
-Closing the backtest gap made the time exit measurable for the first time, so
-it was measured rather than assumed — 5 instruments x 1000 real 15m candles,
-split 60/40.
-
-**THE FIRST TWO RUNS CONTRADICTED EACH OTHER, AND BOTH WERE NOISE.** A
-single-symbol run on SOL showed the time exit improving 7 of 11 strategies. A
-four-symbol run showed it costing −0.0704R out of sample. Pooled over five
-symbols and ~850 trades the whole spread across every floor setting is 0.016R,
-while `evidence.required_gap(850)` puts the smallest detectable gap at
-**0.0988R** — six times larger.
-
-So: **the time exit's effect on expectancy is not distinguishable from zero.**
-It is justified as a correctness and risk control — a 14-hour position on a
-minute-scale strategy is not the trade that was entered, and it accrues funding
-nobody budgeted for — and **not** as a profit improvement. Reporting the SOL
-run as an improvement would have been exactly the error
-`backend/core/evidence.py` exists to prevent, and it ran in the direction the
-author was hoping for, which is the only direction that error ever runs.
-
-**WHAT THE MEASUREMENT DID FIND is a real defect in the bounds as first
-written.** With the raw profile horizons:
-
-| | bound in bars | trades ended by the clock |
-|---|---|---|
-| Arbitrage | 1 | **98%** |
-| Scalping | 2 | **95%** |
-
-A rule that fires on 95% of trades is not a backstop; it had become the primary
-exit, and a position cut after one bar never had the chance to reach either
-level. `MIN_HOLDING_BARS = 8` floors the bound at eight bars of the analysis
-timeframe. The original complaint is still fixed — eight bars of a 15m chart is
-two hours, and the positions that prompted this ran nine and fourteen.
-
-**AND A SECOND FINDING THE FLOOR DOES NOT FIX, which is the operator's call.**
-Even floored, Scalping ends 76% of trades on the clock and Arbitrage 73%. That
-is a **timeframe mismatch**: their stated horizons are seconds-to-minutes and
-the system analyses 15-minute candles, so on this timeframe they are not
-running their own logic. Raising the floor further would only stop them being
-scalps. `StrategyResult.timeframe_warning` now says so on any strategy whose
-clock-exit share is a majority, rather than correcting it silently — **which
-strategies run on which timeframe is a trading decision, not a code fix.** It
-matters because Scalping is the top-ranked strategy in the committed backtest
-(+0.160R), so disabling it is consequential either way.
-
-## What changed, in files
-
-| | |
-|---|---|
-| `backend/services/risk_coherence.py` | **new** — refuses a configuration that halts itself on routine variance |
-| `backend/services/trading_session.py` | checks it first in `start_session`, before any per-symbol work |
-| `backend/algorithms/strategy_profiles.py` | `max_holding_minutes` on all 11 profiles; ATR multipliers interpolated, not restated |
-| `backend/agents/position_monitor.py` | the `max-holding-time` exit; Issue B's comments corrected |
-| `tests/test_risk_coherence.py` | 16 tests |
-| `tests/test_max_holding_time.py` | 8 tests |
-| `tests/test_spec_matches_execution.py` | 6 tests |
-| `backend/core/strategy_backtest.py` | time exit, trailing stop, slippage; exit mix and timeframe warning reported |
-| `backend/algorithms/strategy_profiles.py` | `effective_holding_minutes` — the one bound the monitor AND the backtest both read |
-| `tests/test_backtest_exit_policy.py` | 13 tests |
-
-## What is still open, stated plainly
-
-1. ~~`debate_records` and `strategy_versions` are never written.~~ **Withdrawn —
-   this was my own misdiagnosis.** Both have browser-side writers; see the
-   learning-history section. Adding backend writers would have been a genuine
-   two-writers bug.
-2. ~~The backtest does not model the live exit policy.~~ **Closed.** It now
-   models the per-strategy time exit and the trailing stop, and reports the
-   exit mix so two runs with the same expectancy can be told apart.
-3. ~~Slippage is not modelled.~~ **Closed** — charged in R on both legs,
-   `BACKTEST_SLIPPAGE_RATE`, 2 bps per leg by default. **Funding remains
-   unmodelled on purpose**: it needs a per-symbol per-period rate this module
-   does not have, and inventing one would be a fabricated cost that looks
-   measured (invariant 6). The holding bound bounds the exposure instead.
-4. **`agents/optimizer_agent.optimize_strategy` has no callers.** Dead code
-   that a reader could mistake for a live optimisation loop.
-5. **The edge is ~+0.05R and not yet distinguishable from zero.** Only more
-   real closed trades settle this, and `MIN_SAMPLE` is 20 per strategy. **This
-   is the only item on this list that matters to profitability, and no code
-   change closes it.**
-
-## What no change in this document can deliver
-
-A system that wins every trade. At a fixed 2:1 payoff, **roughly two trades in
-three are designed to lose** — the third is meant to be larger than the two
-together. The work here makes each loss survivable and each trade attributable,
-so that twenty trades from now the question *"is this strategy profitable?"* has
-an answer instead of a guess. It does not make the next five trades win.
+One important distinction before we begin: a code review can identify bugs, execution risks, missing safeguards, and weaknesses in the trading methodology. It cannot establish that a bot will make profitable trades in every market. The realistic goal is a bot that trades only when its strategy has a demonstrated statistical edge, controls losses when conditions change, and can safely stop trading when that edge disappears.
+
+I’ll review the latest repository state rather than assume that the two commits already deployed to your Oracle server. I’ll also distinguish confirmed code findings, risks that need a test, and items that cannot be verified from GitHub alone.
+1. What I verified in the latest repository
+Latest main commit
+
+53149d004db6c9d81eadad5fce17125c8eaba98b
+
+Open latest commit
+
+
+
+Repository inventory
+
+758 tracked files, including 168 backend files, 109 test files, frontend components, API routes, configuration, documentation, and scripts.
+
+
+
+Reported test results
+
+The latest commit message reports 2,343 backend tests passed, 2 skipped, and 505 frontend tests across 36 files, with TypeScript and build checks passing. I did not independently rerun that test suite.
+
+
+
+I inspected the changes in both commits and reviewed the important code paths involved in risk validation, autonomous sessions, order execution, exchange integration, position monitoring, backtesting, authentication, and the frontend-to-backend proxy.
+
+Scope clarification: I cannot honestly claim to have reviewed every line of all 758 files in this single pass. The findings below are based on the latest source and targeted inspection of the high-risk files. They are a substantial technical review, but not a complete line-by-line certification of every frontend component and backend module.
+2. Critical issues I found
+These are the issues I would prioritise before considering real-money trading.
+
+Issue 1 — Disabling live mode can simulate a real-position close
+P0
+
+File: backend/agents/execution_agent.py
+
+The current routing rule requires both tab == "real" and not self.simulation_mode before sending a close to the exchange. When live trading is disabled, simulation_mode becomes true. A close request for a position on the real book can then take the simulated path instead of closing the actual exchange position.
+
+Consequence: the local book may report a closed trade while the real exchange position remains open and exposed to the market.
+
+Required improvement: make mode changes position-aware. The execution system must always close or reduce a real position on the venue where it actually exists, regardless of whether new entries are disabled. Reconcile against the exchange before declaring it closed.
+
+Review execution-agent source
+
+
+
+
+Issue 2 — The live-enable endpoint can continue after a credential-check error
+P0
+
+File: backend/api/admin.py, live-enable handler
+
+The endpoint catches an exception from the venue credential check, logs a warning, and then continues to settings.set_live_trading(True).
+
+This means an unexpected error while checking credentials can still result in live mode being enabled. It is not enough to check that the normal missing-key case is rejected.
+
+Required improvement: the live-enable operation must fail closed if credentials, venue identity, network selection, or other mandatory readiness checks cannot be verified. Its response must accurately reflect the final state.
+
+Review admin endpoints
+
+
+
+
+Issue 3 — A real position can remain unprotected if the exchange stop fails
+P0
+
+File: backend/agents/position_monitor.py, _place_resting_stop()
+
+The code attempts to place a resting stop-loss at the exchange. If that request fails, it logs a critical error but does not automatically close or reject the already-open position. The system relies on its in-process monitor to continue watching the price.
+
+The code explicitly acknowledges that a process crash, restart, or outage can leave a real position without exchange-side protection if the resting stop was not successfully placed.
+
+Required improvement: track protection as an explicit state for each real position. Do not label a position protected until the venue confirms the stop order and its quantity. Alert immediately on failure and apply a defined emergency procedure.
+
+Review position monitoring
+
+
+
+
+Issue 4 — Exchange credentials can cross a plain-HTTP backend connection
+P0
+
+Files: app/api/exchange/route.ts, app/api/backend/[...path]/route.ts, REAL_TRADING.md
+
+The documented manual exchange flow stores API credentials in browser localStorage. The frontend proxy documentation also describes a Vercel-to-backend connection using plain HTTP.
+
+If that HTTP connection crosses an untrusted network, exchange credentials and other sensitive request data can be exposed in transit. Browser storage also increases exposure if a malicious script runs in the dashboard.
+
+Required improvement: use TLS for the entire network path, keep exchange secrets out of browser storage, and prefer server-side secret storage with access restrictions. Exchange keys should have no withdrawal permission and should be IP-restricted where practical.
+
+Review manual exchange route · Review backend proxy
+
+
+
+These are not hypothetical requests for extra features. They concern the correctness of position closure, live-mode control, protective stops, and credential handling.
+3. Risk configuration and trade sizing
+The new risk-coherence check is a useful improvement, but its behaviour and deployment configuration deserve special attention.
+Issue 5 — Unmeasurable risk configuration can pass the new guard
+File: risk_coherence.py
+
+The function assess() returns ok=True when the VaR fraction or drawdown limit is missing or non-positive, with a reason saying the configuration could not be measured.
+
+I understand the design distinction: “unknown” is not the same as “measured and unsafe.” That is logically correct for reporting, but it is not sufficient for authorising live trading.
+
+For a live entry, an unknown risk budget should not automatically count as a safe configuration.
+
+Improvement: distinguish three outcomes:
+- SAFE: all mandatory risk values are valid and coherent.
+- UNSAFE: the measured configuration violates a limit.
+- UNKNOWN: a required value cannot be established.
+Allow the first to proceed; reject live entries for the second and third. Paper research can have a more permissive policy, provided the state is clearly labelled.
+Issue 6 — The new guard does not make the chosen risk amount small
+The repository's diagnosis records a prior live configuration with MAX_PORTFOLIO_VAR_FRACTION=0.12 and MAX_DRAWDOWN_FROM_HWM=0.30. It estimates that a stop-out could cost around 12% of equity under that configuration.
+
+The new guard refuses certain self-defeating combinations. It does not automatically reduce risk or choose a suitable risk amount for you.
+
+The diagnosis suggests a VaR fraction no greater than approximately 0.037 for a 30% drawdown limit and an eight-loss survival requirement. That arithmetic is configuration-specific; it is not a universally safe setting. A smaller drawdown limit requires a smaller per-trade risk budget if you want the same streak tolerance.
+
+Improvement: choose per-trade risk, daily loss, and maximum drawdown as a coordinated policy. Validate the actual deployed values, not just the defaults in the repository.
+Issue 7 — A successful risk check does not prove the whole portfolio is safe
+File: risk_gateway.py
+
+The gateway performs sizing and risk validation, which is a good separation of responsibilities. However, the operator guide still lists several limitations that should be verified against the current implementation:
+- Cross-asset correlation is not checked synchronously in every relevant path.
+- The live price is not always cross-checked against the candle close.
+- Some callers use a more permissive risk-gateway mode.
+- The non-graph/agent order path has historically had different exchange-size validation behaviour.
+These are review items, not proof that every current trade bypasses the controls. The concern is that a control enforced on one entry path may not be enforced identically on another.
+
+Improvement: one authoritative pre-trade validator should govern every automated and manual entry. It must check the actual position, account equity, correlated exposure, venue constraints, stale data, and final stop-based risk immediately before submission.
+4. Execution and reliability
+Issue 8 — Duplicate protection is in memory, not durable
+File: execution_service.py
+
+The execution service keeps its _submitted idempotency map in process memory. The source explicitly acknowledges that this state is lost on restart.
+
+If an exchange order is accepted and the process crashes before the outcome is durably recorded, the system may not have enough information to distinguish a completed submission from a new one after restart.
+
+Improvement: persist idempotency keys and order intent states. On recovery, query the venue using the exchange order/client ID and reconcile before any retry. Never assume a timeout means the exchange rejected the order.
+Issue 9 — The project has multiple exchange-order interfaces
+Files: venue.py, execution_agent.py, REAL_TRADING.md.
+
+The backend venue adapter is designed for Binance and Bybit linear perpetual markets. The manual frontend exchange clients are described as spot clients, and REAL_TRADING.md explicitly states that the manual real-trading feature is spot-only.
+
+That means the project has different trading capabilities depending on which interface you use. The UI's “real” mode must not be assumed to mean the same thing as the autonomous futures execution path.
+
+Improvement: clearly separate and label:
+- Paper simulation.
+- Testnet exchange execution.
+- Live spot execution.
+- Live perpetual-futures execution.
+Each should expose its actual venue, market type, account, network, position mode, and protective-order status. Do not let a generic “Real” label hide these distinctions.
+Issue 10 — The TWAP code does not yet execute a true TWAP schedule
+File: execution_agent.py
+
+The code calculates order slices and logs the intended execution window, but the source states that it still submits a single market order for the full size. There is no scheduler submitting the slices over time.
+
+Improvement: either implement and test a real scheduled execution plan, including cancellation and partial-fill handling, or ensure the UI and logs call it a sizing plan rather than an active TWAP risk control.
+Issue 11 — Exchange-side protection and local monitoring must agree
+Files: position_monitor.py, position_worker.py.
+
+POSITION_MONITORING_ENABLED defaults to false. That setting disables the graph-based position-review actions; it does not mean every mechanical stop is necessarily disabled. The mechanical price monitor and resting-stop mechanism are separate.
+
+However, if you expect AI-driven stop adjustments, reductions, or exit decisions, you must verify that the graph worker is enabled and functioning. If the process is alive but the monitoring cycle is repeatedly failing, the logs must make that visible.
+
+Improvement: monitor three independent states: mechanical stop active, exchange-side stop confirmed, and graph-based position review healthy. One status should not stand in for the others.
+5. Strategy selection and profitability
+The two commits improve holding-time consistency and backtest accounting. They do not demonstrate that the trading strategies have a reliable edge.
+
+The latest diagnosis itself states that the estimated edge is around +0.05R and is not yet distinguishable from zero. It also notes that optimizer_agent.optimize_strategy currently has no callers, so it is not an active optimisation loop.
+Issue 12 — Scalping is still mismatched to the analysis timeframe
+The system primarily analyses 15-minute candles. The strategy profiles include short-horizon strategies such as Scalping and Arbitrage, whose intended horizons are seconds to minutes.
+
+The new minimum holding-time floor is eight bars, which equals two hours on a 15-minute chart. The diagnosis reports that, even after the floor, approximately 76% of Scalping trades and 73% of Arbitrage trades are closed by the clock.
+
+That is an important finding: a strategy whose holding period is dominated by the time exit is not necessarily being tested as the strategy it claims to be.
+
+Improvement: match each strategy to an appropriate execution and analysis timeframe. Do not rank a scalping strategy as the best one until it has been evaluated using data and fill assumptions appropriate for scalping.
+Issue 13 — Backtest costs are improved, but not complete
+File: strategy_backtest.py
+
+The new backtest includes estimated slippage and the live holding-time rule. Funding is explicitly not modelled. The default slippage rate is an assumption, not a measured value for every instrument and market condition.
+
+Other details still deserve testing against realistic fills:
+- A signal based on a candle close cannot generally be assumed to fill at that exact close.
+- If a candle crosses both a stop and target, the simulator must apply a conservative and documented ordering rule.
+- Trailing-stop updates within a candle can produce optimistic results if the model does not correctly account for the order of intrabar price movements.
+- Perpetual funding, exchange fees, spread, partial fills, and adverse stop execution can change net expectancy.
+Improvement: compare the simulator against historical trades and actual testnet fills. Report gross and net expectancy separately, and use conservative fill assumptions for ambiguous candles.
+Issue 14 — Strategy selection is not proof of profitability
+File: opportunity.py
+
+A strategy score combines signal strength, multi-timeframe alignment, volatility suitability, and historical performance. The performance component can be neutral when there are too few trades.
+
+That is reasonable for ranking candidates, but it means a strategy can rank well without having demonstrated positive net expectancy.
+
+Improvement: keep “best available candidate” separate from “approved for real money.” Require out-of-sample validation, minimum evidence, cost-adjusted expectancy, and regime-specific results before promoting a strategy.
+6. What your trading bot should learn to do better
+Do not focus on making the agent trade more often. Focus on making it distinguish good opportunities, poor opportunities, and situations where it should do nothing.
+
+
+
+
+
+
+
+
+
+A. Strong trend
+
+Prefer trend continuation, pullbacks, or confirmed breakouts in the trend direction. Avoid automatically fading a strong trend just because RSI is overbought or oversold.
+![alt text](image.png)
+
+
+B. Sideways market
+
+Test mean reversion and range strategies only when the market is genuinely range-bound. Do not use a grid strategy without strict inventory limits and a defined exit if the range breaks.
+
+![alt text](image-1.png)
+
+
+C. Breakout or volatility expansion
+
+Require a confirmed move, sufficient liquidity, and a reasonable entry distance. Avoid chasing an extended candle where the stop is too far away or the reward-to-risk ratio has deteriorated.
+
+![alt text](image-2.png)
+
+
+D. Panic, thin liquidity, or conflicting signals
+
+Reduce exposure or stand aside. Do not assume that a sharp decline must rebound, or that every breakout must continue. A no-trade decision is a successful risk decision when the edge is weak.
+
+![alt text](image-3.png)
+
+Improvements to strategy intelligence
+Area	What the agent should measure
+Market regime	Trend strength, realised volatility, range conditions, liquidity, and regime changes
+Signal quality	Entry location, multi-timeframe agreement, distance from invalidation, and confirmation
+Execution quality	Spread, actual slippage, partial fills, rejection rate, and latency
+Risk	Stop-based loss, correlated exposure, leverage, liquidation distance, and remaining account risk
+Strategy performance	Net expectancy, profit factor, drawdown, win/loss size, and performance by regime
+Abstention	How often the agent correctly rejects weak or conflicting opportunities
+
+The LLM or debate panel can help explain a decision, but it should not override deterministic risk limits or autonomously increase live risk to recover losses.
+7. A proper validation sequence
+I recommend this order rather than adding more indicators or strategies.
+Phase 1 — Correctness and safety
+
+Resolve the mode-switch close path, fail-closed live-enable checks, protective-stop failure handling, and credential transport. Verify all automated and manual entry routes.
+
+
+
+Phase 2 — Execution and recovery
+
+Verify that the exchange and local book reconcile after partial fills, restarts, timeouts, manual closes, stop triggers, and duplicate events. Confirm that protective orders really exist on the venue.
+
+
+
+Phase 3 — Strategy evidence
+
+Backtest each strategy independently, with realistic costs, no lookahead, conservative stop/target ordering, out-of-sample data, and results split by market regime. Retire or restrict strategies whose edge is unproven.
+
+
+
+Phase 4 — Learning and measurement
+
+Make every trade traceable from market snapshot through decision, strategy version, risk approval, exchange order, fill, exit, fees, and final realised P&L. Use these records for research rather than allowing the learning loop to rewrite live risk automatically.
+
+
+
+Phase 5 — Controlled deployment
+
+Deploy to paper first, verify the deployed SHA and configuration, then use testnet where the selected venue supports the required instrument. Only consider live trading after recovery, protection, reconciliation, and net profitability evidence have been independently verified.
+
+
+
+8. What I would not change yet
+- Do not add more strategies before the existing ones have measurable net expectancy.
+- Do not increase the risk budget merely to satisfy the new risk-coherence check.
+- Do not trust a high backtest ranking when most trades are ending through the holding-time rule.
+- Do not treat a successful API response or a dashboard status as proof of an actual exchange fill.
+- Do not treat a local stop-loss value as proof that the exchange has a protective order.
+- Do not switch to real trading based only on passing unit tests.
+Final assessment
+The latest commits improve the project in meaningful ways: they align live and backtest holding-time rules, account for estimated slippage, improve exit reporting, and refuse some risk configurations that would halt after ordinary losing streaks.
+
+But the project still has significant risks in live-mode transitions, credential-check failure handling, exchange-side protection, durable idempotency, and the distinction between spot and perpetual-futures execution. More importantly, the repository's own diagnosis says the measured trading edge is not yet statistically distinguishable from zero.
+
+
+## more issue
+
+1. Trade reflections can never be saved. backend/agents/reflection_agent.py never imports asyncio, but line 273 uses it, so every closed trade raises an error there. That is why 6 closes produced 0 reflections and 0 hypotheses. The fix is one line: import asyncio.
+2. Every configured AI model fails on your key: kimi-k3 410, nemotron 404, gpt-oss-20b no answer. Even after fix 1, every lesson would fall back to a canned rule-based text.
+3. The hourly cleanup of decision records is broken. Its query uses a tar_id column that neither trades nor decisions has, as I checked in the live database. It errors every hour, so the table now grows forever.
+4. Your server is unprotected through /api/ai/chat (backend/api/ai.py:201). It has no auth, so anyone can make your server send requests to any address on its own machine or network and read the replies. The Vercel /api/chat route has no auth either, and its address guard can be bypassed with addresses like localhost..
+5. Simulated closes can be booked at a wrong blended price. When the mirror finds the exchange already flat, binance_testnet.py:268 averages a week of older exits instead of using this trade's actual exit. In the reviewer's test, a −$5 loss was booked as −$37.7.
+6. Stop-order IDs repeat after a restart (position_monitor.py:815, counter n % 100 kept only in memory). On Bybit the replacement stop would be refused, leaving the position with no exchange stop.
+7. Real-account equity still ignores locked margin. The code reads margin fields that the exchange layer never returns, so a healthy real session ends as "floored" right after its first trade. The earlier fix (F58) doesn't work.
+8. Your settings block new sessions: VaR 0.12 with a 0.30 drawdown limit survives only 2.5 losses in a row, and the rule requires 8. A session that resumes after a restart skips this check entirely.
+9. The server is very likely still using the 1R/1R trailing stop. Two trades moved their stop to exactly the entry price, and one closed for −$42 in fees only.
+
+Medium
+
+10. Turning live trading on mid-session ends the session for a false reason. It compares the paper target against the real balance and says "floored".
+11. The daily loss limit can't fire at high leverage. It scales to 50% at 10×, above the 10% drawdown halt.
+12. A refused session start still changes your money. It rewrites paper cash and resets the high-water mark before refusing.
+13. A restored pending approval never expires: the time it was approved isn't saved.
+14. Close alerts and reflections lost their link to the original trade. Telegram close alerts no longer show margin %, and reflections can't find the trade's execution-quality data.
+15. The bus fix for cancelled tasks backfired. It swallows the cancel, so a cancelled price-feed watcher keeps running and ticks can arrive twice.
+16. The "already flat" fix (F1) doesn't cover mirrored paper positions. The comparison check only looks at real positions, and the order watcher connects to the wrong testnet.
+17. The WebSocket /api/graphs/stream is open when no key is set. Anyone can start full analyses and burn your AI budget.
+18. A manual Sell of 1 coin closes the agent's entire position in that coin, and then logs an extra open row.
+19. The browser can still act on made-up prices. Fake random-walk prices can still trigger AI paper closes that book P&L.
+20. One write error makes every browser data store read as empty for the rest of the process.
+21. Your trades, portfolio, decisions and P&L are publicly readable from the Vercel URL without the password (checked live).
+
+Smaller
+
+22. The check that a manual stop is on the correct side never runs, because it reads fields that do
+23. The write-refused banner names the wrong cause, or shows nothing.
+24. Pause and the portfolio save still ignore failed requests; the portfolio failure can lose paper trades.
+25. The backend proxy can still reach /openapi.json via ...
+26. The address guard refuses legitimate hosts such as fcc.gov, and /api/mcp-status follows redirects to blocked addresses.
+27. ALLOW_UNAUTHENTICATED_WRITES is parsed differently by the frontend and the backend.
+28. A dashboard password with non-ASCII characters locks you out.
+29. The backtest uses a different holding-time limit on 1h data than live does.
+30. Live progress summaries lose specialist results when several finish together.
+31. A second corruption of the AI memory file freezes the win-rate and daily-loss stats.
+32. Resetting stats stores win rate as a fraction where everything else uses a percentage.
+33. A busy graph can push all trade_analysis runs out of the run history.
+34. Telegram alert tasks can be garbage-collected before they send.
+35. The event-path risk fix has no effect: it reads a direction field the event doesn't carry. Dormant while that path is off.
+36. A tighten that arrives during a stop replacement is dropped, so the exchange stop can stay looser than the in-process one.
+
+Biggest wins: fixes 1–3 and 5–7 are small code changes, and items 2, 8 and 9 are only settings chan
+
+Do you want me to add all 36 to a new section in docs/new.md beside your 14, so everything is in on

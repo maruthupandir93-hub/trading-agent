@@ -80,8 +80,13 @@ async def test_a_closed_position_does_not_raise_in_the_reflection_handler(monkey
 
     monkeypatch.setattr(agent, "_reflect_on_close_guarded", _fake)
 
+    # `tar_id` IS A DECLARED FIELD NOW, and this line is how we know it was not.
+    # It passed a raw UUID for years and nothing complained, because Pydantic v2
+    # drops an undeclared keyword in silence — the same footgun that cost the
+    # learning loop three fields on `TarApprovedEvent`. Declaring it turned this
+    # into a ValidationError, which is the whole point of declaring it.
     event = PositionClosedEvent(
-        tar_id=uuid.uuid4(), trade_id=str(uuid.uuid4()),
+        tar_id=str(uuid.uuid4()), trade_id=str(uuid.uuid4()),
         symbol="SOL/USDT", side="buy", tab="paper",
         quantity=1.0, entry_price=100.0, exit_price=97.5,
         realized_pnl=-2.5, exit_reason="stop-loss",

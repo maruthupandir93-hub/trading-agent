@@ -52,7 +52,10 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict
+from typing import (
+    Annotated, Any, Dict, List, Literal, Optional, TypedDict,
+    get_args, get_origin, get_type_hints,
+)
 
 # ---------------------------------------------------------------------------
 # Trigger — why this run happened at all (Phase 31 / spec Section 14)
@@ -1078,3 +1081,68 @@ DETERMINISTIC_ONLY_FIELDS: frozenset = frozenset({
 # Written exactly once, by the first node. Section 39.4: a re-fetch on replay
 # would reason over a different market than the original decision.
 WRITE_ONCE_FIELDS: frozenset = frozenset({"market_data"})
+
+
+# ---------------------------------------------------------------------------
+# Applying the reducers OUTSIDE LangGraph
+# ---------------------------------------------------------------------------
+
+_REDUCERS: Optional[Dict[str, Any]] = None
+
+
+def state_reducers() -> Dict[str, Any]:
+    """The reducer declared for each `TradingState` field, by name.
+
+    Derived from the annotations rather than listed by hand, so a field that
+    gains or loses a reducer cannot leave a second copy of the mapping stale —
+    the arrangement the ATR multipliers should have had from the start.
+    """
+    global _REDUCERS
+    if _REDUCERS is None:
+        found: Dict[str, Any] = {}
+        # RESOLVED, not raw. `from __future__ import annotations` makes
+        # `__annotations__` a dict of STRINGS, so scanning it directly finds no
+        # `Annotated` at all and silently returns an empty map — a reducer
+        # lookup that always misses, which is the bug this function is fixing
+        # wearing a different hat. Caught by driving it, not by reading it.
+        try:
+            hints = get_type_hints(TradingState, include_extras=True)
+        except Exception:  # noqa: BLE001 - a forward ref we cannot resolve
+            hints = {}
+        for name, hint in hints.items():
+            if get_origin(hint) is Annotated:
+                args = get_args(hint)
+                if len(args) >= 2 and callable(args[1]):
+                    found[name] = args[1]
+        _REDUCERS = found
+    return _REDUCERS
+
+
+def merge_delta(accumulated: Dict[str, Any], delta: Dict[str, Any]) -> None:
+    """Fold one node's output into an accumulating state, IN PLACE.
+
+    WHY THIS EXISTS (#30). `stream_run` accumulated a streamed run with a plain
+    `dict.update`, which applies no reducer at all. The nine specialists run in
+    ONE parallel superstep and each writes `specialist_findings` — so the
+    accumulated state kept whichever one the dict happened to see last, and the
+    `done` summary the dashboard renders reported a single specialist out of
+    nine. `unavailable`, `errors` and `nodes_visited` lost the same way, which
+    is how a run that recorded five reasons for not trading displayed one.
+
+    LangGraph applies these reducers to its OWN state; nothing applied them to
+    a copy assembled outside it. That is the gap: the reducers were declared,
+    correct, and simply not reached on this path.
+
+    A key with no declared reducer is REPLACED, which is what LangGraph does
+    with it too.
+    """
+    reducers = state_reducers()
+    for key, value in delta.items():
+        reducer = reducers.get(key)
+        if reducer is None or key not in accumulated:
+            accumulated[key] = value
+            continue
+        try:
+            accumulated[key] = reducer(accumulated[key], value)
+        except Exception:  # noqa: BLE001 - a bad reducer must not break a stream
+            accumulated[key] = value

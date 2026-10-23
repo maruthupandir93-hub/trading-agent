@@ -1406,6 +1406,21 @@ async def start_session(
     from backend.services.risk_coherence import assess_current as _risk_coherence
 
     _coherence = _risk_coherence()
+    # THE BAR IS HIGHER FOR REAL MONEY (review Issue 5).
+    #
+    # `ok` passes an UNMEASURABLE configuration, and that is right for paper:
+    # "I could not establish the risk budget" is not evidence of an unsafe one,
+    # and refusing on it would halt research whenever an env var was mid-change.
+    # It is NOT a basis for authorising a live entry — the point of this check
+    # is that the operator chose a coherent risk policy, and an unknown policy
+    # has not been chosen. So the REAL book requires a measured SAFE verdict and
+    # the paper book keeps the permissive rule.
+    _needs_live_bar = tab == "real"
+    if _needs_live_bar and not _coherence.live_ok:
+        raise ValueError(
+            f"A REAL-money session requires a MEASURED, coherent risk configuration "
+            f"(verdict {_coherence.verdict}). {_coherence.reason}"
+        )
     if not _coherence.ok:
         raise ValueError(_coherence.reason)
 

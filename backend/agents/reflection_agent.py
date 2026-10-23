@@ -302,7 +302,14 @@ class ReflectionAgent(BaseAgent):
     async def _reflect_on_close(self, event: PositionClosedEvent) -> None:
         receipt = {
             "trade_id": str(event.trade_id),
-            "tar_id": str(event.trade_id),
+            # THE TAR, NOT THE TRADE ROW. `assess_execution_quality` looks this
+            # up in `execution_quality.tar_id`; since F88 `trade_id` is the
+            # closing row's id, so the lookup found nothing and EVERY
+            # reflection graded its own execution "unavailable" — which reads
+            # as "no reference price was recorded" rather than as a join that
+            # could never match. Falls back to `trade_id` for an event
+            # published before the field existed.
+            "tar_id": str(getattr(event, "tar_id", None) or event.trade_id),
             "symbol": event.symbol,
             "side": event.side,
             "pnl": event.realized_pnl,

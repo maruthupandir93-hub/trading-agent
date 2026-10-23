@@ -272,19 +272,22 @@ def backtest_strategy(
     # as "no bound".
     minutes_per_bar = bar_minutes(candles)
 
-    # THE SHARED FLOOR. When the caller passes no explicit bound, the bound is
-    # whatever the LIVE system would apply to this strategy -- read from the
-    # same `effective_holding_minutes` the position monitor calls, measured
-    # against the interval derived from these very candles.
+    # THE SHARED FLOOR, AND IT IS NOT MEASURED FROM THESE CANDLES (#29).
     #
-    # One function rather than two is the whole point: a backtest applying a
-    # different bound from production is the Issue E defect this area was fixed
-    # for, and it would be invisible because both would look reasonable alone.
+    # This passed `minutes_per_bar`, so the bound moved with whatever data the
+    # study used: 8 x 60 = 480 minutes on 1h candles against the live monitor's
+    # 8 x 15 = 120. That is the Issue E defect reintroduced inside the very
+    # function written to prevent it, and invisible because both numbers look
+    # reasonable in isolation.
+    #
+    # The bound is a property of the LIVE system's decision cadence. The candle
+    # interval is used BELOW, to turn those minutes into a number of bars on
+    # this particular series -- which is the only thing it is an input to.
     if max_holding_minutes is None:
         try:
             from backend.algorithms.strategy_profiles import effective_holding_minutes
 
-            max_holding_minutes = effective_holding_minutes(name, minutes_per_bar)
+            max_holding_minutes = effective_holding_minutes(name)
         except Exception:  # pragma: no cover - a missing profile is not fatal
             max_holding_minutes = None
 

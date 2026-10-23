@@ -323,9 +323,21 @@ class PaperTradeRequest(BaseModel):
         """A long's stop must sit BELOW its entry, a short's above it.
 
         A stop on the wrong side is either already triggered or unreachable,
-        and in both cases it is not protection. Checked against the limit price
-        when one is given; a market order has no entry price here, so the
-        monitor's own check is what catches it.
+        and in both cases it is not protection.
+
+        THIS VALIDATOR HAS NEVER FIRED, AND IT IS KEPT ANYWAY (#22). It reads
+        `limitPrice` / `price`, and THIS MODEL DECLARES NEITHER — every order
+        placed through here is a market order, so there is no entry price at
+        request time and `entry` is always None. The comment that used to sit
+        here said "the monitor's own check is what catches it", and the monitor
+        had no such check: two files each pointed at the other and nothing
+        checked anything.
+
+        The real check now lives at the one place the entry price certainly
+        exists — `position_monitor.stop_side_fault`, called from the route
+        before it books and from `track_manual_position` after a venue fill.
+        This stays as a boundary guard for a future caller that DOES supply a
+        limit price, and says plainly that it is not the one doing the work.
         """
         entry = getattr(self, "limitPrice", None) or getattr(self, "price", None)
         if entry is None or self.stopLoss is None:
@@ -385,6 +397,22 @@ async def place_paper_trade(req: PaperTradeRequest) -> Dict[str, Any]:
                 f"No live price for {req.symbol}, so there is no honest price to fill "
                 f"against. The tick cache fills from the exchange websocket shortly "
                 f"after startup — retry in a few seconds."
+            ),
+        )
+
+    # A STOP ON THE WRONG SIDE IS REFUSED HERE, WHERE NOTHING HAS HAPPENED YET
+    # (#22). The request model cannot do it — it has no price field — and by
+    # the time `track_manual_position` sees the trade the book has already been
+    # written. This is the last point where refusing costs nothing.
+    from backend.agents.position_monitor import stop_side_fault
+
+    _fault = stop_side_fault(req.side, price, req.stopLoss)
+    if _fault is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Refused: {_fault}. The fill price would be {price:,.8g}. "
+                f"Nothing was booked."
             ),
         )
 
