@@ -773,6 +773,33 @@ COMMENT ON TABLE agent_positions IS 'Backend agent open positions, aggregated pe
 -- that answer wrong. Closed-position history already lives in `trades`,
 -- `decisions` and `reflections`; a fourth copy here would be a fourth thing to
 -- disagree with them.
+-- ---------------------------------------------------------------------------
+-- EXECUTION SUBMISSIONS — the idempotency key store.
+--
+-- `execution_service._submitted` is an in-process dict, so a plan whose TAR was
+-- published immediately before a crash could be submitted AGAIN after the
+-- restart. For an open that means the position is opened twice, at full size,
+-- against one decision — the same outcome the concurrent-claim fix already
+-- closed for two tasks in one process, reached instead by a restart.
+--
+-- The basis is the PRIMARY KEY, so the claim is the INSERT: concurrency and
+-- durability are the same operation, decided by the database rather than by
+-- ordering in this codebase.
+--
+-- A CLOSE IS NEVER RECORDED HERE. `_close` withholds its basis on a wiring
+-- failure precisely so the exit stays retryable (invariant 4), and a durable
+-- claim would make that permanent — the retry refused as a duplicate while the
+-- position stayed open. Exits are never blocked, including by this table.
+CREATE TABLE IF NOT EXISTS execution_submissions (
+  basis       text PRIMARY KEY,
+  ts          timestamptz NOT NULL DEFAULT now(),
+  symbol      text,
+  intent      text,
+  tar_id      text,
+  outcome     text
+);
+CREATE INDEX IF NOT EXISTS idx_execution_submissions_ts ON execution_submissions (ts DESC);
+
 CREATE TABLE IF NOT EXISTS monitored_positions (
   tar_id       text PRIMARY KEY,
   -- 'pending' = risk approved it and the fill has not arrived. Persisted too,

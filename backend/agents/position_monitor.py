@@ -370,6 +370,29 @@ _PENDING_TTL_S = 3600.0
 # move; the in-process monitor enforces the true level throughout either way.
 _MAX_STOP_REPLACE_PASSES = 3
 
+# WHAT IS ACTUALLY ENFORCING THIS POSITION'S STOP.
+#
+# `stop_order_id is None` was the only record, and it is written by three
+# different outcomes an operator must tell apart: never attempted, attempted
+# and FAILED, and a venue that cannot rest orders at all. The dashboard renders
+# the stop level in every case, so all three read as "protected".
+#
+# Only VENUE survives this process dying. The rest are honest names for
+# degrees of exposure, and the difference between IN_PROCESS and UNPROTECTED
+# is intent: one is the design for a venue that cannot rest orders, the other
+# is a real-money position whose stop the exchange REFUSED.
+PROTECTION_VENUE = "venue"            # the exchange holds a stop for the full size
+PROTECTION_IN_PROCESS = "in-process"  # by design: paper, or a venue without resting orders
+PROTECTION_PARTIAL = "partial"        # a stop rests, but for LESS than the position
+PROTECTION_UNPROTECTED = "unprotected"  # real money, and the venue refused the stop
+
+# How far the resting stop's quantity may fall short before the position stops
+# counting as protected. A venue legitimately trims the last fraction to its
+# step size, which is not a gap worth alarming on; anything more is a slice of
+# a real position with nothing behind it. Same relative tolerance the close
+# path uses for a partial fill, and for the same reason.
+PROTECTION_QTY_TOLERANCE = 0.999
+
 
 class _Tracked:
     """One open position being watched."""
@@ -396,6 +419,19 @@ class _Tracked:
         # venue refused it — which is a materially less safe position and is
         # logged as such rather than left to be inferred from a null.
         "stop_order_id",
+        # WHAT IS ACTUALLY ENFORCING THE STOP, stated rather than inferred.
+        #
+        # `stop_order_id is None` is written by THREE different outcomes an
+        # operator must tell apart — never attempted, attempted and REFUSED,
+        # and a venue that cannot rest orders at all — and the dashboard
+        # rendered the stop level in every case, so all three read as
+        # "protected". Only PROTECTION_VENUE survives this process dying.
+        "protection",
+        # How much of the position the resting order actually covers. A venue
+        # can accept a reduce-only stop for LESS than the position (a step-size
+        # trim, a stale size), and the uncovered remainder then has no
+        # venue-side protection while `result.ok` says the stop was placed.
+        "protected_qty",
         # The venue's id for the RESTING take-profit, when one was placed. Same
         # rules as `stop_order_id`: None for paper and when the venue refused it.
         # Both rest reduce-only, so if one fires while the process is down the
@@ -469,6 +505,18 @@ class _Tracked:
     def __init__(self, **kw):
         for k in self.__slots__:
             setattr(self, k, kw.get(k))
+        # DEFAULTS THAT STATE SOMETHING TRUE RATHER THAN None.
+        #
+        # Every slot above is set to `kw.get(k)`, so an unsupplied field is
+        # None — and None for `protection` would read as "unknown" on a paper
+        # position whose stop genuinely IS enforced in-process, which is the
+        # ambiguity this field exists to remove. A position starts with no
+        # venue order by definition; `_place_resting_stop` overwrites this the
+        # moment it knows better.
+        if self.protection is None:
+            self.protection = PROTECTION_IN_PROCESS
+        if self.protected_qty is None:
+            self.protected_qty = 0.0
 
 
 def _venue_backed(pos: "_Tracked") -> bool:
@@ -514,6 +562,38 @@ def _venue_for(pos: "_Tracked"):
     from backend.services.venue import get_venue
 
     return get_venue()
+
+
+
+def _resting_qty(result: Any, requested: float) -> Optional[float]:
+    """How much the venue's accepted stop actually covers, or None.
+
+    None means the venue did not say — which is NOT the same as zero and must
+    not be read as a partial. ccxt reports an order's size under several names
+    depending on the venue, and a conditional order sometimes reports none at
+    all; in that case the requested size is the best available statement and
+    the caller treats it as full cover, exactly as it did before this check
+    existed.
+    """
+    raw = getattr(result, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    for key in ("amount", "quantity", "origQty", "qty"):
+        value = raw.get(key)
+        try:
+            if value is not None and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+    for key in ("origQty", "qty", "quantity"):
+        value = info.get(key)
+        try:
+            if value is not None and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 class PositionMonitorAgent(BaseAgent):
@@ -1340,11 +1420,34 @@ class PositionMonitorAgent(BaseAgent):
 
         if result.ok:
             pos.stop_order_id = result.order_id
-            logger.warning(
-                "Resting stop placed at %s for %s %s @ %s (order %s). The position is now "
-                "protected even if this process stops.",
-                venue.id, pos.symbol, pos.qty, pos.stop_loss, result.order_id,
-            )
+
+            # THE QUANTITY IS CHECKED, NOT ASSUMED.
+            #
+            # A venue can accept a reduce-only stop for LESS than the position
+            # — a step-size trim, a partial reduction that already happened, a
+            # stale size. `result.ok` is true either way, and the uncovered
+            # remainder then has NO venue-side protection while the system
+            # reports the position as protected. That is the review's point:
+            # do not label it protected until the venue confirms the order AND
+            # its quantity.
+            covered = _resting_qty(result, pos.qty)
+            if covered is not None and covered < pos.qty * PROTECTION_QTY_TOLERANCE:
+                pos.protection = PROTECTION_PARTIAL
+                pos.protected_qty = covered
+                logger.critical(
+                    "PARTIAL RESTING STOP for %s: the venue accepted %.8g of %.8g "
+                    "(order %s). The uncovered %.8g has NO exchange-side protection "
+                    "and relies entirely on this process staying up.",
+                    pos.symbol, covered, pos.qty, result.order_id, pos.qty - covered,
+                )
+            else:
+                pos.protection = PROTECTION_VENUE
+                pos.protected_qty = covered if covered is not None else pos.qty
+                logger.warning(
+                    "Resting stop placed at %s for %s %s @ %s (order %s). The position is now "
+                    "protected even if this process stops.",
+                    venue.id, pos.symbol, pos.qty, pos.stop_loss, result.order_id,
+                )
         elif not getattr(venue, "supports_resting_orders", True):
             # A VENUE THAT CANNOT REST ORDERS AT ALL IS A LIMITATION, NOT A FAULT,
             # and logging it CRITICAL on every fill is how an alert stops being
@@ -1357,6 +1460,10 @@ class PositionMonitorAgent(BaseAgent):
             # such attribute, so `getattr(..., True)` keeps the CRITICAL below
             # for every real-money position, which is the half that matters.
             pos.stop_order_id = None
+            # BY DESIGN, not a failure — named so it cannot be confused with
+            # the real-money case below.
+            pos.protection = PROTECTION_IN_PROCESS
+            pos.protected_qty = 0.0
             logger.info(
                 "%s cannot rest a stop (%s). %s's stop is enforced in-process on every "
                 "tick, exactly as an unmirrored paper position's is — the mirror is no "
@@ -1365,6 +1472,11 @@ class PositionMonitorAgent(BaseAgent):
             )
         else:
             pos.stop_order_id = None
+            # REAL MONEY, AND THE VENUE REFUSED. The one state that must never
+            # be read as "protected" — and the one `stop_order_id is None`
+            # could not distinguish from the two benign cases above.
+            pos.protection = PROTECTION_UNPROTECTED
+            pos.protected_qty = 0.0
             logger.critical(
                 "NO RESTING STOP AT THE VENUE for %s (%s): %s. The in-process monitor is the "
                 "ONLY thing enforcing this stop, so a crash or restart leaves this REAL "
@@ -1686,6 +1798,12 @@ class PositionMonitorAgent(BaseAgent):
                 "qty": pos.qty,
                 "entryPrice": pos.entry_price,
                 "stopLoss": pos.stop_loss,
+                # WHAT IS ACTUALLY ENFORCING THAT STOP. Rendering the level
+                # alone let three different outcomes read as "protected": a
+                # venue order, an in-process-only design, and a real position
+                # whose stop the exchange REFUSED.
+                "protection": pos.protection or PROTECTION_IN_PROCESS,
+                "protectedQty": pos.protected_qty or 0.0,
                 "takeProfit": pos.take_profit,
                 "openedAtTs": pos.opened_at.timestamp() if pos.opened_at else None,
                 "peakPrice": pos.peak_price,

@@ -207,7 +207,12 @@ class ExecutionAgent(BaseAgent):
 
     @property
     def purpose(self) -> str:
-        return "The sole gateway to the exchange. Handles idempotency, order splitting (TWAP/VWAP), and slippage control."
+        return (
+            "The sole gateway to the exchange. Handles idempotency and slippage "
+            "measurement. Order splitting (TWAP/VWAP) is COMPUTED BUT NOT APPLIED — "
+            "see `_execute_tar`; market impact is bounded by the Risk Gateway's "
+            "depth cap instead."
+        )
 
     @property
     def permissions(self) -> List[str]:
@@ -335,11 +340,39 @@ class ExecutionAgent(BaseAgent):
         #    Previously this logged "Engaging TWAP execution logic" on a bare
         #    `size > 10.0` threshold while doing nothing at all: the log claimed
         #    a risk control was active when none was.
+        # AND THE LOG SAYS WHAT THIS ACTUALLY IS: A MEASUREMENT, NOT A CONTROL.
+        #
+        # The slices are computed and then NOT EXECUTED — a single market order
+        # for the full size is placed below, and there is no scheduler
+        # anywhere. The previous line said "splitting %s into %d TWAP slices
+        # over %d minutes", which states that a risk control ran.
+        #
+        # That is the SECOND time this file has claimed an inactive TWAP: the
+        # comment above records the first, where "Engaging TWAP execution
+        # logic" was logged on a bare `size > 10.0` threshold "while doing
+        # nothing at all: the log claimed a risk control was active when none
+        # was". Computing real slices and still not placing them is the same
+        # claim with better arithmetic behind it.
+        #
+        # IT IS NOT IMPLEMENTED RATHER THAN SILENTLY DROPPED, and that is a
+        # deliberate choice: a real schedule needs partial-fill handling,
+        # cancellation, and an answer for the fifteen minutes during which the
+        # position exists at a size neither the monitor nor the stop knows
+        # about. Half of that is worse than none.
+        #
+        # WHAT DOES BOUND MARKET IMPACT TODAY is `algorithms/liquidity_cap`,
+        # applied in the Risk Gateway: it sizes the order DOWN to what the book
+        # can absorb within a slippage tolerance, rather than spreading an
+        # oversized one over time. Different mechanism, same purpose, and it is
+        # actually applied.
         slices = self._plan_slices(tar.approved_size)
         if len(slices) > 1:
             logger.info(
-                "TAR %s: splitting %s into %d TWAP slices of ~%.8g over %d minutes.",
-                tar.tar_id, tar.approved_size, len(slices), slices[0], TWAP_WINDOW_MINUTES,
+                "TAR %s: this order would want %d slices of ~%.8g over %d minutes to "
+                "limit impact. NOT APPLIED — the full size is sent as one market "
+                "order. Impact is bounded instead by the Risk Gateway's depth cap, "
+                "which sizes the order to what the book can absorb.",
+                tar.tar_id, len(slices), slices[0], TWAP_WINDOW_MINUTES,
             )
 
         # 3. Route. BY THE POSITION'S OWN BOOK, not by the global flag — see

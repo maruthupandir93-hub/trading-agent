@@ -71,6 +71,45 @@ logger = logging.getLogger(__name__)
 ENV_ENABLE = "GRAPH_EXECUTION_ENABLED"
 
 
+
+async def _claim_basis_durably(event: Any, basis: str) -> bool:
+    """Record this basis so a RESTART cannot replay the plan. True if claimed.
+
+    False means a previous run already submitted it. True means claimed, or
+    that there is no database to claim in — see the call site for why an
+    unreachable key store must not stop a trade.
+
+    Never raises: a failure here is a bookkeeping failure, and the in-memory
+    guard still holds for the life of this process.
+    """
+    try:
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            return True
+        async with pool.acquire() as conn:
+            claimed = await conn.fetchval(
+                """
+                INSERT INTO execution_submissions (basis, symbol, intent, tar_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (basis) DO NOTHING
+                RETURNING basis
+                """,
+                basis,
+                getattr(event, "symbol", None),
+                getattr(event, "intent", None),
+                str(getattr(event, "run_id", "") or "") or None,
+            )
+        return claimed is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not claim idempotency basis %s durably (%s: %s). The in-process "
+            "guard still applies for this run.", basis[:16], type(exc).__name__, exc,
+        )
+        return True
+
+
 def execution_enabled() -> bool:
     """Read at CALL TIME, not import time.
 
@@ -211,6 +250,38 @@ class ExecutionService:
         # duplicate while the position stayed open.
         if event.intent != "close":
             _submitted[basis] = receipt
+
+        # --- 1c. AND CLAIM IT DURABLY, so a RESTART is not a second chance --
+        #
+        # The in-memory claim above makes check-and-set atomic within this
+        # process. It is lost on restart, and a plan whose TAR was published
+        # immediately before a crash could be submitted again after one — the
+        # same "one decision, two positions at full size" outcome, reached by a
+        # different route.
+        #
+        # `execution_submissions.basis` is a PRIMARY KEY, so the claim IS the
+        # insert: the database decides, rather than an ordering argument in
+        # this file. It runs AFTER the in-memory claim because this one awaits,
+        # and anything that awaits before the memory claim reopens the
+        # concurrency hole that fix closed.
+        #
+        # NO DATABASE IS NOT A REFUSAL. The in-memory guard still covers the
+        # common case (a retried delivery, a resumed checkpoint, two
+        # subscribers on one event), and refusing to trade because a key store
+        # is unreachable would turn a bookkeeping outage into a trading one.
+        if event.intent != "close" and not await _claim_basis_durably(event, basis):
+            _submitted.pop(basis, None)
+            receipt.outcome = "duplicate"
+            receipt.reasons.append(
+                f"idempotency basis {basis[:16]} was already submitted by an earlier "
+                f"run of this process. Refusing to submit the same decision twice — "
+                f"for an open that means the position is opened twice, at full size."
+            )
+            logger.warning(
+                "Execution service refused a plan for %s already claimed in a PRIOR "
+                "run (basis %s)", event.symbol, basis[:16],
+            )
+            return receipt
 
         # --- 2. Closes bypass everything else ------------------------------
         if event.intent == "close":
