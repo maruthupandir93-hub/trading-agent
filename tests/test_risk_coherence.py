@@ -27,6 +27,8 @@ scheduled outage"). Nothing acted on it. This module does.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from backend.services import risk_coherence as rc
@@ -271,3 +273,98 @@ def test_the_gap_allowance_is_the_CROs_own_constant():
     from backend.agents.cro_agent import STOP_SLIPPAGE_MULTIPLIER
 
     assert rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER == STOP_SLIPPAGE_MULTIPLIER
+
+
+# ---------------------------------------------------------------------------
+# Making the refusal ACTIONABLE — the reason it kept recurring
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_risk_pair_is_settable_without_touching_the_server(monkeypatch):
+    """THE REFUSAL WAS CORRECT AND UNACTIONABLE, WHICH IS WHY IT RECURRED.
+
+    The only way to change the pair was to SSH in, edit `.env` and restart —
+    and `.env` is gitignored, so `git pull` carried the code fix and left the
+    configuration exactly as it was. The operator redeployed twice and was
+    still blocked. A control nobody can reach is the same failure as a value
+    computed and never used.
+    """
+    from backend.api.admin import RiskConfigRequest, set_risk_config
+
+    written: dict = {}
+    monkeypatch.setattr(
+        "backend.core.config.settings._persist_env",
+        lambda k, v: written.__setitem__(k, v),
+    )
+
+    out = await set_risk_config(RiskConfigRequest(varFraction=0.05, drawdownLimit=0.30))
+    assert out["ok"] is True
+    assert written["MAX_PORTFOLIO_VAR_FRACTION"] == "0.05"
+    assert written["MAX_DRAWDOWN_FROM_HWM"] == "0.3"
+    # Written to the ENVIRONMENT too, or the operator is told it worked while
+    # the running agent keeps the old number until a restart.
+    assert os.environ["MAX_PORTFOLIO_VAR_FRACTION"] == "0.05"
+
+
+@pytest.mark.asyncio
+async def test_an_incoherent_pair_is_REFUSED_rather_than_saved(monkeypatch):
+    """Persisting a setting that would then refuse every session puts the
+    operator back where they started with no idea why. The refusal names the
+    largest value that WOULD fit, because a limit that only says "no" is what
+    made this feel arbitrary."""
+    from fastapi import HTTPException
+
+    from backend.api.admin import RiskConfigRequest, set_risk_config
+
+    written: dict = {}
+    monkeypatch.setattr(
+        "backend.core.config.settings._persist_env",
+        lambda k, v: written.__setitem__(k, v),
+    )
+    monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.05")
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.30")
+
+    with pytest.raises(HTTPException) as exc:
+        await set_risk_config(RiskConfigRequest(varFraction=0.12))
+
+    assert exc.value.status_code == 400
+    assert "NOT SAVED" in exc.value.detail
+    assert "largest VaR fraction" in exc.value.detail
+    assert written == {}, "an incoherent pair was persisted anyway"
+    assert os.environ["MAX_PORTFOLIO_VAR_FRACTION"] == "0.05", "the live value changed"
+
+
+@pytest.mark.asyncio
+async def test_the_panel_is_told_what_would_fit(monkeypatch):
+    """Derived from the guard's own arithmetic, so the number the panel offers
+    is the one it will accept — not a guess the operator then has to retry."""
+    from backend.api.admin import get_risk_config
+
+    monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.12")
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.30")
+    monkeypatch.delenv("MIN_LOSSES_BEFORE_HALT", raising=False)
+
+    out = await get_risk_config()
+    assert out["verdict"] == "UNSAFE"
+    assert out["sessionAllowed"] is False
+
+    offered = out["suggestions"]["largestVarFractionThatFits"]
+    assert offered is not None
+    # THE OFFER MUST ACTUALLY PASS. An offer the guard then refuses is worse
+    # than no offer.
+    assert rc.assess(var_fraction=offered, drawdown_limit=0.30).ok is True
+
+
+@pytest.mark.asyncio
+async def test_the_suggestion_names_both_levers_and_that_they_differ(monkeypatch):
+    """They both make the refusal go away and they are opposites: lowering the
+    VaR fraction reduces risk, raising the drawdown limit accepts a deeper
+    loss. An operator should not have to infer that from two numbers."""
+    from backend.api.admin import get_risk_config
+
+    monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.12")
+    monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.30")
+
+    note = (await get_risk_config())["suggestions"]["note"]
+    assert "reduces risk" in note
+    assert "deeper" in note

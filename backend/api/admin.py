@@ -18,7 +18,7 @@ to the inverse case — the bot is very much awake and they want it to stop.
 import logging
 import math
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -898,6 +898,173 @@ _EXIT_RULES: Dict[str, Dict[str, Any]] = {
         "help": "How many positions may be open across all instruments.",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# RISK CONFIGURATION — the pair that refused to start a session
+# ---------------------------------------------------------------------------
+#
+# WHY THIS ROUTE EXISTS, AND IT IS NOT CONVENIENCE.
+#
+# `services/risk_coherence` refuses a session whose VaR budget and drawdown
+# limit cannot survive an ordinary losing streak. That refusal is correct and
+# it stays. What was wrong is that the ONLY way to act on it was to SSH into
+# the server, edit `.env` by hand and restart — and `.env` is gitignored, so a
+# `git pull` carries the code fix and leaves the configuration exactly as it
+# was. An operator hit the refusal three times, redeployed twice, and was still
+# blocked, because the one thing that needed changing was not reachable from
+# anything they could click.
+#
+# A control the operator cannot reach is the same failure as a value computed
+# and never used, and this codebase is full of both. So the pair is settable
+# here, through the same `settings._persist_env` the venue switch and the exit
+# rules already use, and the coherence check runs BEFORE the write.
+#
+# IT REFUSES AN INCOHERENT PAIR RATHER THAN SAVING IT. Persisting a setting
+# that would then refuse every session puts the operator back where they
+# started with no idea why. The refusal names the largest VaR fraction that
+# WOULD fit, because a limit that only says "no" is what made this feel
+# arbitrary in the first place.
+class RiskConfigRequest(BaseModel):
+    # Both optional: an operator may move either lever alone, and the pair is
+    # judged together whichever one arrived.
+    varFraction: Optional[float] = Field(default=None, gt=0, le=1)
+    drawdownLimit: Optional[float] = Field(default=None, gt=0, lt=1)
+
+
+@router.get("/risk-config")
+async def get_risk_config() -> Dict[str, Any]:
+    """The risk pair, its verdict, and what would make it coherent.
+
+    Read by the Settings panel so the operator sees the blocker BEFORE they
+    press anything — the rule `VenueSwitchPanel` already follows and the one
+    `writeBlocker` follows for the auth gates. Discovering a refusal from a
+    toast after clicking Start is worse than never being offered the action.
+    """
+    from backend.agents.ceo_agent import max_drawdown_fraction
+    from backend.agents.cro_agent import max_portfolio_var_fraction
+    from backend.services import risk_coherence as rc
+
+    var_fraction = max_portfolio_var_fraction()
+    drawdown = max_drawdown_fraction()
+    verdict = rc.assess(var_fraction=var_fraction, drawdown_limit=drawdown)
+    required = rc.min_losses_before_halt()
+
+    # The largest VaR budget that still survives the required streak at the
+    # CURRENT drawdown limit, and the smallest drawdown limit that would accept
+    # the CURRENT budget. Derived rather than guessed, so the number the panel
+    # offers is the one the guard will actually accept.
+    largest_var = (
+        drawdown * rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER / required
+        if drawdown and required else None
+    )
+    smallest_drawdown = (
+        var_fraction * required / rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER
+        if var_fraction and required else None
+    )
+
+    return {
+        "varFraction": var_fraction,
+        "drawdownLimit": drawdown,
+        "verdict": verdict.verdict,
+        "sessionAllowed": verdict.ok,
+        "realMoneyAllowed": verdict.live_ok,
+        "lossPerStopPct": (
+            round(verdict.loss_fraction_per_stop * 100, 3)
+            if verdict.loss_fraction_per_stop is not None else None
+        ),
+        "lossesToHalt": (
+            round(verdict.losses_to_trip, 2)
+            if verdict.losses_to_trip is not None else None
+        ),
+        "requiredLosses": required,
+        "reason": verdict.reason,
+        "suggestions": {
+            # TWO LEVERS, AND THEY ARE NOT EQUIVALENT — which the panel has to
+            # say, because picking the wrong one feels like the same fix.
+            "largestVarFractionThatFits": (
+                round(largest_var, 4) if largest_var else None
+            ),
+            "smallestDrawdownThatAccepts": (
+                round(smallest_drawdown, 4) if smallest_drawdown else None
+            ),
+            "note": (
+                "Lowering the VaR fraction is the only one of these that reduces "
+                "risk; raising the drawdown limit accepts a deeper loss instead. "
+                "Funding the account is what lets a safe fraction still clear the "
+                "venue's minimum order size."
+            ),
+        },
+    }
+
+
+@router.post("/risk-config", dependencies=[Depends(require_write_auth)])
+async def set_risk_config(req: RiskConfigRequest) -> Dict[str, Any]:
+    """Set the risk pair. Takes effect immediately — no restart.
+
+    Persisted to `.env` AND written to `os.environ`, for the reason the exit
+    rules give: without the first the change is lost on restart, without the
+    second the operator is told it worked while the running agent keeps the old
+    number. Both values are read at CALL time by their owners, so the next
+    session start sees this one.
+    """
+    from backend.agents.ceo_agent import DRAWDOWN_LIMIT_VAR, max_drawdown_fraction
+    from backend.agents.cro_agent import max_portfolio_var_fraction
+    from backend.services import risk_coherence as rc
+
+    if req.varFraction is None and req.drawdownLimit is None:
+        raise HTTPException(status_code=400, detail="no risk setting supplied")
+
+    var_fraction = (
+        req.varFraction if req.varFraction is not None else max_portfolio_var_fraction()
+    )
+    drawdown = (
+        req.drawdownLimit if req.drawdownLimit is not None else max_drawdown_fraction()
+    )
+
+    # CHECKED BEFORE IT IS WRITTEN. Saving a pair that would then refuse every
+    # session leaves the operator exactly where they started.
+    verdict = rc.assess(var_fraction=var_fraction, drawdown_limit=drawdown)
+    if not verdict.ok:
+        required = rc.min_losses_before_halt()
+        largest = drawdown * rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER / required
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"NOT SAVED - this pair would refuse every session. {verdict.reason} "
+                f"At a {drawdown * 100:.0f}% drawdown limit the largest VaR fraction "
+                f"that survives {required} losses is {largest:.4f}. Lowering the VaR "
+                f"fraction reduces risk; raising the drawdown limit accepts a deeper "
+                f"one. They are not equivalent."
+            ),
+        )
+
+    changed: Dict[str, str] = {}
+    if req.varFraction is not None:
+        text = str(float(req.varFraction))
+        os.environ["MAX_PORTFOLIO_VAR_FRACTION"] = text
+        settings._persist_env("MAX_PORTFOLIO_VAR_FRACTION", text)
+        changed["MAX_PORTFOLIO_VAR_FRACTION"] = text
+    if req.drawdownLimit is not None:
+        text = str(float(req.drawdownLimit))
+        os.environ[DRAWDOWN_LIMIT_VAR] = text
+        settings._persist_env(DRAWDOWN_LIMIT_VAR, text)
+        changed[DRAWDOWN_LIMIT_VAR] = text
+
+    logger.warning(
+        "RISK CONFIGURATION CHANGED BY THE OPERATOR: %s. A stop-out now costs about "
+        "%.2f%% of equity and %.1f consecutive losses would halt the account.",
+        changed, verdict.loss_fraction_per_stop * 100, verdict.losses_to_trip,
+    )
+    return {
+        "ok": True,
+        "changed": changed,
+        "verdict": verdict.verdict,
+        "lossPerStopPct": round(verdict.loss_fraction_per_stop * 100, 3),
+        "lossesToHalt": round(verdict.losses_to_trip, 2),
+        "reason": verdict.reason,
+        "appliesFrom": "the next session start - no restart needed",
+    }
 
 
 class ExitRulesRequest(BaseModel):

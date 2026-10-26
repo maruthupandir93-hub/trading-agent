@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Card, NotAvailable, SectionTitle, TermTable } from '@/components/ui/primitives';
 import { ResetPaperBookPanel } from '@/components/operator/ResetPaperBookPanel';
 import { VenueSwitchPanel } from '@/components/operator/VenueSwitchPanel';
+import { RiskConfigPanel } from '@/components/operator/RiskConfigPanel';
 import { ExitRulesPanel } from '@/components/operator/ExitRulesPanel';
 import { TestnetPanel } from '@/components/operator/TestnetPanel';
 import { BACKEND_PATHS, backendProxyPath } from '@/lib/backendConfig';
@@ -388,6 +389,11 @@ export default function SettingsPage() {
           is the same class of decision as which venue the agent trades on and
           belongs beside it rather than buried further down. */}
       <TestnetPanel />
+
+      {/* ABOVE the venue switch: this is the setting that decides whether a
+          session can start at all, and an operator who cannot start one should
+          not have to scroll past three panels to find out why. */}
+      <RiskConfigPanel />
 
       <VenueSwitchPanel />
 
