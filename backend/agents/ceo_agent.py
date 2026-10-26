@@ -83,7 +83,27 @@ logger = logging.getLogger(__name__)
 # env at CALL time — the `simulation_mode` rule, because a frozen-at-import
 # constant means the operator changes it, is told it worked, and the running
 # agent keeps halting on the old number until a restart.
-MAX_DRAWDOWN_FROM_HIGH_WATER_MARK = 0.10
+# 0.30, AND IT WAS 0.10 WHILE THE COMMENT ABOVE ARGUED AGAINST 0.10.
+#
+# That is the shape this codebase keeps finding: the arithmetic was written
+# down, it was right, and nothing acted on it. `services/risk_coherence` turned
+# it into an enforced check and the check then REFUSED THE SHIPPED DEFAULTS —
+# 0.05 VaR against a 0.10 limit survives 3.0 stop-outs, under the 8 it
+# requires — so a fresh deployment could not start a session at all. A product
+# whose own guard rejects its own defaults is broken out of the box, and that
+# is how this was found: the operator redeployed and could not trade.
+#
+# The pair has to move together, which is the whole point of the coherence
+# check. At the 0.05 VaR default a stop-out costs ~3.33% of equity (the budget
+# divided by the 1.5x gap allowance), so:
+#
+#     limit 0.10  ->  3.0 losses   26% likely on pure variance: a scheduled outage
+#     limit 0.30  ->  9.0 losses   1.8% likely: something is genuinely wrong
+#
+# Raising it ACCEPTS A DEEPER DRAWDOWN; it does not reduce per-trade risk. The
+# lever that reduces risk is MAX_PORTFOLIO_VAR_FRACTION, and an operator who
+# wants a 10% brake should lower that to ~0.019 rather than lower this back.
+MAX_DRAWDOWN_FROM_HIGH_WATER_MARK = 0.30
 DRAWDOWN_LIMIT_VAR = "MAX_DRAWDOWN_FROM_HWM"
 
 

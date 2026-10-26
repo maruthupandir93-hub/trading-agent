@@ -3634,6 +3634,63 @@ exit is the mandatory stop (B), and `Liquidity Crisis` sits in
 `BLOCKED_REGIMES` (D). Only 6C was missing — and 6C turned out to be wrong for
 this account.
 
+### The guard refused the product's own defaults, and that reached production
+
+The operator redeployed and could not start a session. The refusal was
+`risk_coherence` working exactly as written — and the configuration it refused
+included **the shipped defaults**, so a fresh deployment could not trade at
+all. A product whose own guard rejects its own defaults is broken out of the
+box, and nothing caught it because every test of that guard passed one
+configuration in by hand.
+
+TWO SEPARATE ERRORS, and the first made the second worse.
+
+**1. THE LOSS PER STOP-OUT WAS OVERSTATED BY 50%.** The module said the
+slippage multiplier "is NOT applied here, because the VaR budget is already
+expressed post-slippage", and used `var_fraction` itself. The CRO's constraint
+is `notional x (stop_distance x SLIPPAGE) <= equity x var_fraction`, so the
+largest position it permits loses `equity x var_fraction / SLIPPAGE` when it is
+stopped. The budget is sized for a stop that GAPS; an ordinary stop-out — the
+kind a losing STREAK is made of — costs two thirds of it at the 1.5x allowance.
+Corrected, the operator's 0.12/0.30 survives **3.75** losses rather than 2.5,
+and the defaults 3.0 rather than 2.0. Still refused, but the number is now the
+one the system actually risks. `DEFAULT_STOP_SLIPPAGE_MULTIPLIER` imports the
+CRO's own constant, because a budget built with one multiplier and judged with
+another is the two-numbers-in-two-places failure this file keeps recording.
+
+**2. `MAX_DRAWDOWN_FROM_HIGH_WATER_MARK` WAS 0.10 WHILE THE COMMENT DIRECTLY
+ABOVE IT ARGUED AGAINST 0.10.** That comment works the arithmetic out in full —
+a 2.66% stop-out against a 10% limit trips in 3.8 losses — and ends *"a limit
+that is certain to fire within the first handful of trades stops being a
+disaster brake and becomes a scheduled outage."* The constant stayed at 0.10
+anyway. The same shape as every other finding here: the value was computed,
+written down, and never acted on. Turning the argument into an enforced check
+is what finally surfaced it, by breaking the deploy.
+
+It is **0.30** now. At the 0.05 VaR default a stop-out costs ~3.33%, so:
+
+    limit 0.10  ->  3.0 losses   26% likely on variance alone: a scheduled outage
+    limit 0.30  ->  9.0 losses   1.8% likely: something is genuinely wrong
+
+**RAISING IT ACCEPTS A DEEPER DRAWDOWN; IT DOES NOT REDUCE RISK.** The lever
+that reduces risk is `MAX_PORTFOLIO_VAR_FRACTION`, and an operator who wants a
+10% brake should lower that to ~0.019 rather than lower this back. The two are
+one decision, which is the entire point of the coherence check.
+
+**THE TESTS THAT BROKE WERE PINNING NUMBERS, NOT PROPERTIES**, and thirteen of
+them failed on this change. Each was repaired toward the property: the
+observation route asserts it REPORTS `max_drawdown_fraction()` rather than
+that the limit is 10%, the spec test asserts the PAIR is coherent rather than
+that the drawdown is any particular value, and the one test that genuinely
+needs 0.10 (the arithmetic that condemns it) states it as a literal and now
+also asserts the default has moved off it. A test that pins a default is a
+test of the default.
+
+`tests/test_risk_coherence.py::test_the_SHIPPED_DEFAULTS_can_actually_start_a_session`
+drives the real defaults through the real guard, with the operator's own `.env`
+cleared first — the `isolate_write_auth` rule, because the question is about
+the defaults and the operator's configuration must not be able to answer it.
+
 ## Safety invariants — never break these
 
 These are enforced in code, and there are tests that exist specifically
@@ -3743,7 +3800,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2520 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2523 tests, must all pass
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

@@ -88,9 +88,30 @@ def test_the_ceo_is_a_singleton():
 # 1. The limit is configurable, because 10% was not compatible with 10x
 # ---------------------------------------------------------------------------
 
-def test_the_limit_defaults_to_ten_percent():
-    assert ceo.max_drawdown_fraction() == pytest.approx(0.10)
-    assert ceo.MAX_DRAWDOWN_FROM_HIGH_WATER_MARK == 0.10
+def test_the_default_limit_is_COHERENT_with_the_default_risk_budget():
+    """It was 0.10, and 0.10 made the shipped defaults unstartable.
+
+    `risk_coherence` requires a configuration to survive
+    `MIN_LOSSES_BEFORE_HALT` stop-outs. At the 0.05 VaR default a stop-out
+    costs ~3.33% of equity, so a 10% limit halted after 3.0 — and the guard
+    refused the product's own defaults. A fresh deployment could not start a
+    session at all, which is how it was found: the operator redeployed and
+    could not trade.
+
+    So this asserts the PROPERTY rather than the number. Pinning 0.30 would
+    break again the moment the VaR default moved, which is exactly the
+    two-numbers-that-must-agree failure this codebase keeps paying for.
+    """
+    from backend.agents.cro_agent import max_portfolio_var_fraction
+    from backend.services.risk_coherence import SAFE, assess
+
+    verdict = assess(
+        var_fraction=max_portfolio_var_fraction(),
+        drawdown_limit=ceo.max_drawdown_fraction(),
+    )
+    assert verdict.verdict == SAFE, (
+        f"the shipped defaults cannot start a session: {verdict.reason}"
+    )
 
 
 def test_the_limit_is_read_at_call_time(monkeypatch):
@@ -109,12 +130,18 @@ def test_an_unusable_limit_falls_back_rather_than_disabling_the_brake(monkeypatc
     fire. Both are refused in favour of the default — a typo must not silently
     remove the brake, and must not silently weld it shut either."""
     monkeypatch.setenv(ceo.DRAWDOWN_LIMIT_VAR, bad)
-    assert ceo.max_drawdown_fraction() == pytest.approx(0.10)
+    assert ceo.max_drawdown_fraction() == pytest.approx(
+        ceo.MAX_DRAWDOWN_FROM_HIGH_WATER_MARK
+    )
 
 
 def test_the_arithmetic_that_made_ten_percent_unreachable():
     """Not a code test — a guard on the REASONING, so the next person to lower
-    the limit sees what it costs. These are the operator's measured numbers.
+    the limit sees what it costs. These are the operator's measured numbers,
+    and the limit they condemn (0.10) is no longer the default BECAUSE of
+    them: `risk_coherence` made the argument enforceable and it then refused
+    the shipped defaults, which is how the operator discovered they could not
+    start a session after a redeploy.
 
     If this ever fails because the stop multiplier or the VaR budget changed,
     the limit needs revisiting with it: they are one decision, not two.
@@ -127,9 +154,15 @@ def test_the_arithmetic_that_made_ten_percent_unreachable():
     assert round(breakeven, 3) == 0.333
 
     per_trade_loss = 0.0531 / 2.00          # measured: $0.0531 on a $2.00 account
+    # THE LIMIT THIS CONDEMNS IS THE OLD ONE (0.10), stated as a literal
+    # because the whole point is what that number cost. The CURRENT default is
+    # asserted for coherence in `test_the_default_limit_is_COHERENT_...`.
     losses_to_trip = 0.10 / per_trade_loss
     assert 3.0 < losses_to_trip < 4.5, (
         f"a 10% limit tolerates only {losses_to_trip:.1f} stop-outs at this risk"
+    )
+    assert ceo.MAX_DRAWDOWN_FROM_HIGH_WATER_MARK > 0.10, (
+        "the default is back at the limit this arithmetic condemns"
     )
 
     # Four straight losses at break-even skill is routine, not a disaster.
@@ -267,7 +300,12 @@ async def test_the_observation_route_shows_the_arithmetic_not_just_a_boolean():
     assert out["highWaterMark"] == pytest.approx(1.95)
     assert out["lastEquity"] == pytest.approx(1.7332)
     assert out["drawdownPct"] == pytest.approx(11.12, abs=0.2)
-    assert out["limitPct"] == pytest.approx(10.0)
+    # Whatever the configured limit is — the point of this test is that the
+    # route REPORTS the arithmetic, not that the limit is any one number.
+    # Pinning 10.0 here made it fail when the default moved to 0.30 for
+    # coherence with the VaR budget, which is the two-numbers-in-two-places
+    # failure rather than a real regression.
+    assert out["limitPct"] == pytest.approx(ceo.max_drawdown_fraction() * 100)
     assert out["limitVariable"] == ceo.DRAWDOWN_LIMIT_VAR
     # And it names the trade-off rather than only the number.
     assert "leverage" in out["note"].lower()

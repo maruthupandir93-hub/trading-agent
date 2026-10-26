@@ -136,7 +136,10 @@ async def test_ceo_does_not_halt_just_below_the_limit(monkeypatch):
     monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.10")
     """Guard against an off-by-one that would halt on every small dip."""
     ceo = CEOAgent()
-    equities = iter([1000.0, 1000.0 * (1 - (MAX_DRAWDOWN_FROM_HIGH_WATER_MARK - 0.005))])
+    # 0.10 is PINNED by the setenv above, so "just below" must be derived from
+    # that pinned value and not from the module default, which has since moved
+    # to 0.30 for coherence with the VaR budget.
+    equities = iter([1000.0, 1000.0 * (1 - (0.10 - 0.005))])
 
     async def fake_equity(tab):
         return next(equities)
@@ -392,4 +395,15 @@ async def test_uncorrelated_holdings_do_not_consume_the_group_limit(monkeypatch)
 def test_thresholds_match_the_spec():
     assert CORRELATION_THRESHOLD == 0.75
     assert CORRELATED_EXPOSURE_MULTIPLIER == 1.5
-    assert MAX_DRAWDOWN_FROM_HIGH_WATER_MARK == 0.10
+    # 0.30, raised from 0.10 because the pair must survive
+    # MIN_LOSSES_BEFORE_HALT stop-outs at the VaR default and 0.10 did not —
+    # the guard refused the product's own defaults, so no session could start.
+    # Asserted as a COHERENT PAIR rather than a literal, because pinning the
+    # number here is what would break next time the VaR default moves.
+    from backend.agents.cro_agent import max_portfolio_var_fraction
+    from backend.services.risk_coherence import SAFE, assess
+
+    assert assess(
+        var_fraction=max_portfolio_var_fraction(),
+        drawdown_limit=MAX_DRAWDOWN_FROM_HIGH_WATER_MARK,
+    ).verdict == SAFE

@@ -4,9 +4,14 @@ THE RUN THIS CAME FROM. The operator reported four losses in five trades with
 "more amount losses" and a stopped agent, and read it as broken strategies. The
 arithmetic says otherwise:
 
-    MAX_PORTFOLIO_VAR_FRACTION  0.12   -> a stop-out costs ~12% of equity
+    MAX_PORTFOLIO_VAR_FRACTION  0.12   -> a stop-out costs ~8% of equity
+                                          (the budget DIVIDED by the 1.5x gap
+                                          allowance -- this said 12% and that
+                                          was a 50% overstatement, corrected
+                                          when the guard turned out to refuse
+                                          the shipped defaults too)
     MAX_DRAWDOWN_FROM_HWM       0.30   -> the killswitch fires at 30%
-    losses to halt              2.5
+    losses to halt              3.75
 
 At the fixed 2:1 payoff this system places, break-even is a 33% win rate, so
 the per-trade loss probability is ~0.64 and FOUR losses in a row happens about
@@ -36,7 +41,9 @@ def test_the_operators_live_configuration_is_refused():
     verdict = rc.assess(var_fraction=0.12, drawdown_limit=0.30)
 
     assert verdict.ok is False
-    assert verdict.losses_to_trip == pytest.approx(2.5)
+    # 0.30 / (0.12 / 1.5). The budget is sized for a stop that GAPS; an
+    # ordinary stop-out costs two thirds of it.
+    assert verdict.losses_to_trip == pytest.approx(3.75)
     # The refusal must name every lever, because they are NOT equivalent: only
     # one of the three actually reduces risk.
     assert "MAX_PORTFOLIO_VAR_FRACTION" in verdict.reason
@@ -49,7 +56,7 @@ def test_a_survivable_configuration_passes():
     verdict = rc.assess(var_fraction=0.03, drawdown_limit=0.30)
 
     assert verdict.ok is True
-    assert verdict.losses_to_trip == pytest.approx(10.0)
+    assert verdict.losses_to_trip == pytest.approx(15.0)
 
 
 def test_the_boundary_is_inclusive_at_the_required_streak():
@@ -59,10 +66,17 @@ def test_the_boundary_is_inclusive_at_the_required_streak():
     tuned to the stated bound, which reads as the check being arbitrary.
     """
     required = rc.min_losses_before_halt()
-    exact = rc.assess(var_fraction=0.30 / required, drawdown_limit=0.30)
+    # The VaR fraction that yields exactly `required` losses is
+    # `drawdown x SLIPPAGE / required`, because a stop-out costs
+    # `var / SLIPPAGE`. Derived from the module's own constant rather than
+    # restated, so the two cannot drift.
+    slippage = rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER
+    exact = rc.assess(var_fraction=0.30 * slippage / required, drawdown_limit=0.30)
     assert exact.ok is True
 
-    under = rc.assess(var_fraction=0.30 / (required - 0.5), drawdown_limit=0.30)
+    under = rc.assess(
+        var_fraction=0.30 * slippage / (required - 0.5), drawdown_limit=0.30,
+    )
     assert under.ok is False
 
 
@@ -96,12 +110,12 @@ def test_the_requirement_is_read_at_call_time(monkeypatch):
     """The `simulation_mode` rule: a frozen constant means the operator changes
     the setting, is told it worked, and the process enforces the old one until
     a restart."""
-    monkeypatch.setenv(rc.MIN_LOSSES_VAR, "3")
-    assert rc.min_losses_before_halt() == 3
-    # 0.12 against 0.30 survives 2.5 losses, so 3 still refuses...
+    monkeypatch.setenv(rc.MIN_LOSSES_VAR, "4")
+    assert rc.min_losses_before_halt() == 4
+    # 0.12 against 0.30 survives 3.75 losses, so a requirement of 4 refuses...
     assert rc.assess(var_fraction=0.12, drawdown_limit=0.30).ok is False
-    # ...and 2 accepts it. The operator can opt out, deliberately and visibly.
-    monkeypatch.setenv(rc.MIN_LOSSES_VAR, "2")
+    # ...and 3 accepts it. The operator can opt out, deliberately and visibly.
+    monkeypatch.setenv(rc.MIN_LOSSES_VAR, "3")
     assert rc.assess(var_fraction=0.12, drawdown_limit=0.30).ok is True
 
 
@@ -189,3 +203,71 @@ async def test_the_check_runs_before_the_per_symbol_work(monkeypatch):
 
     # The RISK refusal, not the untradeable one.
     assert "halts itself" in str(err.value)
+
+
+# ---------------------------------------------------------------------------
+# The regression that broke a real deployment
+# ---------------------------------------------------------------------------
+
+def test_the_SHIPPED_DEFAULTS_can_actually_start_a_session(monkeypatch):
+    """THE BUG THIS FILE'S OWN GUARD CAUSED, and it reached production.
+
+    `risk_coherence` refuses a configuration that cannot survive
+    `MIN_LOSSES_BEFORE_HALT` stop-outs. That is right. What nobody checked is
+    that the SHIPPED DEFAULTS pass it — and they did not:
+
+        VaR 0.05, drawdown 0.10  ->  3.0 losses  ->  UNSAFE
+
+    So on a fresh deployment every `POST /api/session/start` returned the
+    refusal and the operator could not trade at all. A product whose own guard
+    rejects its own defaults is broken out of the box, and it was found the
+    worst way: by an operator redeploying and discovering nothing worked.
+
+    The pair moves together now (drawdown 0.30 against the 0.05 VaR budget,
+    9.0 losses). This test drives the REAL defaults through the REAL guard so
+    the two can never drift apart again — asserting the property, not the
+    numbers, because pinning either number is what caused this.
+    """
+    # The operator's own .env must not decide whether this passes: the question
+    # is about the DEFAULTS. Same isolation rule as `isolate_write_auth`.
+    for name in ("MAX_PORTFOLIO_VAR_FRACTION", "MAX_DRAWDOWN_FROM_HWM",
+                 "MIN_LOSSES_BEFORE_HALT"):
+        monkeypatch.delenv(name, raising=False)
+
+    from backend.agents.ceo_agent import MAX_DRAWDOWN_FROM_HIGH_WATER_MARK
+    from backend.agents.cro_agent import max_portfolio_var_fraction
+
+    verdict = rc.assess(
+        var_fraction=max_portfolio_var_fraction(),
+        drawdown_limit=MAX_DRAWDOWN_FROM_HIGH_WATER_MARK,
+    )
+    assert verdict.verdict == rc.SAFE, (
+        f"a fresh deployment cannot start a session: {verdict.reason}"
+    )
+    assert verdict.ok is True
+    assert verdict.live_ok is True, "and a REAL session is refused too"
+
+
+def test_the_loss_per_stop_is_the_budget_divided_by_the_gap_allowance():
+    """It used to be the budget ITSELF, a 50% overstatement.
+
+    The CRO permits `notional <= equity x var / (stop x SLIPPAGE)`, so a
+    position stopped AT its stop loses `equity x var / SLIPPAGE`. The budget is
+    sized for a stop that GAPS; the ordinary stop-out that a losing streak is
+    made of costs two thirds of it at the 1.5x allowance.
+
+    Overstating it made the guard half again as strict as the risk it models,
+    which is how it came to refuse the defaults.
+    """
+    verdict = rc.assess(var_fraction=0.06, drawdown_limit=0.30)
+    assert verdict.loss_fraction_per_stop == pytest.approx(
+        0.06 / rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER
+    )
+
+
+def test_the_gap_allowance_is_the_CROs_own_constant():
+    """A budget built with one multiplier and judged with another is the
+    two-numbers-in-two-places failure this codebase keeps paying for."""
+    from backend.agents.cro_agent import STOP_SLIPPAGE_MULTIPLIER
+
+    assert rc.DEFAULT_STOP_SLIPPAGE_MULTIPLIER == STOP_SLIPPAGE_MULTIPLIER

@@ -89,6 +89,15 @@ def min_losses_before_halt() -> int:
     return value
 
 
+# The gap allowance the CRO sizes its VaR budget with. Imported rather than
+# restated, because a budget built with one multiplier and judged with another
+# is the two-numbers-in-two-places failure this codebase keeps paying for.
+try:  # pragma: no cover - the import is the point; the fallback is for safety
+    from backend.agents.cro_agent import STOP_SLIPPAGE_MULTIPLIER as _CRO_SLIPPAGE
+    DEFAULT_STOP_SLIPPAGE_MULTIPLIER = float(_CRO_SLIPPAGE)
+except Exception:  # noqa: BLE001
+    DEFAULT_STOP_SLIPPAGE_MULTIPLIER = 1.5
+
 SAFE = "SAFE"
 UNSAFE = "UNSAFE"
 UNKNOWN = "UNKNOWN"
@@ -146,7 +155,7 @@ def assess(
     *,
     var_fraction: float,
     drawdown_limit: float,
-    stop_slippage_multiplier: float = 1.5,
+    stop_slippage_multiplier: float = DEFAULT_STOP_SLIPPAGE_MULTIPLIER,
 ) -> RiskCoherence:
     """Can this configuration survive `min_losses_before_halt()` stop-outs?
 
@@ -160,10 +169,34 @@ def assess(
     That is also why raising `MAX_PORTFOLIO_VAR_FRACTION` to clear a venue
     minimum is not free: it moves this number by the same multiple.
 
-    The slippage multiplier is carried for the same reason the CRO applies it —
-    a stop gaps through its trigger — but it is NOT applied here, because the
-    VaR budget is already expressed post-slippage. It is accepted and reported
-    so a caller cannot silently double-count it.
+    AND THE SLIPPAGE MULTIPLIER DIVIDES IT, WHICH THIS GOT WRONG.
+
+    This used to say the multiplier "is NOT applied here, because the VaR
+    budget is already expressed post-slippage", and used `var_fraction` itself
+    as the loss per stop. That overstated every routine loss by 50% and made
+    this guard half again as strict as the risk it models — which is how it
+    came to refuse the shipped defaults.
+
+    The CRO's constraint is
+
+        notional x (stop_distance x SLIPPAGE)  <=  equity x var_fraction
+
+    so the largest notional it permits is
+    `equity x var_fraction / (stop_distance x SLIPPAGE)`, and the loss when
+    that position is stopped is
+
+        notional x stop_distance  =  equity x var_fraction / SLIPPAGE
+
+    The budget is sized for a stop that GAPS. A stop that fills near its
+    trigger — the ordinary case, and ordinary is exactly what a "survive a
+    losing streak" check is about — costs two thirds of the budget at the 1.5x
+    allowance.
+
+    The pessimistic reading is still reachable and is the right way to ask for
+    it: a streak in which EVERY stop gaps the full allowance costs
+    `k x var_fraction`, and an operator who expects that should raise
+    `MIN_LOSSES_BEFORE_HALT` rather than have this function silently assume the
+    worst case on every trade.
     """
     required = min_losses_before_halt()
 
@@ -184,7 +217,14 @@ def assess(
             ),
         )
 
-    loss_per_stop = float(var_fraction)
+    # DIVIDED BY THE SLIPPAGE ALLOWANCE. See the docstring: the VaR budget is
+    # sized for a stop that gaps past its trigger, so the ORDINARY stop-out —
+    # the kind a losing streak is made of — costs the budget divided by that
+    # allowance, not the budget itself.
+    slippage = float(stop_slippage_multiplier or 1.0)
+    if slippage <= 0:
+        slippage = 1.0
+    loss_per_stop = float(var_fraction) / slippage
     losses_to_trip = float(drawdown_limit) / loss_per_stop
 
     if losses_to_trip >= required:
