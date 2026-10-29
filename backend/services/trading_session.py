@@ -413,6 +413,34 @@ async def real_account_balance(force: bool = False) -> Optional[float]:
             return float(_real_balance_cache["value"])
 
     try:
+        # THROUGH THE VENUE LAYER, WHICH IS PER-VENUE (the operator's report:
+        # "according to my connected real account it displays the balance ... in
+        # binance and bybit unified").
+        #
+        # This read `services/exchange_client`, which hardcodes
+        # `ccxt.binance(...)`. On a BYBIT deployment it reported a BINANCE
+        # account — the same defect CLAUDE.md records for
+        # `POST /live-trading/enable`, in a second place and with the same
+        # shape: the venue layer exists precisely so a caller does not reach
+        # around it to a client that is not per-venue.
+        #
+        # It matters more here than almost anywhere: this number is the
+        # DENOMINATOR of every percentage a real session reports, so the
+        # progress bar, the drawdown check, the floor check and the capital pool
+        # are all computed from it.
+        from backend.services.venue import get_venue
+
+        venue_balance = await get_venue().free_usdt()
+        if venue_balance is not None:
+            _real_balance_cache.update(
+                {"value": float(venue_balance), "at": now, "error": None}
+            )
+            return float(venue_balance)
+
+        # FALLS BACK rather than failing. The older client answers correctly on
+        # a Binance deployment, which is what every existing install is, and a
+        # venue read that fails for a transport reason should not blank a
+        # balance the other path can still produce.
         from backend.services.exchange_client import get_exchange_client
 
         client = get_exchange_client()

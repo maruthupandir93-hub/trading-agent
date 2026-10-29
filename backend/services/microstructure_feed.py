@@ -325,6 +325,30 @@ async def fetch_headlines(*, force: bool = False) -> Tuple[List[Dict[str, Any]],
 
         items: List[Dict[str, Any]] = []
         failed: List[str] = []
+
+        # FREENEWSAPI AS A FIFTH SOURCE, beside the four RSS feeds rather than
+        # instead of them. The operator supplied the key and asked for it to be
+        # used for news; more sources is the right shape here because the news
+        # specialist weights by COVERAGE, and a single provider's editorial mix
+        # carrying the whole signal is worse than four feeds plus one API.
+        #
+        # IT CANNOT BLOCK ANYTHING. `fetch_freenews` returns None on any
+        # failure and never raises, so an outage, a revoked key or a renamed
+        # field costs one source and leaves the other four answering. The
+        # failure is NAMED in `failed` for the same reason the RSS failures are
+        # — "3 of 5 answered" does not tell an operator which one went.
+        try:
+            from backend.services.news_search import fetch_freenews, freenews_key
+
+            if freenews_key():
+                api_items = await fetch_freenews()
+                if api_items is None:
+                    failed.append("FreeNewsAPI: could not be read")
+                else:
+                    items.extend(api_items)
+        except Exception as exc:  # noqa: BLE001 - an optional source may not raise
+            failed.append(f"FreeNewsAPI: {exc}")
+
         for (name, _url), result in zip(RSS_FEEDS, results):
             if not result.ok or not isinstance(result.data, str):
                 # Named, not counted. "3 of 4 feeds answered" does not tell an

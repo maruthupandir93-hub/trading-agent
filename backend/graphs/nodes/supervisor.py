@@ -84,6 +84,7 @@ analysis now argues the other way.
 
 from __future__ import annotations
 
+import os
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -149,6 +150,58 @@ ACTION_DO_NOT_TRADE = "DO_NOT_TRADE"
 # specialists and no validated track record. What changed is that the scale
 # underneath it is now measured with the debate intact rather than crippled.
 MIN_CONFIDENCE_TO_TRADE = 0.18
+MIN_CONFIDENCE_VAR = "MIN_CONFIDENCE_TO_TRADE"
+
+
+def min_confidence_to_trade() -> float:
+    """The entry bar, READ AT CALL TIME.
+
+    IT WAS A FROZEN CONSTANT, which made it the one gate an operator could not
+    move without editing source and restarting — the `simulation_mode` rule
+    broken in the place it matters most to them, because this is the gate that
+    decides how often the agent trades at all.
+
+    MEASURED, so a change is made against evidence rather than hope. Across
+    eight liquid instruments on live 15m candles, with coverage 1.0 (every
+    specialist available, so none of this is the coverage defect):
+
+        SOL 0.031   DOGE 0.051   ADA 0.085   SUI 0.110
+        AVAX 0.114  LINK 0.052   LTC 0.076   XRP no setup
+
+    The highest reading is 0.114 against this 0.18 bar, so TODAY nothing is a
+    close call: lowering to 0.10 admits two of seven, and admitting most would
+    need ~0.05, which is not a filter. The default therefore does NOT move —
+    the lever for trade COUNT that does not lower a bar is more instruments in
+    the rotation, which is cost-neutral and already built.
+
+    WHAT IS AND IS NOT KNOWN ABOUT LOWERING IT. `scripts/measure_conviction.py`
+    found conviction does NOT predict outcome (z = +0.03) — but that is on
+    `algorithms.debate.score_debate`, the EVENT path's five-leg debate, which
+    is a pure function of candles and can be replayed. The NINE-SPECIALIST
+    panel this threshold gates needs an order book, a tape and news, and cannot
+    be replayed offline. So there is no evidence that lowering this bar costs
+    money, and none that it is safe either. It is the operator's call, made
+    with the numbers above in front of them rather than by editing a constant.
+    """
+    raw = (os.getenv(MIN_CONFIDENCE_VAR) or "").strip()
+    if not raw:
+        return MIN_CONFIDENCE_TO_TRADE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not a number; using %.2f.",
+            MIN_CONFIDENCE_VAR, raw, MIN_CONFIDENCE_TO_TRADE,
+        )
+        return MIN_CONFIDENCE_TO_TRADE
+    if not 0.0 < value <= 1.0:
+        logger.warning(
+            "%s=%r is outside (0, 1]; using %.2f. A bar of 0 is not a filter and "
+            "one above 1 can never be met.",
+            MIN_CONFIDENCE_VAR, raw, MIN_CONFIDENCE_TO_TRADE,
+        )
+        return MIN_CONFIDENCE_TO_TRADE
+    return value
 
 # A held position is reconsidered for exit when the fresh panel argues the other
 # way with at least this much conviction. Lower than the entry threshold on
@@ -313,21 +366,22 @@ def supervise(state: TradingState) -> Optional[Dict[str, Any]]:
         return _emit(state, decision, unavailable)
 
     # ---- 6. Agreement, but not enough conviction. --------------------------
-    if verdict.confidence < MIN_CONFIDENCE_TO_TRADE:
+    _bar = min_confidence_to_trade()
+    if verdict.confidence < _bar:
         shortfall = _explain_low_confidence(verdict)
         decision = _build(
             action=ACTION_WAIT,
             direction=thesis.direction,
             rationale=(
                 f"WAIT: the panel agrees with the {thesis.direction} setup but only at "
-                f"{verdict.confidence:.2f}, below the {MIN_CONFIDENCE_TO_TRADE} minimum. "
+                f"{verdict.confidence:.2f}, below the {_bar} minimum. "
                 f"{shortfall}"
             ),
             probability=probability,
             answers=answers,
             trade_wait_or_exit=(
                 f"WAIT — agreement at {verdict.confidence:.2f} is below the "
-                f"{MIN_CONFIDENCE_TO_TRADE} minimum."
+                f"{_bar} minimum."
             ),
         )
         return _emit(state, decision, unavailable)

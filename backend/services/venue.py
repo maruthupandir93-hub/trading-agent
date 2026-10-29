@@ -1164,7 +1164,23 @@ class Venue:
         if not self.has_credentials():
             return None
         try:
-            params = {"category": "linear"} if self.id == "bybit" else {}
+            # THE TWO VENUES PUT THE SAME NUMBER IN DIFFERENT PLACES, which is
+            # why this belongs in the venue layer at all.
+            #
+            #   Binance USD-M  `binanceusdm.fetch_balance()` answers for the
+            #                  futures wallet directly; no params needed.
+            #   Bybit UTA      a Unified Trading Account holds ONE balance for
+            #                  spot, margin and derivatives. This asked for
+            #                  `category: linear`, which is the DERIVATIVES
+            #                  category — the right question for a classic
+            #                  account and the wrong one for a unified account,
+            #                  where it reports the contract wallet rather than
+            #                  the unified balance the operator sees in the app.
+            #
+            # `accountType: UNIFIED` is what every Bybit account created since
+            # 2023 uses. ccxt falls back on its own for a classic account, so
+            # asking this way is correct for both and wrong for neither.
+            params = {"accountType": "UNIFIED"} if self.id == "bybit" else {}
             raw = await self.private.fetch_balance(params)
         except Exception as exc:
             logger.warning("%s: could not read the balance: %s", self.id, exc)
@@ -1172,8 +1188,15 @@ class Venue:
 
         # Both ccxt shapes are real; which appears depends on venue and market type.
         usdt = raw.get("USDT")
-        if isinstance(usdt, dict) and isinstance(usdt.get("free"), (int, float)):
-            return float(usdt["free"])
+        if isinstance(usdt, dict):
+            # `free` first, then `available`, then `total`. On a Bybit UTA the
+            # first two can be absent while the wallet genuinely holds
+            # collateral, and returning None there would read as "could not
+            # ask" on an account that answered perfectly well.
+            for field in ("free", "available", "total"):
+                value = usdt.get(field)
+                if isinstance(value, (int, float)):
+                    return float(value)
         free = raw.get("free")
         if isinstance(free, dict) and isinstance(free.get("USDT"), (int, float)):
             return float(free["USDT"])

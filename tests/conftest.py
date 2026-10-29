@@ -293,6 +293,15 @@ def isolate_tradeable_universe(monkeypatch):
 def isolate_risk_coherence(monkeypatch):
     monkeypatch.setenv("MAX_PORTFOLIO_VAR_FRACTION", "0.03")
     monkeypatch.setenv("MAX_DRAWDOWN_FROM_HWM", "0.30")
+    # AND THE REQUIREMENT ITSELF, which this did not pin — so the operator's
+    # own `MIN_LOSSES_BEFORE_HALT` leaked in and four tests about a REFUSAL
+    # started passing, because the configuration they build to be refused was
+    # acceptable under the operator's lower bar.
+    #
+    # The same isolation lesson as `isolate_write_auth` and
+    # `isolate_llm_configuration`, for the third time in this file: a fixture
+    # that pins two of three inputs is pinning the operator's third.
+    monkeypatch.setenv("MIN_LOSSES_BEFORE_HALT", "8")
 
 
 @pytest.fixture(autouse=True)
@@ -300,6 +309,31 @@ def isolate_write_auth(monkeypatch):
     monkeypatch.delenv("TRADES_API_KEY", raising=False)
     monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
     monkeypatch.setenv("ALLOW_UNAUTHENTICATED_WRITES", "true")
+
+
+@pytest.fixture(autouse=True)
+def isolate_news_search(monkeypatch):
+    """The suite must not read the operator's freenewsapi / tinyfish keys.
+
+    THE SAME LESSON AS `isolate_llm_configuration`, AND IT WAS LEARNED THE SAME
+    WAY. `fetch_headlines` gained freenewsapi.io as a fifth source, and
+    `validate_market_data` — the single fetch point — calls it, so the call ran
+    inside every graph test. With the operator's real key in `.env` the test
+    environment started making an authenticated outbound request, and the suite
+    HUNG at 78%.
+
+    The network guard did not stop it: it patches `socket.connect`, and a DNS
+    lookup happens BEFORE any connect. The symptom was "the suite got slow",
+    which is the worst possible presentation of "the tests are talking to the
+    internet".
+
+    Cleared rather than faked, so a test that wants this source supplies its
+    own key and its own transport. A test that reads its own enablement from
+    the operator's `.env` is a test of the operator's `.env`.
+    """
+    for var in ("freenewsapi", "FREENEWSAPI", "FREE_NEWS_API_KEY",
+                "tinyfish", "TINYFISH", "TINYFISH_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture(autouse=True)

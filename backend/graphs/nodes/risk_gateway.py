@@ -139,6 +139,38 @@ from backend.agents.cro_agent import (
 )
 
 # Named here so the refusal text and the variable cannot drift apart.
+def volatility_haircut_enabled() -> bool:
+    """May the volatility regime scale DOWN an operator-chosen allocation?
+
+    DEFAULT OFF for a SESSION, always on for the unattended risk-based path —
+    see the call site. An operator who selects 100% and gets 37% because two
+    invisible multipliers compounded has not been kept safe, they have been
+    given a control that does not mean what it says.
+
+    Read at call time, never frozen at import.
+    """
+    raw = (os.getenv("VOLATILITY_SIZE_HAIRCUT") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def volatility_leverage_cap_enabled() -> bool:
+    """Should the volatility regime be allowed to LOWER the chosen leverage?
+
+    DEFAULT OFF. See the call site: the table (NORMAL 4x, HIGH 2x, EXTREME 1x)
+    means an operator who selects 10x gets a different number on every cycle
+    depending on the regime, which is the "a control that silently delivers
+    something other than what was selected" failure this codebase treats as
+    worse than a refusal.
+
+    It is a heuristic, not an invariant. The ABSOLUTE ceiling (invariant 2) and
+    the LIQUIDATION cap are both unconditional and unaffected by this.
+
+    Read at call time, never frozen at import.
+    """
+    raw = (os.getenv("VOLATILITY_LEVERAGE_CAP") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 REQUIRE_APPROVAL_VAR = "REQUIRE_STRATEGY_APPROVAL"
 
 # How much of the VaR budget the gateway actually spends when it caps a position.
@@ -949,6 +981,37 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     # operator's chosen leverage, never raise it (invariant 2). Reported rather
     # than applied silently, for the same reason the liquidation cap is — an
     # operator who chose 10x and got 2x has to be able to see why.
+    # **AND IT IS OFF BY DEFAULT NOW, AT THE OWNER'S EXPLICIT REQUEST.**
+    #
+    # The table is NORMAL 4x, HIGH 2x, EXTREME 1x, so an operator who chose 10x
+    # got 4x, 2x or 1x depending on which regime the cycle happened to read.
+    # Their report was exact: *"i choose the 10x leverage ... but it choose
+    # different leverage on every trade"*. That is not a bug in the cap — it is
+    # the cap working — but it IS a control that silently delivers something
+    # other than what the operator selected, which this codebase treats as worse
+    # than a refusal everywhere else (`simulation_mode`, the margin buffer, the
+    # allocation).
+    #
+    # It is a HEURISTIC, not an invariant. Invariant 2 is the absolute ceiling
+    # (10x), checked above and untouchable at runtime; this table is a
+    # risk-management preference, and the account owner has asked for their
+    # chosen leverage to be the one that trades. The same reasoning CLAUDE.md
+    # already records for raising the ceiling from 3x to 10x applies: they own
+    # the account, they have been told the cost repeatedly, and it is their
+    # decision to make.
+    #
+    # WHAT IS *NOT* OFF IS THE LIQUIDATION CAP ABOVE, and the difference matters.
+    # That one is not about appetite for risk: past it the venue liquidates
+    # BEFORE the stop is touched, so the stop never fires, every protective
+    # mechanism built on it is bypassed at once, and the loss becomes the entire
+    # margin rather than the amplified-but-bounded loss the operator chose.
+    # Turning that off would not give them more risk, it would give them
+    # UNBOUNDED risk, and invariant 3 is what forbids it.
+    #
+    # `VOLATILITY_LEVERAGE_CAP=true` restores the old behaviour. Read at call
+    # time (the `simulation_mode` rule), and the cap that WOULD have applied is
+    # reported either way so turning it off does not also stop recording what it
+    # would have done.
     vol_state = state.get("volatility")
     vol_cap = getattr(vol_state, "max_leverage", None)
     if vol_cap:
@@ -956,14 +1019,23 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             vol_cap = int(vol_cap)
         except (TypeError, ValueError):
             vol_cap = None
+    vol_cap_note = ""
     if vol_cap and vol_cap < leverage:
-        logger.warning(
-            "Leverage reduced %dx -> %dx on %s: the %s volatility regime caps leverage "
-            "at %dx.",
-            leverage, vol_cap, symbol,
-            getattr(vol_state, "regime", "?"), vol_cap,
-        )
-        leverage = max(1, vol_cap)
+        if volatility_leverage_cap_enabled():
+            logger.warning(
+                "Leverage reduced %dx -> %dx on %s: the %s volatility regime caps leverage "
+                "at %dx.",
+                leverage, vol_cap, symbol,
+                getattr(vol_state, "regime", "?"), vol_cap,
+            )
+            leverage = max(1, vol_cap)
+        else:
+            vol_cap_note = (
+                f"the {getattr(vol_state, 'regime', '?')} volatility regime would cap "
+                f"leverage at {vol_cap}x, and VOLATILITY_LEVERAGE_CAP is off, so the "
+                f"session's chosen {leverage}x stands"
+            )
+            logger.info("Leverage kept at %dx on %s: %s", leverage, symbol, vol_cap_note)
 
     # ---- SIZING ------------------------------------------------------------
     #
@@ -1237,11 +1309,52 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
     # Applied AFTER the risk-budget calculation rather than folded into
     # `risk_per_trade_percent`, so the trace shows both the budgeted size and what
     # volatility did to it. Folding them would make the reduction invisible.
+    # **AND IN BROKER MODE IT NO LONGER DOES, AT THE OWNER'S REQUEST.**
+    #
+    # This is the SECOND reduction applied to an operator's chosen allocation,
+    # after the VaR cap, and the two compound: HIGH volatility multiplies by
+    # 0.6, so a 100% allocation already VaR-capped to 62% becomes 37%. The
+    # operator's report — *"i choose 100% allocation from my fund but it choose
+    # only some amount"* — is the sum of both.
+    #
+    # THE DISTINCTION IS WHO CHOSE THE SIZE.
+    #
+    #   RISK-BASED (no session)  nobody chose anything: the agent is unattended
+    #                            and sizes itself, so a volatility haircut is
+    #                            the system exercising its own judgement. KEPT.
+    #   BROKER-STYLE (a session) the operator explicitly selected an allocation
+    #                            and a leverage. Scaling that down by a table
+    #                            they cannot see is the same "silently delivers
+    #                            something other than what was selected" failure
+    #                            as the margin buffer and the regime leverage
+    #                            cap.
+    #
+    # The multiplier is still COMPUTED and REPORTED in both modes, so turning
+    # the reduction off does not stop recording what it would have done — the
+    # arrangement `REQUIRE_HTF_ALIGNMENT` and the entry-extension gate both use.
+    #
+    # `VOLATILITY_SIZE_HAIRCUT=true` restores it for a session. The VaR cap, the
+    # liquidation cap, the depth cap and the mandatory stop are all unaffected:
+    # this removes a preference, not a bound.
     volatility_multiplier = 1.0
+    volatility_haircut_note = ""
     if volatility is not None:
         volatility_multiplier = max(0.0, min(1.0, volatility.risk_multiplier))
         if volatility_multiplier < 1.0:
-            size = size * volatility_multiplier
+            operator_sized = session_leverage is not None
+            if operator_sized and not volatility_haircut_enabled():
+                volatility_haircut_note = (
+                    f"the {getattr(volatility, 'regime', '?')} volatility regime would "
+                    f"scale this position to {volatility_multiplier * 100:.0f}% of the "
+                    f"size, and VOLATILITY_SIZE_HAIRCUT is off, so the session's own "
+                    f"allocation stands"
+                )
+                logger.info(
+                    "Volatility haircut NOT applied to %s (%s): %s",
+                    symbol, getattr(volatility, "regime", "?"), volatility_haircut_note,
+                )
+            else:
+                size = size * volatility_multiplier
 
     if size <= 0:
         budget = (
@@ -1315,6 +1428,21 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             # when a flag is on. `status: "info"` because it is a STATEMENT, not
             # a check that passed — CANDIDATE is the normal state here and must
             # not render beside a passing risk check as though it were one.
+            # THE LEVERAGE THE OPERATOR CHOSE, AND WHAT WOULD HAVE MOVED IT.
+            # Reported whether or not the regime cap is on, so an operator who
+            # selects 10x can always see which number actually traded and why.
+            **({
+                "AllocationHonoured": {
+                    "status": "info",
+                    "detail": volatility_haircut_note,
+                }
+            } if volatility_haircut_note else {}),
+            **({
+                "LeverageHonoured": {
+                    "status": "info",
+                    "detail": vol_cap_note,
+                }
+            } if vol_cap_note else {}),
             **({
                 "StrategyApproval": {
                     "status": "info",
