@@ -269,7 +269,9 @@ def _lesson_prompt(state: TradingState, reflection: TradeReflection) -> str:
         f"Outcome: {reflection.outcome} "
         f"(realized P&L {pnl:+.2f})" if pnl is not None else f"Outcome: {reflection.outcome}",
         f"Entry: {receipt.get('entry_price')}  Exit: {receipt.get('exit_price')}",
-        f"Exit reason: {receipt.get('exit_reason', 'unknown')}",
+        f"Exit reason: {receipt.get('exit_reason', 'unknown')}"
+        + (f" — panel at exit: {receipt['exit_context']}"
+           if receipt.get("exit_context") else ""),
         f"Held: {receipt.get('held_seconds')} seconds",
         f"Strategies active: {', '.join(receipt.get('strategies') or []) or 'none recorded'}",
         f"Execution quality: {reflection.execution_quality or 'unavailable'}"

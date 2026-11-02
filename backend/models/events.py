@@ -380,6 +380,12 @@ class PositionClosedEvent(BaseEvent):
     strategy: Optional[str] = None
     run_id: Optional[str] = None
     entry_context: Optional[str] = None
+    # WHAT THE PANEL BELIEVED WHEN IT CHOSE A JUDGEMENT EXIT — the Supervisor's
+    # own sentence (opposing direction + directional confidence). None for a
+    # mechanical exit (stop, target, clock), whose reason is fully stated by
+    # `exit_reason`. DECLARED, because Pydantic v2 drops an undeclared kwarg in
+    # silence (the TarApprovedEvent lesson).
+    exit_context: Optional[str] = None
     # THE POSITION'S OWN TAR, WHICH `trade_id` STOPPED BEING (F88).
     #
     # `trade_id` used to be `pos.tar_id` and is now the CLOSING ROW's id, for a

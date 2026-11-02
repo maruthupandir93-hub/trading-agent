@@ -132,9 +132,25 @@ async def fetch_freenews(
         logger.debug("freenewsapi is not configured; skipping that source.")
         return None
 
+    # `q` IS NOT SENT, BECAUSE THE VENDOR REMOVED IT. Verified against the live
+    # API on 2026-11-02:
+    #
+    #     ?q=bitcoin        HTTP 400 "Search using the 'q' field has been removed."
+    #     ?in_body=bitcoin  HTTP 400 "... 'in_body' field has been removed."
+    #     ?in_title=bitcoin HTTP 500 (listed in `meta.filters`, does not work)
+    #     ?topic=crypto     HTTP 400 "Invalid topic"
+    #
+    # A 400 is a "could not ask" (None), so sending `q` DISABLED THE SOURCE for
+    # every caller that passed a query — while the unqueried live feed kept
+    # working, which is why nothing on the trading path noticed. A query is
+    # therefore applied CLIENT-SIDE as a title filter below: "asked, nothing
+    # matched" stays `[]`, exactly as a server-side search would have answered.
+    #
+    # The unqueried feed is GENERAL news (sport, gadgets, politics). That is
+    # harmless for trading because `score_headlines` keeps only headlines that
+    # name the symbol or a market-wide term, and it is why that filter exists.
     params: Dict[str, Any] = {"language": language}
-    if query:
-        params["q"] = query
+    terms = [t for t in (query or "").lower().split() if t]
 
     # THROUGH `services/upstream`, NOT A FRESH httpx CLIENT.
     #
@@ -152,7 +168,9 @@ async def fetch_freenews(
     # one policy.
     from backend.services.upstream import fetch_json
 
-    query_string = "&".join(f"{k}={v}" for k, v in params.items())
+    from urllib.parse import urlencode
+
+    query_string = urlencode(params)
     result = await fetch_json(
         f"{FREENEWS_URL}?{query_string}",
         label="FreeNewsAPI",
@@ -177,11 +195,16 @@ async def fetch_freenews(
         return None
 
     items: List[Dict[str, Any]] = []
-    for row in rows[: max(1, int(limit))]:
+    for row in rows:
+        if len(items) >= max(1, int(limit)):
+            break
         if not isinstance(row, dict):
             continue
         title = _as_text(row.get("title"))
         if not title:
+            continue
+        # Every term must appear — the AND semantics a keyword search has.
+        if terms and not all(t in title.lower() for t in terms):
             continue
         items.append({
             "title": title,

@@ -84,13 +84,33 @@ MAX_FORWARD = 200     # bars to wait for a resolution before dropping the trade
 ATR_PERIOD = 14
 
 
+# `--candles N` pages back past the API's 1,000-bar page. The stored 2026-10-23
+# result and a 2026-11-02 rerun on 1,000 bars each gave OPPOSITE signs (z -4.04
+# vs +19), which says the effect depends on the window — so a longer window
+# spanning both is the honest question, not either short one.
+CANDLES = LIMIT
+# `--non-overlapping`: a strategy may not open while its previous trade is
+# unresolved. The default counts EVERY bar's signal, so one move is counted on
+# 10-20 consecutive bars; that inflates n and z (a 3-trade bucket reported
+# z=+39). Non-overlapping trades are what a live strategy can actually take.
+NON_OVERLAPPING = False
+
+
 def klines(symbol: str) -> List[Dict[str, Any]]:
-    url = (
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}"
-        f"&interval={INTERVAL}&limit={LIMIT}"
-    )
-    with urllib.request.urlopen(url, timeout=30) as response:
-        raw = json.load(response)
+    raw: List[Any] = []
+    end: Optional[int] = None
+    while len(raw) < CANDLES:
+        url = (
+            f"https://api.binance.com/api/v3/klines?symbol={symbol}"
+            f"&interval={INTERVAL}&limit={min(LIMIT, CANDLES - len(raw))}"
+            + (f"&endTime={end}" if end is not None else "")
+        )
+        with urllib.request.urlopen(url, timeout=30) as response:
+            page = json.load(response)
+        if not page:
+            break
+        raw = page + raw
+        end = page[0][0] - 1
     return [
         {
             "openTime": k[0], "open": float(k[1]), "high": float(k[2]),
@@ -124,18 +144,24 @@ def outcome_r(
     flatters itself. Applied to both groups identically, so it cannot create
     the difference being measured.
     """
+    resolved = resolve(bars, start, direction, stop, target)
+    return None if resolved is None else resolved[0]
+
+
+def resolve(bars, start, direction, stop, target):
+    """(R, bar index it resolved on), or None. See `outcome_r`."""
     for j in range(start + 1, min(start + MAX_FORWARD, len(bars))):
         high, low = bars[j]["high"], bars[j]["low"]
         if direction == "LONG":
             if low <= stop:
-                return -1.0
+                return -1.0, j
             if high >= target:
-                return 2.0
+                return 2.0, j
         else:
             if high >= stop:
-                return -1.0
+                return -1.0, j
             if low <= target:
-                return 2.0
+                return 2.0, j
     return None
 
 
@@ -154,12 +180,23 @@ def describe(label: str, rs: List[float]) -> str:
 
 
 def main() -> int:
+    global CANDLES, NON_OVERLAPPING
+    args = sys.argv[1:]
+    if "--candles" in args:
+        CANDLES = int(args[args.index("--candles") + 1])
+    NON_OVERLAPPING = "--non-overlapping" in args
+    print(f"candles per symbol: {CANDLES}   non-overlapping: {NON_OVERLAPPING}")
     from backend.agents.strategy_ensemble import STRATEGY_FUNCTIONS
     from backend.algorithms.entry_extension import assess, max_extension_atr
     from backend.core.risk_manager import ATR_STOP_MULTIPLIER, ATR_TARGET_MULTIPLIER
 
     kept: List[float] = []
     blocked: List[float] = []
+    # PER STRATEGY, because the pooled answer can hide a strategy for which the
+    # premise holds. `strategy_profiles.Breakout` names "already extended" as its
+    # own worst condition, and a 2026-11 forensic review asked exactly whether a
+    # pooled -4.04 z overrides that for Breakout specifically.
+    per: Dict[str, Dict[str, List[float]]] = {}
 
     for symbol in SYMBOLS:
         try:
@@ -201,13 +238,16 @@ def main() -> int:
                     entry_price=entry, stop_loss=stop, atr=a,
                 )
 
-                r = outcome_r(bars, i, direction, entry, stop, target)
-                if r is None:
+                res = resolve(bars, i, direction, stop, target)
+                if res is None:
                     i += 1
                     continue
+                r, resolved_at = res
 
                 (blocked if verdict.chasing else kept).append(r)
-                i += 1
+                per.setdefault(name, {"kept": [], "blocked": []})[
+                    "blocked" if verdict.chasing else "kept"].append(r)
+                i = (resolved_at if NON_OVERLAPPING else i) + 1
 
         print(f"  {symbol:<9} kept={len(kept):6d}  blocked={len(blocked):6d}")
 
@@ -216,6 +256,28 @@ def main() -> int:
     print(describe("every signal", kept + blocked))
     print(describe("the gate KEEPS", kept))
     print(describe("the gate BLOCKS", blocked))
+
+    def _z(a: List[float], b: List[float]) -> Optional[float]:
+        if len(a) < 2 or len(b) < 2:
+            return None
+        ma, mb = sum(a) / len(a), sum(b) / len(b)
+        sa = math.sqrt(sum((r - ma) ** 2 for r in a) / len(a)) / math.sqrt(len(a))
+        sb_ = math.sqrt(sum((r - mb) ** 2 for r in b) / len(b)) / math.sqrt(len(b))
+        den = math.sqrt(sa ** 2 + sb_ ** 2)
+        return (ma - mb) / den if den > 0 else None
+
+    print()
+    print("PER STRATEGY  (positive z = the gate removes WORSE trades for this strategy)")
+    for name in sorted(per):
+        k, b = per[name]["kept"], per[name]["blocked"]
+        mk = sum(k) / len(k) if k else float("nan")
+        mb = sum(b) / len(b) if b else float("nan")
+        z = _z(k, b)
+        print(f"  {name:<20} kept n={len(k):5d} {mk:+.4f}R   blocked n={len(b):5d} "
+              f"{mb:+.4f}R   z={'n/a' if z is None else f'{z:+.2f}'}")
+    print(f"  ({len(per)} comparisons: |z| needs ~{2.0 + 0.3 * math.log(max(1, len(per))):.1f}+ "
+          f"to survive the multiple-comparison correction)")
+    print()
 
     if kept and blocked:
         ek = sum(kept) / len(kept)

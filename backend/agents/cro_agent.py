@@ -46,6 +46,120 @@ WORST_CASE_ADVERSE_MOVE = 0.10
 STOP_SLIPPAGE_MULTIPLIER = 1.5
 
 
+HONOUR_ALLOCATION_VAR = "HONOUR_SESSION_ALLOCATION"
+
+
+def honour_session_allocation() -> bool:
+    """Does an operator's chosen allocation override the portfolio VaR cap?
+
+    THE BUG THIS FIXES, IN THE OPERATOR'S OWN WORDS: *"i choose the 100%
+    allocation ... if i start with 5$ and 10x leverage it trade with 5$ and
+    with 10x leverage so totally 50$ trading value for each trade"*. That is
+    what a broker does, and it is what the allocation control says it does.
+
+    Measured on their configuration before this existed — $5, 10x, 100%:
+
+        stop 1.0%  ->  3.98 of 5.00 deployed   (80%)
+        stop 1.3%  ->  3.06 of 5.00 deployed   (61%)
+        stop 2.5%  ->  1.59 of 5.00 deployed   (32%)
+
+    The VaR cap was the only remaining reducer after the regime leverage cap
+    and the volatility haircut were made the operator's own. It sizes to
+    `equity x VaR / adverse_move`, so at 10x it binds unless the VaR fraction
+    is 0.20-0.45 — a limit that large is not a limit, which is why raising it
+    is not the honest way to get this behaviour.
+
+    READ BY BOTH GATES, and that is the whole point of putting it here. The
+    Risk Gateway sizes and the CRO vetoes independently; a flag honoured by one
+    and not the other reproduces the documented outage exactly — 9,926 cycles,
+    0 trades, 75 GLOBAL_VAR_LIMIT events, two gates disagreeing over one
+    quantity with every trade as the loser.
+
+    IT APPLIES ONLY TO AN OPERATOR-DRIVEN SESSION. With no session nobody chose
+    an allocation, the agent is unattended, and the VaR policy is the only
+    thing sizing it. That path is untouched.
+
+    WHAT IT COSTS, STATED PLAINLY BECAUSE IT IS LARGE. A stop-out now loses
+    `leverage x stop%` of the deployed margin: at 10x and a 1.3% stop that is
+    13% of the account, and 25% at a 2.5% stop. The MANDATORY STOP (invariant
+    3) and the LIQUIDATION CAP both still apply, so the loss stays bounded and
+    the stop still fires before the venue liquidates — but the drawdown brake
+    will halt a session after one or two of them. That is the arithmetic of
+    trading a whole account at 10x, not a defect.
+
+    Read at call time, never frozen at import (the `simulation_mode` rule).
+    """
+    raw = (os.getenv(HONOUR_ALLOCATION_VAR) or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # DEFAULT ON. The operator asked for the control to mean what it says, and
+    # a control that silently delivers 61% of what was selected is the failure
+    # this codebase treats as worse than a refusal.
+    return True
+
+
+def session_is_driving() -> bool:
+    """Is an operator SESSION behind this trade, rather than the unattended path?
+
+    Asked through `trading_session` rather than carried on the TAR, because the
+    Risk Gateway already decides broker-vs-risk sizing the same way and the two
+    must agree about which mode a trade is in.
+    """
+    try:
+        from backend.services.trading_session import active_session_leverage
+
+        return active_session_leverage() is not None
+    except Exception:  # noqa: BLE001 - never let this decide by raising
+        return False
+
+
+def _portfolio_controls_note() -> str:
+    """What actually guards this approval at the PORTFOLIO level, stated truthfully.
+
+    Every approval used to end "Correlation caps and the drawdown killswitch are
+    not yet implemented and were NOT checked." That was written before
+    `ceo_agent` existed and became FALSE the day it did: the CEO tracks the
+    monthly high-water mark and enters Observation Mode on a breach, and
+    `may_open_new_position()` — re-checked by `execution_agent` immediately
+    before every open — refuses every entry while it holds. An external
+    forensic review (2026-11) read the stale sentence off six stored approvals
+    and ranked "drawdown not checked" as a confirmed risk finding. A record that
+    understates its own safeguards sends the next reader to fix a control that
+    is already working, exactly as "All endpoints open" once did.
+
+    Correlation is answered by concurrency: with one position allowed at a time
+    there is no second position to be correlated with. Above one it is NOT
+    checked, and this says so.
+    """
+    try:
+        from backend.core.system_state import snapshot
+
+        state = snapshot()
+        halted = state.get("observation_mode")
+        dd = (
+            "Drawdown killswitch: enforced by the CEO (Observation Mode) and re-checked "
+            "by the executor before the fill"
+            + (" — CURRENTLY HALTED, so this approval will not fill. " if halted
+               else "; not currently halted. ")
+        )
+    except Exception:  # noqa: BLE001 - a status line must never break an approval
+        dd = "Drawdown killswitch: state unreadable at approval time. "
+    try:
+        from backend.services.trade_scope import max_concurrent_positions
+
+        n = max_concurrent_positions()
+        corr = (
+            "Correlation: not applicable at MAX_CONCURRENT_POSITIONS=1 (no second "
+            "position to correlate with)."
+            if n <= 1 else
+            f"Correlation caps are NOT implemented and were NOT checked "
+            f"(MAX_CONCURRENT_POSITIONS={n})."
+        )
+    except Exception:  # noqa: BLE001
+        corr = "Correlation: concurrency limit unreadable; NOT checked."
+    return dd + corr
+
+
 def _adverse_move_fraction(entry: float, stop: Optional[float]):
     """How far this position can move against us, as a fraction of entry.
 
@@ -299,7 +413,18 @@ class CROAgent(BaseAgent):
         implied_var = notional * adverse_move
         var_limit = total_equity * var_fraction
 
-        if implied_var > var_limit:
+        # THE OPERATOR'S ALLOCATION IS THEIR RISK STATEMENT (broker mode).
+        #
+        # Skipped only for a trade an operator's own session is driving, and
+        # only while `HONOUR_SESSION_ALLOCATION` is on. The unattended path
+        # still has this veto, because nobody chose a size there.
+        #
+        # The gateway reads the SAME predicate and stops sizing down when it is
+        # true, so the two gates cannot disagree about one quantity — which is
+        # the failure mode that produced 9,926 cycles and 0 trades.
+        allocation_governs = honour_session_allocation() and session_is_driving()
+
+        if implied_var > var_limit and not allocation_governs:
             # THE REFUSAL SAYS WHAT WOULD FIT. A limit that only says "no" leaves
             # the operator guessing at an allocation, and that guess is what
             # produced "I chose 100% allocation but it only takes some amount":
@@ -349,7 +474,7 @@ class CROAgent(BaseAgent):
             f"implied VaR ${implied_var:.2f} ({move_basis}) within ${var_limit:.2f} "
             f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity). "
             + cost_note
-            + f"Correlation caps and the drawdown killswitch are not yet implemented and were NOT checked."
+            + _portfolio_controls_note()
         )
         logger.info(f"CRO APPROVED {tar.tar_id}")
 

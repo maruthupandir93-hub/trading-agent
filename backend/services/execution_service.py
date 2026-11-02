@@ -481,9 +481,17 @@ class ExecutionService:
             logger.warning("Could not reach the position monitor to close %s: %s", event.symbol, exc)
 
         if monitor is not None:
+            # The Supervisor's exit sentence and the REVIEW run that produced it,
+            # so the closing row says WHY the panel exited, not only that it did.
+            evidence = " ".join(
+                part for part in (
+                    (event.rationale or "").strip(),
+                    f"(review run {event.run_id})" if event.run_id else "",
+                ) if part
+            ) or None
             fill = await monitor.close_tracked(
                 event.symbol, "thesis-invalidated", price=event.entry_price,
-                tab=event.tab,
+                tab=event.tab, evidence=evidence,
             )
             closed_via_monitor = fill is not None
             if fill is None and any(

@@ -500,6 +500,17 @@ class _Tracked:
         # `stop_loss` and exists to keep the log line honest about whether a
         # given tighten came from the trail or from the break-even move.
         "trail_armed",
+        # WHY A JUDGEMENT EXIT HAPPENED, set by `close_tracked` just before the
+        # close. In-memory only: it exists between the decision and the closing
+        # row being written, which is one call.
+        #
+        # An external forensic review (2026-11) found five `thesis-invalidated`
+        # closes whose rows said only that — no opposing direction, no
+        # confidence, no run — so nobody could tell whether the panel reversed
+        # early, late or correctly. The Supervisor computes exactly that
+        # sentence ("the specialist evidence now reads LONG at 0.21 ...") and the
+        # plan carries it; it was dropped here, one hop before the record.
+        "exit_evidence",
     )
 
     def __init__(self, **kw):
@@ -1311,7 +1322,10 @@ class PositionMonitorAgent(BaseAgent):
                     """,
                     closing_row_id, datetime.datetime.utcnow(), pos.tab,
                     pos.symbol, exit_side, row_qty, exit_price, realized,
-                    "agent-close", f"closed by {reason} from entry {pos.entry_price:.8g}",
+                    "agent-close",
+                    f"closed by {reason} from entry {pos.entry_price:.8g}"
+                    + (f". Exit evidence: {pos.exit_evidence}"
+                       if getattr(pos, "exit_evidence", None) else ""),
                     # THE ROW THE LEARNING LOOP READS. `strategy_performance`
                     # selects closed trades carrying a strategy; before this the
                     # close was the only row with a pnl and the only row WITHOUT
@@ -1774,7 +1788,7 @@ class PositionMonitorAgent(BaseAgent):
 
     async def close_tracked(
         self, symbol: str, reason: str, price: Optional[float] = None,
-        tab: Optional[str] = None,
+        tab: Optional[str] = None, evidence: Optional[str] = None,
     ) -> Optional[float]:
         """Close a WATCHED position through the full close sequence. For the
         execution service's thesis-invalidated exits.
@@ -1839,7 +1853,14 @@ class PositionMonitorAgent(BaseAgent):
             return None
 
         before = pos.tar_id in self._open
+        # Recorded on the closing row and carried on POSITION_CLOSED, so the
+        # reflection — and a human — can see what the panel believed when it
+        # chose to exit. Cleared if the close fails, so a later stop-out of the
+        # same position is not mislabelled with a stale judgement.
+        pos.exit_evidence = (evidence or "").strip()[:1000] or None
         fill = await self._close(pos, float(trigger), reason)
+        if pos.tar_id in self._open:
+            pos.exit_evidence = None
         # `_close` keeps the position tracked when the fill fails, so its
         # departure from `_open` is the signal that the close completed. Reading
         # a return value would be nicer; `_close` returns None either way and is
@@ -2883,6 +2904,13 @@ class PositionMonitorAgent(BaseAgent):
                 pos, fill_price, realized, reason, fee=exit_fee, funding=funding.cost,
             )
 
+            # Feeds the same-side RE-ENTRY COOLDOWN (services/reentry_cooldown).
+            # Only a FULL close records — a partial scale-out banks profit and
+            # declares nothing wrong. Never raises.
+            from backend.services.reentry_cooldown import record_close
+
+            record_close(pos.symbol, pos.side, reason, realized)
+
             logger.info(
                 "Closed %s at %s (%s, triggered at %s): gross %+.2f, fees %.4f, "
                 "funding %+.4f (%d settlement(s)), realized %+.2f after %.0fs. "
@@ -2940,6 +2968,7 @@ class PositionMonitorAgent(BaseAgent):
                     strategy=pos.strategy,
                     run_id=pos.run_id,
                     entry_context=pos.entry_context,
+                    exit_context=getattr(pos, "exit_evidence", None),
                     # THE TAR, SEPARATELY FROM `trade_id`. Since F88 those are
                     # two different identifiers and the readers that need the
                     # TAR were quietly given the other one — see the field's

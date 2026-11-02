@@ -537,6 +537,11 @@ class SupervisorAgent(BaseAgent):
             return
 
         scope_refusal = entry_refusal(symbol, held)
+        if scope_refusal is None:
+            # Same rule as the Risk Gateway's, so neither path is the bypass.
+            from backend.services.reentry_cooldown import refusal as reentry_refusal
+
+            scope_refusal = reentry_refusal(symbol, direction)
         if scope_refusal is not None:
             await self._refuse(symbol, scope_refusal, debate)
             return

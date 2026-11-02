@@ -1,0 +1,32 @@
+candles per symbol: 6000   non-overlapping: True
+  SOLUSDT   kept=   671  blocked=   518
+  XRPUSDT   kept=  1424  blocked=  1001
+  DOGEUSDT  kept=  2118  blocked=  1514
+  ADAUSDT   kept=  2867  blocked=  2047
+  ETHUSDT   kept=  3533  blocked=  2590
+  BNBUSDT   kept=  4209  blocked=  3200
+
+Limit: 3.0 ATR of travel before an entry counts as chasing
+every signal           n=  7409  expectancy=-0.0051R +/-0.0322  win=33.2%
+the gate KEEPS         n=  4209  expectancy=+0.0535R +/-0.0433  win=35.1%
+the gate BLOCKS        n=  3200  expectancy=-0.0822R +/-0.0479  win=30.6%
+
+PER STRATEGY  (positive z = the gate removes WORSE trades for this strategy)
+  Arbitrage            kept n=  406 +0.0419R   blocked n=    6 -1.0000R   z=+14.70
+  Breakout             kept n=   60 +0.1000R   blocked n=  795 -0.0038R   z=+0.54
+  Grid                 kept n=  808 +0.1027R   blocked n=   19 -0.3684R   z=+1.65
+  MeanReversion        kept n=  780 +0.0462R   blocked n=    8 -0.6250R   z=+1.89
+  Momentum             kept n=  271 +0.0406R   blocked n=  520 -0.1058R   z=+1.39
+  Range                kept n=  815 +0.0344R   blocked n=    9 -0.6667R   z=+2.20
+  Scalping             kept n=  452 -0.0177R   blocked n=  235 -0.2213R   z=+1.88
+  Swing                kept n=  196 +0.1020R   blocked n=  682 -0.1026R   z=+1.77
+  Trend                kept n=  174 +0.0862R   blocked n=  757 -0.0608R   z=+1.22
+  VWAP                 kept n=  193 +0.1036R   blocked n=    0 +nanR   z=n/a
+  VolatilityBreakout   kept n=   54 -0.0556R   blocked n=  169 -0.0769R   z=+0.10
+  (11 comparisons: |z| needs ~2.7+ to survive the multiple-comparison correction)
+
+
+kept vs blocked : gap=+0.1356R   z=+4.12
+share removed   : 43.2%
+smallest gap this sample could detect: 0.0509R
+

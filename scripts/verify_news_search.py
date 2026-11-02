@@ -72,7 +72,9 @@ async def main() -> int:
             async with httpx.AsyncClient(timeout=20) as client:
                 raw = await client.get(
                     ns.FREENEWS_URL,
-                    params={"language": "en", "q": "bitcoin"},
+                    # No `q`: the vendor removed it (HTTP 400). The adapter
+                    # filters a query client-side instead.
+                    params={"language": "en"},
                     headers={"x-api-key": key},
                 )
             print(f"      {DIM}HTTP {raw.status_code} from {ns.FREENEWS_URL}{RESET}")
@@ -88,7 +90,9 @@ async def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"      {DIM}raw probe failed: {type(exc).__name__}: {exc}{RESET}")
 
-        items = await ns.fetch_freenews("bitcoin", limit=5)
+        # Unqueried: this is the exact call the live trading feed makes
+        # (`microstructure_feed.fetch_headlines`).
+        items = await ns.fetch_freenews(limit=5)
         if items is None:
             bad("the adapter could not read it — see the raw probe above")
             failures += 1

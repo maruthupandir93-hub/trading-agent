@@ -75,11 +75,34 @@ the same ledger that shows the range and mean-reversion strategies losing, and
 that showed the HTF gate removing a genuinely losing half, shows late entries
 outperforming early ones by a margin four standard errors wide.
 
-SO THE GATE DEFAULTS **OFF**, and that is the finding, not a failure to build
-it. The measurement ran against the author's hypothesis, which is the only
-direction this kind of result is ever worth trusting — `core/evidence.py`
-exists because a throwaway script once produced three "findings" that all ran
-the way the author was hoping.
+THAT MEASUREMENT WAS OVERTURNED ON 2026-11-02, AND THE GATE NOW DEFAULTS **ON**.
+
+The 17,157 "trades" above counted every bar's signal, so one move was counted
+on 10-20 consecutive bars. That inflates n and z — the same rerun's per-
+strategy table put z=+39 on a three-trade bucket — and on only 1,000 candles
+(~10 days) it measured one window, not the effect. Re-run on the same six
+instruments with `--non-overlapping` (a strategy may not re-enter while its
+previous trade is unresolved, which is all a live strategy can do):
+
+    1,000 candles   kept +0.1769R (752)   blocked -0.2794R (587)   z = +6.07
+    6,000 candles   kept +0.0535R +/-0.0433 (4,209)
+    (~62 days)      blocked -0.0822R +/-0.0479 (3,200)             z = +4.12
+                    gap 0.1356R vs 0.0509R smallest detectable
+
+The gate now removes the WORSE half, every strategy with a usable sample
+points the same way (none individually past the multiple-comparison bar), and
+the KEPT set's interval excludes zero — the first filter in this project whose
+survivors show an edge distinguishable from nothing. The 1,000-candle,
+overlapping rerun on the same day gave z = +19, the opposite sign from the
+stored -4.04, which is itself the argument that the short overlapping window
+was measuring a regime rather than the gate.
+
+It also matches the live ledger that prompted the re-check (docs/DIAGNOSIS.md):
+two of five losing XRP shorts were entered 8.30 and 6.57 ATR into the move.
+
+COST, STATED: it refuses ~43% of signals, so the agent trades less. That is
+the intended effect of a filter whose refused half loses money.
+`REQUIRE_ENTRY_PROXIMITY=false` turns it off, read at call time.
 
 WHAT STAYS ON IS THE MEASUREMENT. The extension is computed and written into
 every entry-context snapshot regardless, because turning a gate off must not
@@ -126,11 +149,9 @@ EXTENSION_VAR = "MAX_ENTRY_EXTENSION_ATR"
 # The gate, env-readable at CALL time (the `simulation_mode` rule: an operator
 # who turns this on expects the next decision to see it, not the next restart).
 #
-# DEFAULT **OFF**, unlike the HTF gate, and for the opposite reason: the HTF
-# gate was measured to remove a losing half and this one was measured to remove
-# the WINNING half (-0.0915R, z = -4.04, 17,157 trades). See the module
-# docstring. Shipping it on would be acting on a plausible story against the
-# only evidence available.
+# DEFAULT **ON** since 2026-11-02: the non-overlapping 62-day re-measurement
+# (z = +4.12, kept set +0.054R) overturned the earlier overlapping 10-day one.
+# See the module docstring for both, and why the first was misleading.
 GATE_VAR = "REQUIRE_ENTRY_PROXIMITY"
 
 
@@ -149,14 +170,14 @@ def max_extension_atr() -> float:
 
 
 def gate_enabled() -> bool:
-    """Default OFF — the measurement overturned the hypothesis.
+    """Default ON — see the module docstring's 2026-11-02 re-measurement.
 
-    The extension is still MEASURED and recorded on every entry; only the
-    refusal is off. `REQUIRE_ENTRY_PROXIMITY=true` turns it on for anyone whose
-    own ledger disagrees with the 17,157-trade replay in the module docstring.
+    Only an explicit off value disables it; anything else (including unset or a
+    typo) leaves the refusal on, because this gate only ever REMOVES entries and
+    a config typo must not silently re-admit the losing half.
     """
     raw = (os.getenv(GATE_VAR) or "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return raw not in ("0", "false", "no", "off")
 
 
 @dataclass(frozen=True)

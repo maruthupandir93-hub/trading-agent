@@ -741,6 +741,18 @@ def check_daily_loss(
         pass
 
     if loss_pct > effective_limit:
+        # RUN_UNTIL_TARGET: measured and stated, not enforced (services/loss_brakes).
+        from backend.services.loss_brakes import note as _brake_note, run_until_target
+
+        if run_until_target():
+            return RiskCheck(
+                status="warn",
+                detail=_brake_note(
+                    "Daily loss limit",
+                    f"stopped entries for today (realised ${-realised:,.2f}, "
+                    f"{loss_pct:.2f}% of equity, over the {effective_limit:.1f}% limit)",
+                ),
+            )
         scaled = (
             "" if effective_limit == MAX_DAILY_LOSS_PCT
             else f" ({MAX_DAILY_LOSS_PCT}% x {leverage:g}x leverage)"

@@ -783,8 +783,18 @@ async def _run_session(session_id: str) -> None:
                 _finish(session, "reached", f"equity {equity:.2f} reached the {session.target_equity:.2f} target")
                 break
             if equity <= session.floor_equity:
-                _finish(session, "floored", f"equity {equity:.2f} fell to the {session.floor_equity:.2f} floor")
-                break
+                from backend.services.loss_brakes import note as _brake_note, run_until_target
+
+                if run_until_target():
+                    # Measured and noted (throttled), never acted on: the session
+                    # keeps working toward its target (services/loss_brakes).
+                    _note_throttled(session, "floor", _brake_note(
+                        "Session floor",
+                        f"ended this session (equity {equity:.2f} is at or below the "
+                        f"{session.floor_equity:.2f} floor)"))
+                else:
+                    _finish(session, "floored", f"equity {equity:.2f} fell to the {session.floor_equity:.2f} floor")
+                    break
 
             # -- operator gates ----------------------------------------------
             if is_emergency_stopped():
@@ -815,6 +825,20 @@ async def _run_session(session_id: str) -> None:
             # is every 12 seconds and an unthrottled line pushes every real
             # decision out of the 50-entry log.
             if is_in_observation_mode():
+                # A halt LATCHED BEFORE RUN_UNTIL_TARGET was turned on would
+                # otherwise hold forever. Observation Mode has exactly one writer
+                # — the CEO's drawdown killswitch (asserted in
+                # tests/test_run_until_target.py) — so releasing it releases only
+                # a loss brake. Pause and emergency stop are separate flags and
+                # are never touched here.
+                from backend.core.system_state import exit_observation_mode
+                from backend.services.loss_brakes import run_until_target
+
+                if run_until_target():
+                    exit_observation_mode(
+                        "RUN_UNTIL_TARGET is on: the drawdown halt is not enforced")
+                    _note(session, "released a latched drawdown halt (RUN_UNTIL_TARGET is on).")
+                    continue
                 _note_throttled(
                     session,
                     "observation",
@@ -1444,7 +1468,15 @@ async def start_session(
     # has not been chosen. So the REAL book requires a measured SAFE verdict and
     # the paper book keeps the permissive rule.
     _needs_live_bar = tab == "real"
-    if _needs_live_bar and not _coherence.live_ok:
+    from backend.services.loss_brakes import run_until_target as _run_until_target
+
+    if _run_until_target() and not (_coherence.ok and (_coherence.live_ok or not _needs_live_bar)):
+        # The check exists to stop a configuration that HALTS ITSELF after a few
+        # losses. With RUN_UNTIL_TARGET on nothing halts on losses, so refusing
+        # would block the very choice the operator made. It is logged, not raised.
+        logger.warning("Risk coherence (not enforced, RUN_UNTIL_TARGET on): %s",
+                       _coherence.reason)
+    elif _needs_live_bar and not _coherence.live_ok:
         raise ValueError(
             f"A REAL-money session requires a MEASURED, coherent risk configuration "
             f"(verdict {_coherence.verdict}). {_coherence.reason}"

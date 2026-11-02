@@ -25,6 +25,56 @@ import pytest
 from backend.services import trading_session as sessions
 
 
+class _FakeVenue:
+    def __init__(self, balance=None):
+        self.balance = balance
+
+    async def free_usdt(self):
+        return self.balance
+
+
+@pytest.fixture(autouse=True)
+def no_real_venue(monkeypatch):
+    """THIS FILE WAS MAKING REAL AUTHENTICATED CALLS TO BINANCE.
+
+    `real_account_balance` was changed to ask the per-venue layer FIRST (the
+    Bybit-balance fix) and fall back to `exchange_client`. These tests mock only
+    `exchange_client`, so every one of them built a real ccxt client from `.env`
+    keys and sent a signed balance request. Alone it returned; in the full suite
+    it hung under the network guard (which patches `socket.connect`, not DNS or
+    aiohttp's resolver) and the run never printed a summary — the "suite dies at
+    ~80%" symptom. Same lesson as `isolate_llm_configuration`: a test that reads
+    the operator's real config is testing the operator's config.
+
+    The venue answers None here, which is exactly the fallback path the tests
+    below were written to exercise. `_real_balance_cache` is cleared so one test's
+    cached figure cannot answer the next.
+    """
+    import backend.services.venue as venue
+
+    fake = _FakeVenue(None)
+    monkeypatch.setattr(venue, "get_venue", lambda: fake)
+    monkeypatch.setattr(sessions, "_real_balance_cache",
+                        {"value": None, "at": 0.0, "error": None})
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_the_VENUE_balance_wins_over_the_fallback_client(no_real_venue, monkeypatch):
+    """The per-venue read is authoritative; the Binance-only client is only a
+    fallback. On a Bybit deployment the fallback would report a different
+    account altogether."""
+    import backend.services.exchange_client as ec
+
+    no_real_venue.balance = 42.0
+
+    def _must_not_be_used():
+        raise AssertionError("the fallback client was used although the venue answered")
+
+    monkeypatch.setattr(ec, "get_exchange_client", _must_not_be_used)
+    assert await sessions.real_account_balance(force=True) == pytest.approx(42.0)
+
+
 @pytest.fixture
 def paper_book(monkeypatch):
     """An in-memory paper book, so a test never writes the operator's real one."""

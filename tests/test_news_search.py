@@ -244,3 +244,55 @@ def test_the_live_verification_is_a_SCRIPT_not_a_test():
     # It must print the RAW shape, so a renamed field is diagnosable rather
     # than invisible.
     assert "top-level keys" in text
+
+
+# ---------------------------------------------------------------------------
+# The vendor removed keyword search (verified live 2026-11-02)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_q_is_never_sent_because_the_vendor_removed_it(monkeypatch):
+    """`?q=` now answers HTTP 400 "Search using the 'q' field has been
+    removed." A 400 is None ("could not ask"), so sending it disabled the
+    source for every caller that passed a query — while the unqueried live
+    feed kept working, which is why the trading path never noticed."""
+    from backend.services import news_search as ns
+    from backend.services import upstream
+
+    seen = {}
+
+    async def _answered(url, **kwargs):
+        seen["url"] = url
+        return upstream.UpstreamResult(data={"data": []}, status=200)
+
+    monkeypatch.setenv("freenewsapi", "x")
+    monkeypatch.setattr(upstream, "fetch_json", _answered)
+
+    assert await ns.fetch_freenews("bitcoin") == []
+    assert "q=" not in seen["url"] and "in_body" not in seen["url"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_is_applied_client_side_as_a_title_filter(monkeypatch):
+    """General news comes back unfiltered; a query keeps only matching titles,
+    and "nothing matched" stays [] — the answer a real search would give."""
+    from backend.services import news_search as ns
+    from backend.services import upstream
+
+    payload = {"data": [
+        {"title": "College hockey forward of the week"},
+        {"title": "Bitcoin ETF inflows rise", "publisher": "Wire"},
+        {"title": "bitcoin miners sell"},
+    ]}
+
+    async def _answered(url, **kwargs):
+        return upstream.UpstreamResult(data=payload, status=200)
+
+    monkeypatch.setenv("freenewsapi", "x")
+    monkeypatch.setattr(upstream, "fetch_json", _answered)
+
+    got = await ns.fetch_freenews("Bitcoin")
+    assert [i["title"] for i in got] == [
+        "Bitcoin ETF inflows rise", "bitcoin miners sell"]
+    assert await ns.fetch_freenews("solana") == []
+    assert len(await ns.fetch_freenews()) == 3

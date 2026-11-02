@@ -312,6 +312,19 @@ def isolate_write_auth(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_loss_brakes(monkeypatch):
+    """The suite runs WITH the loss brakes, whatever the operator chose.
+
+    The fourth time this lesson was learned the same way: writing the operator's
+    `RUN_UNTIL_TARGET=true` into `.env` turned nine tests of the daily-loss
+    limit, the drawdown killswitch and the re-entry cooldown red at once,
+    because they inherited the operator's switch and saw every brake off.
+    `tests/test_run_until_target.py` sets it explicitly where it is the subject.
+    """
+    monkeypatch.delenv("RUN_UNTIL_TARGET", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_news_search(monkeypatch):
     """The suite must not read the operator's freenewsapi / tinyfish keys.
 
@@ -399,11 +412,16 @@ def isolate_backend_state(monkeypatch):
     from backend.agents.execution_agent import reset_execution_agent
     from backend.agents.position_monitor import reset_position_monitor
 
+    from backend.services.reentry_cooldown import reset as reset_reentry_cooldown
+
+    # Module state: one test's losing close must not refuse the next test's entry.
     reset_position_monitor()
     reset_execution_agent()
+    reset_reentry_cooldown()
     yield
     reset_position_monitor()
     reset_execution_agent()
+    reset_reentry_cooldown()
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +470,24 @@ def isolate_agent_singletons():
         # evicting every real decision), so a second test on the same symbol
         # saw NO refusal recorded and failed, while passing when run alone.
         # Cleared here for the same reason the singletons above are.
+        # SESSIONS LEAKED BETWEEN TESTS, and that was the "three unknown
+        # failures" at ~76% of the suite. `trading_session._sessions` is a
+        # module dict; a test that started a session left it ACTIVE, so every
+        # later `risk_gateway.gate()` call saw `active_session_leverage()` as
+        # non-None and switched to BROKER sizing. Three `test_risk_gateway`
+        # tests that assert the no-session RISK path (Kelly / fixed-fractional
+        # notes, 1x leverage) then failed in the full run and passed alone.
+        try:
+            import backend.services.trading_session as _ts
+
+            _ts._real_balance_cache.update({"value": None, "at": 0.0, "error": None})
+        except Exception:  # noqa: BLE001
+            pass
         for module_path, attr in (
             ("backend.agents.supervisor_agent", "_scope_refusal_logged"),
             ("backend.services.trading_session", "_throttled_notes"),
+            ("backend.services.trading_session", "_sessions"),
+            ("backend.services.trading_session", "_tasks"),
         ):
             try:
                 import importlib

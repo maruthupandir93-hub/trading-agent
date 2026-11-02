@@ -327,6 +327,10 @@ class ReflectionAgent(BaseAgent):
             "entry_context": getattr(event, "entry_context", None),
             "strategy": getattr(event, "strategy", None),
             "run_id": getattr(event, "run_id", None),
+            # WHAT THE PANEL BELIEVED AT A JUDGEMENT EXIT (direction, confidence,
+            # review run). Without it a thesis-invalidated loss cannot be told
+            # apart as an early, late or correct reversal.
+            "exit_context": getattr(event, "exit_context", None),
         }
 
         # The GRAPH is called directly here rather than through
@@ -365,6 +369,8 @@ class ReflectionAgent(BaseAgent):
         await self._persist_reflection(
             event.trade_id, event.symbol, note,
             lesson_source=lesson_source, lesson_detail=lesson_detail,
+            entry_context_used=receipt.get("entry_context"),
+            exit_context_used=_exit_context_line(event),
         )
 
         await self.publish(
@@ -387,8 +393,17 @@ class ReflectionAgent(BaseAgent):
         content: str,
         lesson_source: Optional[str] = None,
         lesson_detail: Optional[str] = None,
+        entry_context_used: Optional[str] = None,
+        exit_context_used: Optional[str] = None,
     ):
-        """Write the reflection, INCLUDING who wrote the lesson.
+        """Write the reflection, INCLUDING who wrote the lesson AND what it saw.
+
+        `entry_context_used` was never written and `exit_context_used` was the
+        literal "Auto-generated reflection" on every row, so a forensic review
+        (2026-11) could not establish that ANY reflection had analysed its
+        trade's entry snapshot — although the receipt carried it the whole time.
+        They now record what the reflection was actually given. A missing
+        entry snapshot stays NULL (invariant 6), never a placeholder.
 
         `lesson_source` distinguishes a model-written lesson from one of the three
         deterministic templates. The Evaluation layer and the learning dashboard
@@ -409,18 +424,37 @@ class ReflectionAgent(BaseAgent):
                     """
                     INSERT INTO reflections
                         (trade_id, ts, symbol, content, exit_context_used,
-                         lesson_source, lesson_detail)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         lesson_source, lesson_detail, entry_context_used)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (trade_id) DO UPDATE SET
                         content = $4,
+                        exit_context_used = $5,
                         lesson_source = $6,
-                        lesson_detail = $7
+                        lesson_detail = $7,
+                        entry_context_used = $8
                     """,
                     trade_id, datetime.datetime.utcnow(), symbol, content,
-                    "Auto-generated reflection", lesson_source, lesson_detail,
+                    # NOT NULL in the schema, so a mechanical exit still records
+                    # its reason rather than nothing.
+                    exit_context_used or "exit context not recorded",
+                    lesson_source, lesson_detail, entry_context_used,
                 )
         except Exception as e:
             logger.error(f"Failed to persist reflection for {trade_id}: {e}")
+
+def _exit_context_line(event: PositionClosedEvent) -> str:
+    """The exit as the reflection saw it: reason, prices, hold, and — for a
+    judgement exit — the panel's own words. Built from the event only."""
+    held = getattr(event, "held_seconds", None)
+    parts = [
+        f"{event.exit_reason} at {event.exit_price:.8g} from entry {event.entry_price:.8g}",
+        f"held {held / 60:.1f} min" if isinstance(held, (int, float)) else "hold time unknown",
+    ]
+    evidence = getattr(event, "exit_context", None)
+    if evidence:
+        parts.append(f"panel at exit: {evidence}")
+    return "; ".join(parts)
+
 
 def get_reflection_agent() -> ReflectionAgent:
     return ReflectionAgent()

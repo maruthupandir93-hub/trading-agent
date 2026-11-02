@@ -131,6 +131,12 @@ const SYMBOLS = [
   'LINK/USDT', 'LTC/USDT', 'AVAX/USDT', 'BNB/USDT', 'ETH/USDT',
 ] as const;
 
+// The coins sharing the venue's $5 minimum order, so a small book can open
+// any of them. See the `alsoScan` state below for why these are pre-selected.
+export const DEFAULT_ALSO_SCAN: string[] = [
+  'SOL/USDT', 'DOGE/USDT', 'ADA/USDT', 'SUI/USDT', 'LINK/USDT', 'LTC/USDT',
+];
+
 const STATUS_BADGE: Record<string, string> = {
   running: 'RUNNING',
   reached: 'PASS',
@@ -154,8 +160,16 @@ export function AutonomousSessionPanel() {
   // read 0.00-0.12 against a 0.60 floor. More instruments is the only way to
   // get more trades without lowering the bar that made the good ones good.
   //
-  // Empty = the old single-coin behaviour, exactly.
-  const [alsoScan, setAlsoScan] = useState<string[]>([]);
+  // PRE-SELECTED since 2026-11-02. Empty was the default, so a session the
+  // operator did not customise scanned ONE coin — every one of the six trades
+  // in docs/DIAGNOSIS.md was XRP, and the agent sat flat whenever XRP did.
+  // The rotation is cost-neutral (one graph run per interval either way), so
+  // the only thing an empty default bought was fewer chances to trade.
+  //
+  // Only the $5-minimum coins: AVAX ($10.17), BNB ($7.39) and ETH ($20) can be
+  // refused at a small book, and `start_session` refuses the WHOLE session
+  // when any rotated coin cannot clear its minimum. Untick any to drop it.
+  const [alsoScan, setAlsoScan] = useState<string[]>(DEFAULT_ALSO_SCAN);
   const [leverage, setLeverage] = useState(2);
   const [startAmount, setStartAmount] = useState('');
   const [target, setTarget] = useState('');
@@ -258,7 +272,11 @@ export function AutonomousSessionPanel() {
           capitalFraction: capitalPct / 100,
           // Only sent when at least one extra coin is ticked, so the request is
           // byte-identical to the old one for a single-coin session.
-          ...(alsoScan.length > 0 ? { symbols: alsoScan } : {}),
+          // The primary coin is excluded: it is already the session's symbol,
+          // and the chips can hold it after the primary is changed.
+          ...(alsoScan.filter((s) => s !== symbol).length > 0
+            ? { symbols: alsoScan.filter((s) => s !== symbol) }
+            : {}),
           // Only sent when the operator actually chose one, and never on the real
           // book — the backend rejects it there rather than trusting this check
           // alone.
@@ -546,9 +564,9 @@ export function AutonomousSessionPanel() {
               })}
             </div>
             <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              {alsoScan.length === 0
+              {alsoScan.filter((s) => s !== symbol).length === 0
                 ? `Scanning ${symbol.replace('/USDT', '')} only. A single coin is flat most of the time.`
-                : `Rotating over ${alsoScan.length + 1} coins — one graph run per interval, pointed at each in turn, so this costs no more than one coin. Still one position at a time.`}
+                : `Rotating over ${alsoScan.filter((s) => s !== symbol).length + 1} coins — one graph run per interval, pointed at each in turn, so this costs no more than one coin. Still one position at a time.`}
             </div>
           </div>
 

@@ -311,6 +311,18 @@ class CEOAgent(BaseAgent):
                 f"of ${hwm:.2f}, exceeding the {max_drawdown_fraction() * 100:.0f}% "
                 f"drawdown limit."
             )
+            # RUN_UNTIL_TARGET (services/loss_brakes): the breach is MEASURED and
+            # recorded, and the system is NOT halted. An existing halt is left as
+            # it is — clearing one is the operator's action, not this loop's.
+            from backend.services.loss_brakes import note as _brake_note, run_until_target
+
+            if run_until_target():
+                msg = _brake_note("Drawdown killswitch",
+                                  f"halted new entries ({reason.rstrip('.')})")
+                logger.warning(msg)
+                self.record_decision("halt-skipped", msg, evidence, acted=False)
+                return {"evaluated": True, "halted": False, "haltSkipped": True,
+                        "reason": msg, **evidence}
             already = is_in_observation_mode()
             enter_observation_mode(reason)
 

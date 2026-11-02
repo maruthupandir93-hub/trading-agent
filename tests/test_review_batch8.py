@@ -107,7 +107,7 @@ def test_the_limit_is_read_at_call_time(monkeypatch):
     assert max_extension_atr() == 3.0
 
 
-def test_the_gate_defaults_OFF_because_the_measurement_overturned_it(monkeypatch):
+def test_the_gate_defaults_ON_since_the_non_overlapping_remeasurement(monkeypatch):
     """THE HYPOTHESIS WAS MEASURED AND IT WAS WRONG.
 
     The review's 6C and this system's own Breakout profile both say a late
@@ -128,11 +128,14 @@ def test_the_gate_defaults_OFF_because_the_measurement_overturned_it(monkeypatch
     """
     from backend.algorithms.entry_extension import gate_enabled
 
+    # OVERTURNED 2026-11-02: the non-overlapping 62-day re-measurement found the
+    # gate removes the WORSE half (z = +4.12). Default is now ON; only an
+    # explicit off value disables it.
     monkeypatch.delenv("REQUIRE_ENTRY_PROXIMITY", raising=False)
-    assert gate_enabled() is False, (
-        "shipping this on would act on a plausible story against the only "
-        "evidence available"
-    )
+    assert gate_enabled() is True
+    for off in ("false", "0", "off", "no"):
+        monkeypatch.setenv("REQUIRE_ENTRY_PROXIMITY", off)
+        assert gate_enabled() is False, off
     monkeypatch.setenv("REQUIRE_ENTRY_PROXIMITY", "true")
     assert gate_enabled() is True
 

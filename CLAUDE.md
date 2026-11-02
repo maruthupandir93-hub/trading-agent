@@ -3045,6 +3045,25 @@ a model's state is a property of the ACCOUNT AND THE DATE, never of the name,
 and the provider fails closed, so a dead model looks exactly like a quiet
 degradation. **Probe before trusting a config that names one.**
 
+**RE-MEASURED 2026-11-02 — BOTH OF THE ABOVE ARE NOW DEAD.**
+`nvidia/nemotron-3-super-120b-a12b` returns HTTP 404 `Function '<uuid>': Not
+found for account`, and `openai/gpt-oss-20b` accepts and never answers (60s
+read timeout). Every LLM node — narrative, consultation, reflection — was on
+its canned fallback. A concurrent probe of all 55 chat-capable catalog entries,
+then three realistic prompts each for the survivors:
+
+    ALIVE   nvidia/nemotron-3-ultra-550b-a55b    11-18s on a real prompt  -> LLM_MODEL / NARRATIVE / REASONING
+    ALIVE   nvidia/nemotron-3.5-bolt-e4b         1.3-2.0s                 -> LLM_MODEL_MECHANICAL
+    ALIVE   google/diffusiongemma-26b-a4b-it     2-5s                     -> LLM_CONSULT_MODEL_NVIDIA
+    ALIVE   nvidia/nemotron-3.5-lightning-30b    10-17s  (spare)
+    ALIVE   poolside/laguna-xs-2.1               1.5-2.6s (spare; a code model)
+    "OK"    mistralai/mistral-large-4-1t-a52b    answers "say OK", TIMES OUT (90s) on every real prompt
+
+The consultation is a GEMMA model so it stays a different family from the
+Nemotron reasoning tier. Note the mistral-large row: a liveness probe that asks
+for one word is not enough — probe with a realistic prompt before trusting one.
+**Apply the same `.env` change on the Oracle backend.**
+
 `GET /api/monitoring`'s `llmHealth` is the standing version of that probe, and
 it now flags BOTH shapes of death — the 410/404 that gpt-oss-120b returned, and
 the model that accepts a request and never answers, which is what cost 300s a
@@ -3574,6 +3593,76 @@ nine-specialist panel, which needs an order book, a tape and news and cannot be
 replayed offline. It says the premise is wrong on what can be measured; it does
 not license the opposite gate.
 
+**OVERTURNED 2026-11-02 — THE GATE NOW DEFAULTS ON.** The 17,157 above counted
+EVERY BAR's signal, so one move was counted on 10-20 consecutive bars (the
+same rerun put z=+39 on a three-trade bucket), over one 10-day window. Re-run
+with `--non-overlapping --candles 6000` (~62 days, a strategy may not re-enter
+while its last trade is unresolved):
+
+    kept    +0.0535R +/-0.0433   4,209     <- interval EXCLUDES zero
+    blocked -0.0822R +/-0.0479   3,200     z = +4.12, gap 0.136R vs 0.051R detectable
+
+The gate removes the WORSE half, and its survivors are the first filtered set
+in this project with an edge distinguishable from nothing. A 1,000-candle
+overlapping rerun the same day gave z=+19 — the opposite sign from -4.04 —
+which is the evidence that the short overlapping window measured a regime.
+Stored in `backtests/2026-11-02/`. Cost: ~43% fewer entries.
+`REQUIRE_ENTRY_PROXIMITY=false` turns it off. **Measure non-overlapping trades
+over a long window before trusting any z in this file.**
+
+### The 2026-11 forensic review of six XRP shorts — what was true
+
+`docs/DIAGNOSIS.md` (another agent, read-only). Every finding was checked
+against the code, and against real Binance candles where only data could
+decide. `tests/test_diagnosis_2026_11.py` pins the outcome.
+
+* **"Five thesis-invalidated exits caused the losses" — FALSE.** Replayed with
+  the live stop rule (2.5x 15m ATR, ending before entry; reconstruction matched
+  the report's MFE/MAE within ~0.1-0.2R): held to stop/target the five would
+  have lost **-2.90R** against the **-2.37R** the exits took — three would have
+  hit the full stop. The exit was PROTECTING the account. `MIN_CONFIDENCE_TO_EXIT`
+  is deliberately unchanged; the losses were ENTRIES (XRP rose 1.21 -> 1.26
+  while the agent shorted it five times on a bearish 1h/4h read).
+* **11-second same-side re-entry — TRUE.** A SHORT closed because the panel read
+  LONG; another SHORT opened 11s later. `services/reentry_cooldown` refuses the
+  SAME side of the SAME symbol for `REENTRY_COOLDOWN_S` (1800) after a loss or
+  thesis exit. Opposite side, other coins and exits are untouched. Consulted by
+  the gateway AND the event path. In-memory; a restart clears it.
+* **"Drawdown killswitch not implemented and NOT checked" — a FALSE SENTENCE IN
+  EVERY APPROVAL.** `ceo_agent` enforces it via Observation Mode and
+  `execution_agent` re-checks `may_open_new_position()` before every fill. The
+  stale string was written before the CEO existed and the reviewer, reasonably,
+  believed it. `_portfolio_controls_note()` now states the live state, and admits
+  correlation is unchecked whenever `MAX_CONCURRENT_POSITIONS > 1`.
+* **Exit evidence not linked — TRUE.** The Supervisor's sentence ("evidence now
+  reads LONG at 0.21") was on the close plan and dropped at `close_tracked`. It
+  now reaches the closing row's `note`, `PositionClosedEvent.exit_context`
+  (declared) and the reflection prompt.
+* **`reflections.entry_context_used` always NULL — TRUE**, and
+  `exit_context_used` was the literal "Auto-generated reflection". Both now
+  record what the reflection was given.
+* **Reflection model 404 — TRUE**, fixed by the 2026-11-02 model census above.
+* **12% VaR at 10x — TRUE, and the OPERATOR'S configuration**, not a code
+  defect. Not changed.
+
+### RUN_UNTIL_TARGET — the operator chose that losses never stop the agent
+
+`services/loss_brakes`. The operator (2026-11-02): *"i don't need any stop after
+loss i need it to run until the target amount is reach"*. With
+`RUN_UNTIL_TARGET=true` (in their `.env`; **code default is OFF**) the five
+loss brakes MEASURE and LOG but do not act: the session floor, the CEO drawdown
+killswitch (a halt latched earlier is released by the session loop — safe only
+because the CEO is Observation Mode's SOLE writer, which a test asserts), the
+daily loss limit, the risk-coherence refusal at session start, and the re-entry
+cooldown. **Not touched:** the per-trade stop-loss (invariant 3), pause,
+emergency stop, the leverage ceiling, exits. Do not extend the switch to any of
+those. `tests/conftest.py::isolate_loss_brakes` pins it off for the suite —
+writing it into `.env` turned nine brake tests red, the isolation lesson again.
+
+The session panel now PRE-SELECTS the six other $5-minimum coins for rotation
+(`DEFAULT_ALSO_SCAN`). The empty default was why every trade in
+docs/DIAGNOSIS.md was XRP; the rotation is cost-neutral.
+
 ### The two rows of the review's measurement table that had nothing behind them
 
 Section 6 lists six things the agent should measure. Four already existed:
@@ -3800,7 +3889,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2523 tests, must all pass
+.venv/Scripts/python.exe -m pytest -q   # backend; 2597 passed + 2 skipped, must all pass (~5.5 min)
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

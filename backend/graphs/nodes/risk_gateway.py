@@ -136,6 +136,11 @@ from backend.services.fees import taker_rate
 from backend.agents.cro_agent import (
     _adverse_move_fraction as cro_adverse_move,
     max_portfolio_var_fraction,
+    # ONE PREDICATE, SHARED. The CRO vetoes on VaR independently, so a flag
+    # read by one gate and not the other is two gates disagreeing over one
+    # quantity — 9,926 cycles and 0 trades, measured.
+    HONOUR_ALLOCATION_VAR,
+    honour_session_allocation,
 )
 
 # Named here so the refusal text and the variable cannot drift apart.
@@ -467,6 +472,27 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                 },
             )
         }
+
+    # ---- SAME-SIDE RE-ENTRY COOLDOWN --------------------------------------
+    #
+    # Measured: a SHORT closed thesis-invalidated (panel read LONG) and another
+    # SHORT opened on the same coin ELEVEN SECONDS later (panel read SHORT). A
+    # panel that reverses in eleven seconds is reporting noise; re-entering the
+    # side just declared wrong pays the round trip for it. Same reasoning and
+    # placement as the instrument gate: after EXIT (invariant 4), and not
+    # reachable by making the trade smaller. Shared with the event path.
+    if thesis is not None and getattr(thesis, "direction", None):
+        from backend.services.reentry_cooldown import refusal as reentry_refusal
+
+        cooldown = reentry_refusal(symbol, thesis.direction)
+        if cooldown is not None:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[cooldown],
+                    checks={"ReentryCooldown": {"status": "reject", "detail": cooldown}},
+                )
+            }
 
     # ---- RANKING WELL IS NOT HAVING BEEN SHOWN TO MAKE MONEY --------------
     #
@@ -1199,7 +1225,39 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
         max_notional = (
             var_budget * VAR_HEADROOM / adverse_move if adverse_move > 0 else notional
         )
-        if notional > max_notional > 0:
+        # THE ALLOCATION GOVERNS A SESSION TRADE (the operator's report: "i
+        # choose 100% allocation ... but it only takes some amount").
+        #
+        # Measured on $5 at 10x before this: a 1.3% stop deployed 3.06 of 5.00.
+        # The VaR cap was the last reducer standing after the regime leverage
+        # cap and the volatility haircut became the operator's own.
+        #
+        # The CRO reads the SAME predicate, so skipping here cannot hand it a
+        # plan it is guaranteed to veto — the two-gates-disagree outage this
+        # block's own comment documents.
+        #
+        # THE CAP IS STILL COMPUTED AND REPORTED when it is skipped, because
+        # turning a reduction off must not also stop recording what it would
+        # have done — the arrangement REQUIRE_HTF_ALIGNMENT and the
+        # entry-extension gate both use.
+        allocation_governs = honour_session_allocation() and session_leverage is not None
+        if notional > max_notional > 0 and allocation_governs:
+            var_note = (
+                f" ALLOCATION HONOURED: the VaR cap would have sized this to "
+                f"{max_notional:,.2f} notional ({max_notional / leverage:,.2f} margin, "
+                f"{max_notional / leverage / account_capital * 100:.1f}% of the account), "
+                f"but {HONOUR_ALLOCATION_VAR} is on and this is an operator session, so "
+                f"the chosen {fraction * 100:.0f}% allocation stands. A stop-out on this "
+                f"position costs about {notional * adverse_move / account_capital * 100:.1f}% "
+                f"of the account."
+            )
+            logger.warning(
+                "Risk Gateway honoured the %.0f%% allocation on %s: %.2f notional "
+                "(the VaR cap would have been %.2f). A stop-out costs ~%.1f%% of equity.",
+                fraction * 100, symbol, notional, max_notional,
+                notional * adverse_move / account_capital * 100,
+            )
+        elif notional > max_notional > 0:
             capped_margin = max_notional / leverage
             var_note = (
                 f" VaR-CAPPED: the {fraction * 100:.0f}% allocation at {leverage}x asks for "
