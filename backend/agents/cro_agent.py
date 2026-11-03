@@ -305,6 +305,12 @@ class CROAgent(BaseAgent):
     async def _reject(self, tar: TarSubmittedEvent, rule: str, reason: str) -> None:
         logger.warning("CRO REJECTED %s: %s", tar.tar_id, reason)
         await self._persist_risk_event(str(tar.tar_id), "REJECTED", rule, reason)
+        # The submission's terminal outcome — it used to stay NULL forever.
+        from backend.services.execution_service import record_submission_outcome
+
+        await record_submission_outcome(
+            tar_id=str(tar.tar_id), outcome="rejected-by-risk", detail=f"{rule}: {reason}",
+        )
         await self.publish(TarRejectedEvent(
             tar_id=tar.tar_id,
             rule_breached=rule,

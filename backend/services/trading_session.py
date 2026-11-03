@@ -782,6 +782,15 @@ async def _run_session(session_id: str) -> None:
             if equity >= session.target_equity:
                 _finish(session, "reached", f"equity {equity:.2f} reached the {session.target_equity:.2f} target")
                 break
+            # THE HARD ACCOUNT LOSS LIMIT — checked BEFORE the floor and NOT
+            # subject to RUN_UNTIL_TARGET (services/loss_brakes).
+            from backend.services.loss_brakes import hard_stop_breached
+
+            _hard = hard_stop_breached(session.start_equity, equity)
+            if _hard is not None:
+                _finish(session, "floored", _hard)
+                break
+
             if equity <= session.floor_equity:
                 from backend.services.loss_brakes import note as _brake_note, run_until_target
 
@@ -1010,10 +1019,27 @@ def _no_decision_reason(result: Dict[str, Any]) -> str:
     Never an empty string: "no reason was recorded" is itself information, and
     it points at the graph rather than leaving the operator with a bare colon.
     """
+    # STANDING NOTES ARE DROPPED FIRST (2026-11-03, a local end-to-end session).
+    # "Strategy scoring is using BACKTESTED priors ..." is appended on EVERY run
+    # until a strategy has 20 real closes, so taking the last two entries put it
+    # first on every NO_DECISION line and pushed the real reason ("best score 0.25
+    # ... below the 0.35 minimum") off the end of the panel. It is true and
+    # explains nothing about THIS cycle. Matched by the named constants, never by
+    # prose, so the filter cannot drift from the text it filters.
+    try:
+        from backend.graphs.nodes.opportunity import (
+            HISTORICAL_FROM_BACKTEST,
+            HISTORICAL_UNAVAILABLE,
+        )
+
+        standing = {HISTORICAL_FROM_BACKTEST, HISTORICAL_UNAVAILABLE}
+    except Exception:  # noqa: BLE001
+        standing = set()
     reasons = [str(r) for r in (result.get("unavailable") or []) if r]
+    specific = [r for r in reasons if r not in standing]
     if not reasons:
         return "no decision was reached and the run recorded no reason"
-    return "no decision: " + "; ".join(reasons[-2:])
+    return "no decision: " + "; ".join((specific or reasons)[-2:])
 
 
 async def _decide_once(session: TradingSession, symbol: Optional[str] = None) -> None:
@@ -1066,6 +1092,20 @@ async def _decide_once(session: TradingSession, symbol: Optional[str] = None) ->
     # ones are usually standing notes (an absent feed, a missing track record)
     # that are true on every cycle and explain nothing about this one.
     rationale = decision.get("rationale") or _no_decision_reason(result)
+
+    # A "TRADE" THE RISK GATEWAY REFUSED MUST SAY SO (2026-11-03, found by a
+    # local end-to-end session). The log line showed only the Supervisor's
+    # sentence — "TRADE SHORT via Grid: the panel agrees at 0.20" — while the
+    # gateway refused it one node later, so the operator read a trade decision
+    # and saw no trade, with the reason recorded nowhere they could see: run
+    # traces store which KEYS a node wrote, not the values.
+    if action in ("TRADE", "EXIT") and not result.get("executionPlan"):
+        refusal = "; ".join(((result.get("risk") or {}).get("rejectionReasons")) or [])
+        rationale = (
+            f"{rationale} — REFUSED by the Risk Gateway: "
+            f"{refusal or 'no plan was produced and no reason was recorded'}"
+        )
+        action = f"{action}_REFUSED"
 
     session.last_decision = action
     session.last_rationale = rationale

@@ -435,11 +435,35 @@ def monitor_portfolio_risk(state: TradingState) -> Optional[Dict[str, Any]]:
         except (KeyError, TypeError, ValueError):
             continue
 
+    # EXPOSURE IS MEASURED IN MARGIN, NOT NOTIONAL — THE BUG THAT HALVED EVERY
+    # LEVERAGED LOSER (2026-11-03 review of a DOGE and an LTC short).
+    #
+    # This compared total NOTIONAL against MAX_PORTFOLIO_EXPOSURE_PCT (100%), a
+    # limit written for 1x. At 10x one position's notional is ~1,000% of equity,
+    # so `concern` was pinned at 0.8 on EVERY position, and the REDUCE gate's
+    # "conditions have deteriorated" half was satisfied by construction. Both
+    # live losses closed on exactly this line:
+    #
+    #     "Reducing 50%: already more than 0.5R against, and the binding
+    #      constraint is portfolio_risk at 0.80."
+    #
+    # The entry side already knew: `validate_trade` scales this cap by leverage
+    # in broker mode (`MAX_PORTFOLIO_EXPOSURE_PCT * leverage`, risk_manager.py).
+    # This copy did not — the 1x-only-formula bug this codebase has now found in
+    # `book_equity`, `specialist_portfolio` and the TS `equity()`. Locked margin
+    # IS that scaling: notional / leverage, read from `marginLocked` when the
+    # book has it and falling back to notional at 1x when it does not (which
+    # over-counts, so it can only ever concern SOONER, never later).
+    from backend.graphs.nodes.risk_gateway import _deployed_margin
+
+    deployed = _deployed_margin(positions)
+
     if equity and equity > 0:
-        pct = total_notional / equity * 100.0
+        pct = deployed / equity * 100.0
         evidence.append(
-            f"total exposure ${total_notional:,.2f} ({pct:.1f}% of ${equity:,.2f} "
-            f"equity, at entry cost not marked to market)"
+            f"total exposure ${total_notional:,.2f} notional, ${deployed:,.2f} margin "
+            f"({pct:.1f}% of ${equity:,.2f} equity committed, at entry cost not "
+            f"marked to market)"
         )
         if pct > MAX_PORTFOLIO_EXPOSURE_PCT:
             concern = max(concern, 0.8)
@@ -454,9 +478,12 @@ def monitor_portfolio_risk(state: TradingState) -> Optional[Dict[str, Any]]:
 
     if position is not None and position.unrealised_pnl is not None and equity:
         drag = position.unrealised_pnl / equity * 100.0
+        # EVIDENCE ONLY, NEVER CONCERN. This is the position's own unrealised
+        # P&L in different units, so letting it raise `concern` re-creates the
+        # double count `CONDITION_DIMENSIONS` exists to prevent: at 10x a
+        # -0.5R position is already -6 to -9% of equity, so "underwater" would
+        # satisfy BOTH halves of the REDUCE gate. The stop bounds this loss.
         evidence.append(f"this position alone is {drag:+.2f}% of equity, unrealised")
-        if drag < -2.0:
-            concern = max(concern, 0.5)
 
     evidence.append(
         "correlated-cluster analysis not run here (owned by the CIO agent) and "

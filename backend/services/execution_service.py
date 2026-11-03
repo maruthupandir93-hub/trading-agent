@@ -91,14 +91,17 @@ async def _claim_basis_durably(event: Any, basis: str) -> bool:
         async with pool.acquire() as conn:
             claimed = await conn.fetchval(
                 """
-                INSERT INTO execution_submissions (basis, symbol, intent, tar_id)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO execution_submissions (basis, symbol, intent, run_id, outcome)
+                VALUES ($1, $2, $3, $4, 'claimed')
                 ON CONFLICT (basis) DO NOTHING
                 RETURNING basis
                 """,
                 basis,
                 getattr(event, "symbol", None),
                 getattr(event, "intent", None),
+                # THE RUN, IN ITS OWN COLUMN. This went into `tar_id`, which the
+                # TAR has not been minted for yet — so the column meant "run id"
+                # on every row while its name promised the other identifier.
                 str(getattr(event, "run_id", "") or "") or None,
             )
         return claimed is not None
@@ -108,6 +111,138 @@ async def _claim_basis_durably(event: Any, basis: str) -> bool:
             "guard still applies for this run.", basis[:16], type(exc).__name__, exc,
         )
         return True
+
+
+async def record_submission_outcome(
+    *, basis: Optional[str] = None, tar_id: Optional[str] = None,
+    outcome: str, detail: Optional[str] = None,
+) -> None:
+    """Move a submission to a TERMINAL outcome. Never raises.
+
+    Every row used to sit at `outcome = NULL` forever, so a filled order and a
+    refused plan were indistinguishable (2026-11-03 review). Outcomes written:
+
+        claimed            the basis was reserved (the insert above)
+        refused            re-validation / venue minimums / unknown rules
+        dry-run            GRAPH_EXECUTION_ENABLED off
+        submitted          a TAR was published; `tar_id` set
+        filled             the executor booked the fill        (by tar_id)
+        not-filled         the executor declined it            (by tar_id)
+        rejected-by-risk   the CRO vetoed the TAR              (by tar_id)
+
+    Keyed by `basis` while the plan is in this service, and by `tar_id` once
+    the TAR has left it, because the CRO and the executor only know the TAR.
+    """
+    if not basis and not tar_id:
+        return
+    try:
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            return
+        async with pool.acquire() as conn:
+            if basis:
+                await conn.execute(
+                    """
+                    UPDATE execution_submissions
+                       SET outcome = $2, tar_id = COALESCE($3, tar_id),
+                           detail = $4, updated_at = now()
+                     WHERE basis = $1
+                    """,
+                    basis, outcome, tar_id, (detail or "")[:1000] or None,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE execution_submissions
+                       SET outcome = $2, detail = COALESCE($3, detail), updated_at = now()
+                     WHERE tar_id = $1
+                    """,
+                    tar_id, outcome, (detail or "")[:1000] or None,
+                )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping after the fact
+        logger.warning("Could not record submission outcome %s (%s: %s)",
+                       outcome, type(exc).__name__, exc)
+
+
+async def record_graph_decision(event: Any, tar: Any, size: float) -> None:
+    """Write the GRAPH path's decision to `decisions`, keyed by the TAR id. Never raises.
+
+    THE AUDIT GAP THIS CLOSES (2026-11-03 review). Only the EVENT path's
+    supervisor ever wrote `decisions`, and while GRAPH_EXECUTION_ENABLED=true that
+    path originates nothing — so the table filled with its "No TAR submitted:
+    entries are originated by the 24-node analysis graph" refusals, while the
+    path that ACTUALLY traded left no decision row at all. A reviewer reading the
+    table saw the disabled path's refusals and no explanation of the executed
+    trades. The reasoning existed only in `graph_traces`.
+
+    Keyed by the TAR id on purpose: the CRO's veto handler already updates
+    `decisions` BY TAR id (`supervisor_agent._update_decision_outcome`), and the
+    executor books the trade row under the same id, so the chain
+    run -> decision -> TAR -> CRO -> fill -> trade is one key end to end.
+    Written BEFORE the TAR is published so a veto has a row to update.
+    """
+    try:
+        import datetime
+        import json
+
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            return
+        rationale = " ".join(p for p in (
+            (getattr(event, "rationale", None) or "").strip(),
+            f"[graph run {event.run_id}]" if getattr(event, "run_id", None) else "",
+            f"[strategy {event.strategy}]" if getattr(event, "strategy", None) else "",
+        ) if p) or "graph decision (no rationale recorded)"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO decisions (id, ts, symbol, side, tab, origin_tag,
+                    requested_qty, requested_price, outcome, urgency, rationale,
+                    rejection_reasons, stop_loss, take_profit, recommended_qty)
+                VALUES ($1, $2, $3, $4, $5, 'agent-plan', $6, $7, 'pending-approval',
+                        'normal', $8, $9, $10, $11, $6)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                str(tar.tar_id), datetime.datetime.utcnow(), event.symbol, event.side,
+                event.tab, float(size), float(event.entry_price or 0.0), rationale,
+                json.dumps([]), event.stop_loss, event.take_profit,
+            )
+    except Exception as exc:  # noqa: BLE001 - an audit row must never block a trade
+        logger.warning("Could not record the graph decision for %s (%s: %s)",
+                       getattr(event, "symbol", "?"), type(exc).__name__, exc)
+
+
+async def resolve_graph_decision(tar_id: str, *, filled: bool, detail: str) -> None:
+    """Move a graph decision to its executed / not-executed outcome. Never raises.
+
+    `trade_log_entry_id` is set only on a fill, and only after the executor has
+    written the trade row (same id), because it is a foreign key into `trades`.
+    """
+    try:
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            return
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE decisions
+                   SET outcome = $2,
+                       trade_log_entry_id = CASE WHEN $3 THEN $1 ELSE trade_log_entry_id END,
+                       rationale = rationale || ' | ' || $4
+                 WHERE id = $1 AND outcome = 'pending-approval'
+                """,
+                tar_id, "approved-executed" if filled else "approved-not-executed",
+                filled, detail[:500],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not resolve graph decision %s (%s: %s)",
+                       tar_id[:8], type(exc).__name__, exc)
 
 
 def execution_enabled() -> bool:
@@ -295,6 +430,10 @@ class ExecutionService:
                 "Execution service REFUSED an open on %s: %s",
                 event.symbol, "; ".join(problems),
             )
+            await record_submission_outcome(
+                basis=basis, outcome="refused",
+                detail="; ".join(receipt.reasons or receipt.notes or []) or None,
+            )
             _submitted[basis] = receipt
             return receipt
 
@@ -330,6 +469,10 @@ class ExecutionService:
                 "account size, or this repeats on every decision.",
                 event.symbol, note, event.size, event.entry_price,
             )
+            await record_submission_outcome(
+                basis=basis, outcome="refused",
+                detail="; ".join(receipt.reasons or receipt.notes or []) or None,
+            )
             _submitted[basis] = receipt
             return receipt
 
@@ -340,6 +483,10 @@ class ExecutionService:
                 f"real-money order refused: {rules.unavailable}. Submitting a "
                 f"quantity the venue may silently truncate means the position would "
                 f"not be the size the risk checks approved."
+            )
+            await record_submission_outcome(
+                basis=basis, outcome="refused",
+                detail="; ".join(receipt.reasons or receipt.notes or []) or None,
             )
             _submitted[basis] = receipt
             return receipt
@@ -360,6 +507,10 @@ class ExecutionService:
                 "(stop %s). %s is off.",
                 event.symbol, event.side, size, event.leverage, event.stop_loss,
                 ENV_ENABLE,
+            )
+            await record_submission_outcome(
+                basis=basis, outcome="dry-run",
+                detail="; ".join(receipt.reasons or receipt.notes or []) or None,
             )
             _submitted[basis] = receipt
             return receipt
@@ -393,6 +544,9 @@ class ExecutionService:
             run_id=getattr(event, "run_id", None),
             entry_context=getattr(event, "entry_context", None),
         )
+        # The decision row FIRST, so the CRO's veto (an UPDATE by TAR id) has a
+        # row to land on — see `record_graph_decision`.
+        await record_graph_decision(event, tar, size)
         # MessageBus.publish takes (topic, payload) — see agent_base.publish.
         await get_message_bus().publish("TAR_SUBMITTED", tar)
 
@@ -408,6 +562,10 @@ class ExecutionService:
             "(stop %.8g, tab %s)",
             str(tar.tar_id)[:8], event.symbol, tar.direction, size,
             tar.requested_leverage, event.symbol, event.stop_loss, event.tab,
+        )
+        await record_submission_outcome(
+            basis=receipt.idempotency_basis, tar_id=receipt.tar_id,
+            outcome="submitted", detail="TAR published; awaiting the CRO",
         )
         _submitted[receipt.idempotency_basis] = receipt
         return receipt

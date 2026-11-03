@@ -1,0 +1,26 @@
+candles per symbol 6000, non-overlapping, extension gate ON, cut fee 0.02R
+  SOLUSDT   trades so far 943
+  XRPUSDT   trades so far 1951
+  DOGEUSDT  trades so far 2952
+  ADAUSDT   trades so far 3972
+  ETHUSDT   trades so far 4900
+  BNBUSDT   trades so far 5826
+
+HOLD to stop/target    n=  5826  expectancy=+0.0185R +/-0.0365  win=34.0%
+CUT half at -0.5R      n=  5826  expectancy=+0.0072R +/-0.0293  win=34.0%
+
+PAIRED difference (CUT - HOLD) per trade: -0.0114R  z = -1.76  n = 5826
+trades the rule actually touched: 4597 (79%)
+
+PER STRATEGY (hold -> cut, expectancy R)
+  Arbitrage            n=  407  +0.0614 -> +0.0322
+  Breakout             n=  157  +0.1656 -> +0.0959
+  Grid                 n=  819  +0.1026 -> +0.0914
+  MeanReversion        n=  786  +0.0534 -> +0.0249
+  Momentum             n=  611  -0.0720 -> -0.1002
+  Range                n=  824  +0.0522 -> +0.0520
+  Scalping             n=  617  -0.0276 -> -0.0368
+  Swing                n=  689  -0.0639 -> -0.0476
+  Trend                n=  660  -0.0409 -> -0.0249
+  VWAP                 n=  192  +0.1094 -> +0.0559
+  VolatilityBreakout   n=   64  -0.0156 -> -0.0198

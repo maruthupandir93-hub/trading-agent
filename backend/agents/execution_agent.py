@@ -73,6 +73,10 @@ class ExecutionAgent(BaseAgent):
         that doesn't deliberately ask for live trading gets simulation.
         """
         super().__init__()
+        # TARs this agent actually filled, so the submission record can tell a
+        # fill from a refusal (see handle_event). Each id lives only for the
+        # duration of its own `_execute_tar` call, so this cannot grow.
+        self._filled_tars: set = set()
         # An EXPLICIT argument pins the mode for the life of this agent (the
         # backtest engine passes `simulation_mode=True` and must never be able to
         # go live because someone flipped a setting mid-backtest). `None` means
@@ -298,7 +302,32 @@ class ExecutionAgent(BaseAgent):
                 
         if event.event_type == "TAR_APPROVED":
             if isinstance(event, TarApprovedEvent):
-                await self._execute_tar(event)
+                # The submission's TERMINAL outcome. `_execute_tar` has many
+                # refusal returns and ONE fill (the ORDER_FILLED publish, which
+                # records `filled`); anything else that ends the call is a
+                # refusal. Recorded here rather than at each return so a future
+                # refusal path cannot forget to. Never raises.
+                self._filled_tars.discard(str(event.tar_id))
+                try:
+                    await self._execute_tar(event)
+                finally:
+                    filled = str(event.tar_id) in self._filled_tars
+                    self._filled_tars.discard(str(event.tar_id))
+                    if not filled:
+                        from backend.services.execution_service import (
+                            record_submission_outcome,
+                            resolve_graph_decision,
+                        )
+
+                        await resolve_graph_decision(
+                            str(event.tar_id), filled=False,
+                            detail="the executor did not fill this approved TAR",
+                        )
+                        await record_submission_outcome(
+                            tar_id=str(event.tar_id), outcome="not-filled",
+                            detail="approved by the CRO; the executor did not fill it "
+                                   "(see the execution agent log for the refusal)",
+                        )
 
     async def _execute_tar(self, tar: TarApprovedEvent) -> None:
         logger.info(f"Execution Engine received approved TAR {tar.tar_id}")
@@ -787,6 +816,23 @@ class ExecutionAgent(BaseAgent):
                     tar.tar_id, exchange_name, tar.symbol,
                 )
 
+        self._filled_tars.add(str(tar.tar_id))
+        from backend.services.execution_service import (
+            record_submission_outcome,
+            resolve_graph_decision,
+        )
+
+        # After `_persist_trade` (above), so the decision's foreign key into
+        # `trades` (same id) resolves.
+        await resolve_graph_decision(
+            str(tar.tar_id), filled=True,
+            detail=f"filled {side} {filled_qty} @ {fill_price} on {exchange_name}",
+        )
+
+        await record_submission_outcome(
+            tar_id=str(tar.tar_id), outcome="filled",
+            detail=f"{side} {tar.symbol} at {fill_price} on {exchange_name}",
+        )
         await self.publish(OrderFilledEvent(
             tar_id=tar.tar_id,
             exchange=exchange_name,

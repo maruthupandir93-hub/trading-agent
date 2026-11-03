@@ -1115,3 +1115,58 @@ CREATE OR REPLACE VIEW real_pv_history AS
 
 CREATE OR REPLACE VIEW paper_pv_history AS
   SELECT * FROM pv_history WHERE tab = 'paper';
+
+-- ===========================================================================
+-- EXECUTION SUBMISSIONS: a real run_id column and a terminal outcome
+-- ===========================================================================
+-- `tar_id` was being written with the RUN id (the TAR is minted later), and
+-- `outcome` was never written at all, so every submission sat at NULL and a
+-- reader could not tell a fill from a refusal (2026-11-03 review).
+-- `execution_service` now records the run here, the real TAR id once minted,
+-- and a terminal outcome. ADD COLUMN IF NOT EXISTS keeps this idempotent under
+-- `init_db`'s apply-on-every-startup.
+ALTER TABLE execution_submissions ADD COLUMN IF NOT EXISTS run_id text;
+ALTER TABLE execution_submissions ADD COLUMN IF NOT EXISTS detail text;
+ALTER TABLE execution_submissions ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+CREATE INDEX IF NOT EXISTS idx_execution_submissions_tar ON execution_submissions (tar_id);
+
+-- ===========================================================================
+-- ROW LEVEL SECURITY on every table this role owns
+-- ===========================================================================
+-- Supabase exposes `public` through its Data API to the `anon` and
+-- `authenticated` roles. No table here had RLS, so any of them was readable
+-- (and writable, where grants allow) by anyone holding the project's anon key.
+--
+-- ENABLED WITH NO POLICIES, ON PURPOSE. Nothing in this project uses the Data
+-- API: the backend (asyncpg) and the frontend (`lib/db.server.ts`, pg) both
+-- connect as the TABLE OWNER, and an owner BYPASSES RLS unless it is FORCEd —
+-- which this never does. So this closes the Data API path and cannot lock out
+-- the application. Restricted to tables owned by `current_user` so it can never
+-- touch a table whose access model it does not know. Idempotent.
+DO $$
+DECLARE t record;
+BEGIN
+  FOR t IN SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public' AND tableowner = current_user
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.tablename);
+  END LOOP;
+END $$;
+
+-- Views run with their OWNER's rights by default, so a view over an RLS table
+-- would hand the Data API exactly what RLS now refuses. `security_invoker`
+-- (Postgres 15+, which Supabase runs) makes a view check the CALLER's access.
+-- Wrapped so an older server skips it rather than failing the startup apply.
+DO $$
+DECLARE v record;
+BEGIN
+  FOR v IN SELECT viewname FROM pg_views
+           WHERE schemaname = 'public' AND viewowner = current_user
+  LOOP
+    BEGIN
+      EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', v.viewname);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'security_invoker not set on %: %', v.viewname, SQLERRM;
+    END;
+  END LOOP;
+END $$;

@@ -1,0 +1,21 @@
+candles 6000, non-overlapping, extension gate ON, threshold 1.0%
+  SOLUSDT   done
+  XRPUSDT   done
+  DOGEUSDT  done
+  ADAUSDT   done
+  ETHUSDT   done
+  BNBUSDT   done
+
+  WITH     n=  333  -0.3874R +/-0.1301  win 20.4%
+  NEUTRAL  n= 3818  -0.0068R +/-0.0448  win 33.1%
+  AGAINST  n= 1675  +0.1570R +/-0.0700  win 38.6%
+
+  AGAINST vs everything else: z = +4.65   (negative = trading against strength is WORSE)
+
+  by direction:
+    LONG AGAINST   n=  853  +0.1852R +/-0.0985  win 39.5%
+    LONG NEUTRAL   n= 1902  -0.0962R +/-0.0619  win 30.1%
+    LONG WITH      n=  165  -0.3273R +/-0.1915  win 22.4%
+    SHORT AGAINST  n=  822  +0.1277R +/-0.0994  win 37.6%
+    SHORT NEUTRAL  n= 1916  +0.0819R +/-0.0645  win 36.1%
+    SHORT WITH     n=  168  -0.4464R +/-0.1765  win 18.5%

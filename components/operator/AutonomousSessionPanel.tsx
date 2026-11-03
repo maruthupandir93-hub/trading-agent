@@ -131,11 +131,17 @@ const SYMBOLS = [
   'LINK/USDT', 'LTC/USDT', 'AVAX/USDT', 'BNB/USDT', 'ETH/USDT',
 ] as const;
 
-// The coins sharing the venue's $5 minimum order, so a small book can open
-// any of them. See the `alsoScan` state below for why these are pre-selected.
-export const DEFAULT_ALSO_SCAN: string[] = [
-  'SOL/USDT', 'DOGE/USDT', 'ADA/USDT', 'SUI/USDT', 'LINK/USDT', 'LTC/USDT',
-];
+// EMPTY BY DEFAULT: the session trades the coin the operator SELECTED, and
+// nothing else, unless they tick more below.
+//
+// It was pre-selected (six $5-minimum coins) for one day, 2026-11-02, and that
+// was a mistake the operator found the hard way: they chose XRP/USDT, the
+// session ALSO rotated over SOL/DOGE/ADA/SUI/LINK/LTC, and the next two trades
+// were a DOGE short and an LTC short. A control that trades instruments the
+// operator did not choose is the `simulation_mode` failure in a new place —
+// the screen says one thing and the agent does another. More coins is still
+// the right lever for more trades; it has to be the operator's explicit choice.
+export const DEFAULT_ALSO_SCAN: string[] = [];
 
 const STATUS_BADGE: Record<string, string> = {
   running: 'RUNNING',
@@ -160,15 +166,8 @@ export function AutonomousSessionPanel() {
   // read 0.00-0.12 against a 0.60 floor. More instruments is the only way to
   // get more trades without lowering the bar that made the good ones good.
   //
-  // PRE-SELECTED since 2026-11-02. Empty was the default, so a session the
-  // operator did not customise scanned ONE coin — every one of the six trades
-  // in docs/DIAGNOSIS.md was XRP, and the agent sat flat whenever XRP did.
-  // The rotation is cost-neutral (one graph run per interval either way), so
-  // the only thing an empty default bought was fewer chances to trade.
-  //
-  // Only the $5-minimum coins: AVAX ($10.17), BNB ($7.39) and ETH ($20) can be
-  // refused at a small book, and `start_session` refuses the WHOLE session
-  // when any rotated coin cannot clear its minimum. Untick any to drop it.
+  // EMPTY by default — see DEFAULT_ALSO_SCAN for the day it was not, and why
+  // that traded coins the operator never selected.
   const [alsoScan, setAlsoScan] = useState<string[]>(DEFAULT_ALSO_SCAN);
   const [leverage, setLeverage] = useState(2);
   const [startAmount, setStartAmount] = useState('');
@@ -564,9 +563,12 @@ export function AutonomousSessionPanel() {
               })}
             </div>
             <div className="text-[10px] mt-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              {/* NAMES EVERY COIN that can be traded, so what the session
+                  will do is on screen before Start — not discovered from a
+                  DOGE fill on a session the operator believed was XRP-only. */}
               {alsoScan.filter((s) => s !== symbol).length === 0
-                ? `Scanning ${symbol.replace('/USDT', '')} only. A single coin is flat most of the time.`
-                : `Rotating over ${alsoScan.filter((s) => s !== symbol).length + 1} coins — one graph run per interval, pointed at each in turn, so this costs no more than one coin. Still one position at a time.`}
+                ? `Trades ${symbol.replace('/USDT', '')} ONLY. A single coin is flat most of the time; tick more coins to trade them too.`
+                : `Will trade ANY of: ${[symbol, ...alsoScan.filter((s) => s !== symbol)].map((s) => s.replace('/USDT', '')).join(', ')} — one graph run per interval, pointed at each in turn. Still one position at a time.`}
             </div>
           </div>
 

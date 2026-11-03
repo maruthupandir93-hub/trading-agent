@@ -106,6 +106,10 @@ GRAPH_REQUESTED_LEVERAGE = 1
 
 from backend.algorithms.market_context import assess as assess_alignment
 from backend.algorithms.market_context import build as build_market_context
+from backend.algorithms.market_context import (
+    chase_gate_enabled,
+    chases_relative_strength,
+)
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
 # SECTION 6C: how far into the move this entry sits. Pure and deterministic --
 # it reads candles `validate_market_data` already fetched, because a node that
@@ -785,6 +789,33 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                             "status": "reject",
                             "detail": (
                                 f"{alignment.detail} Context: "
+                                f"{market_context.describe() or 'none measured'}."
+                            ),
+                        }
+                    },
+                )
+            }
+
+    # ---- CHASING RELATIVE STRENGTH (measured 2026-11-03) -----------------
+    #
+    # A long on a coin already >1% ahead of BTC over ~6h, or a short on one
+    # already >1% behind, returned -0.41R per trade over 559 non-overlapping
+    # replayed trades (negative in all three windows measured). See
+    # `market_context.chases_relative_strength`. Same placement and reasoning as
+    # the HTF gate: a property of WHERE THE MARKET IS, so not reachable by making
+    # the trade smaller; after EXIT (invariant 4); an unmeasured strength passes.
+    if market_context is not None and thesis is not None and chase_gate_enabled():
+        chase = chases_relative_strength(decision.direction, market_context)
+        if chase is not None:
+            return {
+                "risk_assessment": RiskAssessment(
+                    approved=False,
+                    rejection_reasons=[chase],
+                    checks={
+                        "RelativeStrengthChase": {
+                            "status": "reject",
+                            "detail": (
+                                f"{chase} Context: "
                                 f"{market_context.describe() or 'none measured'}."
                             ),
                         }

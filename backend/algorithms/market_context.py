@@ -287,3 +287,84 @@ def assess(direction: str, context: MarketContext) -> Alignment:
         ),
         blocks=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Chasing relative strength — measured, then gated (2026-11-03)
+# ---------------------------------------------------------------------------
+#
+# THE HYPOTHESIS THAT PROMPTED THIS WAS BACKWARDS, AND THE MEASUREMENT IS WHY
+# THE GATE LOOKS THE WAY IT DOES. A review of a losing DOGE short noted DOGE was
+# OUTPERFORMING BTC (+0.69%) and suggested trading WITH relative strength.
+# `scripts/measure_relative_strength.py` (every strategy's real signal, the
+# entry-extension gate applied, non-overlapping trades, the 2.5/5.0 ATR model,
+# this module's own `percent_change` on bars up to the entry) found the
+# opposite — CHASING strength is what loses, in every window measured:
+#
+#     |rel| > 1%, trading WITH it       31d  -0.20R (101)
+#     (long an outperformer, short      62d  -0.39R (333)
+#      an underperformer)              104d  -0.41R +/-0.10 (559)
+#
+# Over ~6 hours (24 x 15m) these alts' relative moves REVERT, so buying the one
+# that has already run ahead of BTC buys the top of its outperformance.
+#
+# WHAT IS DELIBERATELY NOT BUILT: a rule PREFERRING trades against strength.
+# That side was +0.16R on 62 days but flat (+0.01R) on 31, so it is not stable
+# enough to steer on. Only the consistently losing side is refused.
+#
+# None means NOT MEASURABLE (no benchmark, too few bars) and never blocks — an
+# unmeasured strength costs a filter, not the stop's bounding of the loss.
+
+CHASE_GATE_VAR = "REQUIRE_RS_NOT_CHASING"
+CHASE_THRESHOLD_VAR = "MAX_CHASE_RELATIVE_STRENGTH_PCT"
+DEFAULT_CHASE_THRESHOLD_PCT = 1.0
+
+
+def chase_gate_enabled() -> bool:
+    """Default ON. Read at call time; only an explicit off value disables it."""
+    import os
+
+    raw = (os.getenv(CHASE_GATE_VAR) or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def chase_threshold_pct() -> float:
+    import os
+
+    raw = (os.getenv(CHASE_THRESHOLD_VAR) or "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_CHASE_THRESHOLD_PCT
+    except ValueError:
+        value = DEFAULT_CHASE_THRESHOLD_PCT
+    return value if value > 0 else DEFAULT_CHASE_THRESHOLD_PCT
+
+
+def chases_relative_strength(
+    direction: str, context: "MarketContext", threshold_pct: Optional[float] = None,
+) -> Optional[str]:
+    """Why this entry CHASES relative strength, or None. Pure.
+
+    A LONG on a coin already more than `threshold_pct` ahead of the benchmark,
+    or a SHORT on one already more than that behind it.
+    """
+    rel = getattr(context, "relative_strength_pct", None)
+    if rel is None:
+        return None
+    thr = chase_threshold_pct() if threshold_pct is None else threshold_pct
+    d = str(direction or "").upper()
+    bench = getattr(context, "benchmark_symbol", None) or "the benchmark"
+    if d == "LONG" and rel > thr:
+        return (
+            f"chasing relative strength: a LONG on a coin already {rel:+.2f}% ahead "
+            f"of {bench} over the last {LOOKBACK_BARS} bars (limit {thr:.1f}%). "
+            f"Measured over 559 non-overlapping trades, entries chasing strength "
+            f"returned -0.41R each; these relative moves revert."
+        )
+    if d == "SHORT" and rel < -thr:
+        return (
+            f"chasing relative weakness: a SHORT on a coin already {rel:+.2f}% "
+            f"behind {bench} over the last {LOOKBACK_BARS} bars (limit {thr:.1f}%). "
+            f"Measured over 559 non-overlapping trades, entries chasing strength "
+            f"returned -0.41R each; these relative moves revert."
+        )
+    return None

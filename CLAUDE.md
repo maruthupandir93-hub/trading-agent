@@ -3659,9 +3659,95 @@ emergency stop, the leverage ceiling, exits. Do not extend the switch to any of
 those. `tests/conftest.py::isolate_loss_brakes` pins it off for the suite —
 writing it into `.env` turned nine brake tests red, the isolation lesson again.
 
-The session panel now PRE-SELECTS the six other $5-minimum coins for rotation
-(`DEFAULT_ALSO_SCAN`). The empty default was why every trade in
-docs/DIAGNOSIS.md was XRP; the rotation is cost-neutral.
+**ONE LIMIT IT CANNOT SWITCH OFF (2026-11-03):** `loss_brakes.hard_stop_breached`
+ends the session once equity is `ACCOUNT_HARD_STOP_LOSS_FRACTION` (default 0.50,
+clamped to [0.10, 0.95], never "off") below the session START. Checked before the
+floor in `_run_session`. Without it a losing run trades the account below the
+venue minimum, where no target is reachable at all.
+
+### The 2026-11-03 re-analysis — two losing shorts, and what was true
+
+**THE SESSION TRADED COINS THE OPERATOR NEVER SELECTED, AND THIS FILE'S OWN
+PREVIOUS CHANGE CAUSED IT.** `DEFAULT_ALSO_SCAN` pre-selected six coins for one
+day; the operator chose XRP and the next trades were DOGE and LTC. It is EMPTY
+again, and the panel now NAMES every coin a session can trade before Start. A
+running session keeps the list it started with — restart it after deploying.
+
+**`portfolio_risk` measured NOTIONAL against a 1x limit, so at 10x its concern
+was pinned at 0.8 on every position** and the REDUCE gate's "conditions
+deteriorated" half was true by construction — both losses closed on "binding
+constraint is portfolio_risk at 0.80". It now measures locked MARGIN
+(`risk_gateway._deployed_margin`, the leverage-correct sum), and the position's
+own unrealised P&L is evidence only, never concern (`CONDITION_DIMENSIONS`'
+independence rule). The 1x-only-formula bug, a fourth time.
+
+**AND THE REPLAY SAID THE ACCIDENTAL BEHAVIOUR LOOKED GOOD — WHICH IS WHY IT WAS
+MEASURED.** Both cut trades would have hit the full stop (-1R) had they been
+held, and the six XRP thesis exits also beat holding. Seven anecdotes.
+`scripts/measure_reduce_rule.py`, 5,826 non-overlapping trades: an unconditional
+"cut half at -0.5R" is **-0.011R per trade WORSE** than holding (z = -1.76). The
+seven were the losers we happened to look at. Fixing the gate is right.
+
+**RELATIVE STRENGTH: THE REVIEW'S HYPOTHESIS WAS BACKWARDS.** It flagged a DOGE
+short while DOGE outperformed BTC. `scripts/measure_relative_strength.py`:
+CHASING strength (long a coin >1% ahead of BTC over 6h, short one >1% behind)
+lost in every window — 31d -0.20R, 62d -0.39R, 104d **-0.41R +/-0.10 (559)**;
+trading AGAINST it was positive but NOT stable (flat on 31d). So
+`market_context.chases_relative_strength` refuses ONLY the chase, in
+`risk_gateway.gate` after EXIT; nothing prefers the against side.
+`REQUIRE_RS_NOT_CHASING` / `MAX_CHASE_RELATIVE_STRENGTH_PCT` (1.0). Stored in
+`backtests/2026-11-03/`.
+
+**EXECUTED TRADES HAD NO `decisions` ROW.** Only the EVENT path wrote that table,
+and it originates nothing while the graph is enabled — so the table held its
+refusals and nothing about the trades. `execution_service.record_graph_decision`
+writes the graph decision keyed by the TAR id BEFORE the TAR is published (so
+the CRO's veto UPDATE has a row), and the executor resolves it to
+`approved-executed` with `trade_log_entry_id` (same id) after the trade row.
+
+**`execution_submissions.outcome` WAS NEVER WRITTEN, AND `tar_id` HELD THE RUN
+ID.** Now: `run_id` has its own column; outcomes are claimed -> refused /
+dry-run / submitted -> filled / not-filled / rejected-by-risk. The executor
+records not-filled in a `finally`, so a future refusal path cannot forget to.
+
+**RLS IS ON for every `public` table the connecting role owns, and every view is
+`security_invoker`.** No policies, on purpose: both apps connect as the OWNER,
+which bypasses RLS unless FORCEd (never). Verified on a real local Postgres 18:
+applied twice (idempotent), 32/32 tables, the owner reads and writes, an
+anon-style role with SELECT sees 0 rows through tables AND views.
+
+**LESSONS DO NOT STEER ENTRIES, BY DESIGN.** `memory_context` is read only by the
+reflection node. What feeds selection is `strategy_performance` (deterministic
+win rates, after `MIN_SAMPLE`). Model prose steering trades would be invariant 5.
+
+`tests/test_review_2026_11_03.py` pins all of it.
+
+**THE LIVE DATABASE IS IPv6-ONLY FROM HERE — use the session pooler.** The
+direct host `db.<ref>.supabase.co` resolves to an AAAA record only, and this
+machine has no IPv6 route, so `getaddrinfo failed` is NOT "the database is
+down". The IPv4 session pooler works: `aws-0-ap-southeast-1.pooler.supabase.com:5432`,
+user `postgres.<ref>`, the same password (URL-DECODED — passing the encoded form
+returns "password authentication failed", which reads as a wrong password).
+Verified 2026-11-03: PostgreSQL 17.6, `postgres` has BYPASSRLS and owns all 32
+tables, and the schema was migrated live and re-verified with
+`scripts/verify_schema.py` (RLS 32/32, views security_invoker, the three new
+`execution_submissions` columns). The 11 pre-existing submissions keep
+`outcome = NULL` on purpose — their outcomes were never recorded, and inventing
+them now would be a fabricated history.
+
+**RUNNING THE REAL BACKEND AGAINST A LOCAL POSTGRES FOUND THREE MORE**, none of
+which a unit test or the in-process harnesses could see (local PostgreSQL 18 is
+installed: `initdb` into scratch, `DATABASE_URL` overridden in the environment —
+`load_dotenv` does not override an existing variable):
+
+* A Supervisor "TRADE" the Risk Gateway refused was logged as just "TRADE ...",
+  with the refusal recorded nowhere visible (traces store KEYS, not values). The
+  session log now appends "REFUSED by the Risk Gateway: <reasons>" and the action
+  reads `TRADE_REFUSED`. The live case was LTC refused for chasing at 4.0 ATR.
+* Every NO_DECISION line LED with the standing "BACKTESTED priors" note, pushing
+  this cycle's real reason off the panel. Filtered by the named constants.
+* "only at 0.18, below the 0.18 minimum" — two-decimal rounding of 0.178. Three
+  decimals now.
 
 ### The two rows of the review's measurement table that had nothing behind them
 
@@ -3889,7 +3975,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2597 passed + 2 skipped, must all pass (~5.5 min)
+.venv/Scripts/python.exe -m pytest -q   # backend; 2626 passed + 2 skipped, must all pass (~5.5 min)
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

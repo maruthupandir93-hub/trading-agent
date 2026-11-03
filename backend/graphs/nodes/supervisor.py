@@ -374,7 +374,10 @@ def supervise(state: TradingState) -> Optional[Dict[str, Any]]:
             direction=thesis.direction,
             rationale=(
                 f"WAIT: the panel agrees with the {thesis.direction} setup but only at "
-                f"{verdict.confidence:.2f}, below the {_bar} minimum. "
+                # THREE decimals: at two, 0.178 against a 0.18 bar printed as
+                # "only at 0.18, below the 0.18 minimum" — a refusal that reads
+                # as a contradiction (seen in a live session log, 2026-11-03).
+                f"{verdict.confidence:.3f}, below the {_bar:.3f} minimum. "
                 f"{shortfall}"
             ),
             probability=probability,
