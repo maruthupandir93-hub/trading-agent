@@ -474,11 +474,30 @@ class CROAgent(BaseAgent):
             + (f" ({loss_pct:.1f}% of equity)" if loss_pct is not None else "")
             + ". "
         )
+        # THE RECORD MUST SAY WHETHER THE VaR CHECK RAN (2026-11-04 review, I-1).
+        # With the session allocation governing, the veto above is SKIPPED — and
+        # this sentence still read "implied VaR $0.65 ... within $0.39": a
+        # stored approval claiming a check passed that never ran, on a trade
+        # whose stop-out cost 20.3% of equity. An audit trail that overstates
+        # its own safeguards is the failure `_portfolio_controls_note` was
+        # written to stop; this is the same failure one clause earlier.
+        if implied_var > var_limit and allocation_governs:
+            var_clause = (
+                f"VaR check SKIPPED — the operator's session allocation governs "
+                f"({HONOUR_ALLOCATION_VAR} is on): implied VaR ${implied_var:.2f} "
+                f"({move_basis}) EXCEEDS the ${var_limit:.2f} limit "
+                f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity) that would "
+                f"otherwise have refused this trade. "
+            )
+        else:
+            var_clause = (
+                f"implied VaR ${implied_var:.2f} ({move_basis}) within ${var_limit:.2f} "
+                f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity). "
+            )
         rationale = (
             f"Approved: leverage {tar.requested_leverage}x within {ceiling}x ceiling; "
             f"stop-loss {tar.stop_loss:.6g} verified on the correct side of entry {entry:.6g}; "
-            f"implied VaR ${implied_var:.2f} ({move_basis}) within ${var_limit:.2f} "
-            f"({var_fraction * 100:.1f}% of ${total_equity:.2f} equity). "
+            + var_clause
             + cost_note
             + _portfolio_controls_note()
         )

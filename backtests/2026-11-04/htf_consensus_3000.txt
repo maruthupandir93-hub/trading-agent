@@ -1,0 +1,31 @@
+candles 3000, non-overlapping, extension + RS-chase gates ON
+  SOLUSDT   done
+  XRPUSDT   done
+  DOGEUSDT  done
+  ADAUSDT   done
+  ETHUSDT   done
+  BNBUSDT   done
+
+  BOTH_WITH     n=  360  +0.0083R +/-0.1466  win 33.6%
+  WEAK_WITH     n=  445  +0.0854R +/-0.1341  win 36.2%
+  MIXED         n=   22  +0.0909R +/-0.6172  win 36.4%
+  BOTH_RANGING  n=  196  +0.3929R +/-0.2100  win 46.4%
+  WEAK_AGAINST  n=  620  -0.0565R +/-0.1097  win 31.5%
+  BOTH_AGAINST  n= 1047  +0.0401R +/-0.0865  win 34.7%
+
+  WEAK_AGAINST (blocked today) vs kept today: z = -2.41
+  BOTH_AGAINST vs kept today:                 z = -1.22
+
+  by side:
+    LONG BOTH_AGAINST    n=  859  -0.0326R +/-0.0938  win 32.2%
+    LONG BOTH_RANGING    n=   58  -0.1724R +/-0.3481  win 27.6%
+    LONG BOTH_WITH       n=   56  -0.0357R +/-0.3703  win 32.1%
+    LONG MIXED           n=   11  -0.7273R +/-0.5345  win  9.1%
+    LONG WEAK_AGAINST    n=  292  -0.4247R +/-0.1357  win 19.2%
+    LONG WEAK_WITH       n=  158  -0.3734R +/-0.1908  win 20.9%
+    SHORT BOTH_AGAINST   n=  188  +0.3723R +/-0.2142  win 45.7%
+    SHORT BOTH_RANGING   n=  138  +0.6304R +/-0.2502  win 54.3%
+    SHORT BOTH_WITH      n=  304  +0.0164R +/-0.1599  win 33.9%
+    SHORT MIXED          n=   11  +0.9091R +/-0.8945  win 63.6%
+    SHORT WEAK_AGAINST   n=  328  +0.2713R +/-0.1607  win 42.4%
+    SHORT WEAK_WITH      n=  287  +0.3380R +/-0.1728  win 44.6%

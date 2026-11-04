@@ -89,7 +89,18 @@ ABSTAINED = ("rejected", "rejected-by-risk")
 # quietly absorbs what it does not recognise is how a new failure mode stays
 # invisible.
 _GATES: Tuple[Tuple[str, str], ...] = (
-    ("venue-minimum", r"minimum|min notional|too small|below the venue"),
+    # A SUPERVISOR WAIT — "the panel agrees ... but only at 0.169, below the
+    # 0.180 minimum" — is a CONFIDENCE shortfall. Matched FIRST because the
+    # venue-minimum rule below used to be the bare word "minimum", which filed
+    # every one of these under venue-minimum. That was invisible until graph
+    # refusals started reaching `decisions` (2026-11-04); the first local run
+    # bucketed a 0.169-vs-0.180 WAIT as an exchange order-size refusal.
+    ("confidence-floor", r"only at \S+, below the \S+ minimum|panel agrees .* only at"),
+    # Every venue refusal names the VENUE or the instrument's quantity/notional
+    # (instrument_rules, venue.check_size, execution_service). A bare "minimum"
+    # also appears in "best score 0.25 ... below the 0.35 minimum" (no-setup).
+    ("venue-minimum", r"venue minimum|venue's minimum|minimum (?:quantity|notional|order)|"
+                      r"minimums|'s minimum of|min notional|too small|below the venue"),
     ("tradeable-universe", r"may be watched|not tradeable|untradeable"),
     ("strategy-approval", r"not approved for real money"),
     ("entry-proximity", r"chasing an extended"),
@@ -237,13 +248,29 @@ async def _load(window: int = WINDOW) -> Optional[List[Dict[str, Any]]]:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT outcome, rejection_reasons, ts
+                SELECT outcome, rejection_reasons, ts, origin_tag
                 FROM decisions
                 ORDER BY ts DESC
                 LIMIT $1
                 """,
                 window,
             )
+        # WHILE THE GRAPH ORIGINATES ENTRIES, THE EVENT PATH'S REFUSALS ARE NOT
+        # ABSTENTIONS (2026-11-04 review, I-5). That path refuses every setup
+        # with one constant sentence ("entries are originated by the 24-node
+        # analysis graph"), which says the path is OFF, not that a setup was
+        # weak — and it was 100% of the rejected rows this module counted. Its
+        # approvals ('agent-plan' rows that executed) are the graph's own
+        # decisions and stay.
+        try:
+            from backend.services.execution_service import execution_enabled
+
+            graph_owns_entries = execution_enabled()
+        except Exception:  # noqa: BLE001
+            graph_owns_entries = False
+        if graph_owns_entries:
+            rows = [r for r in rows
+                    if not (r["outcome"] == "rejected" and r["origin_tag"] == "agent-plan")]
         out: List[Dict[str, Any]] = []
         for r in rows:
             reasons = r["rejection_reasons"]

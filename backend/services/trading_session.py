@@ -1110,6 +1110,36 @@ async def _decide_once(session: TradingSession, symbol: Optional[str] = None) ->
     session.last_decision = action
     session.last_rationale = rationale
 
+    # THE GRAPH'S REFUSAL OF A SETUP, INTO `decisions` (I-5). Only when there was
+    # a thesis to refuse; throttled per symbol inside the recorder.
+    if action in ("DO_NOT_TRADE", "WAIT", "TRADE_REFUSED", "EXIT_REFUSED"):
+        try:
+            from backend.services.execution_service import record_graph_refusal
+
+            thesis = result.get("thesis") or {}
+            risk = result.get("risk") or {}
+            await record_graph_refusal(
+                symbol=target,
+                direction=thesis.get("direction") or decision.get("direction"),
+                price=thesis.get("entryPrice"),
+                action=action,
+                rationale=rationale,
+                # THE REFUSER'S OWN REASONS. The gateway's list is the reason only
+                # when the GATEWAY refused; for a Supervisor DO_NOT_TRADE / WAIT it
+                # holds the placeholder "nothing to validate: the Supervisor
+                # decided DO_NOT_TRADE", and recording that put every refusal in
+                # one generic abstention bucket (found by the local end-to-end
+                # run, 2026-11-04).
+                reasons=(
+                    (risk.get("rejectionReasons") or [rationale])
+                    if action.endswith("_REFUSED") else [rationale]
+                ),
+                tab=_tab_for_session(),
+                run_id=result.get("runId") or result.get("run_id"),
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping only
+            logger.debug("graph refusal not recorded: %s", exc)
+
     if result.get("executionPlan"):
         # THE GATEWAY APPROVED A PLAN. THAT IS NOT A TRADE, and calling it one
         # overstated the session's activity in the field the operator reads and

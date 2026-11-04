@@ -1,0 +1,25 @@
+candles 3000, range family ('Range', 'Grid', 'MeanReversion'), non-overlapping on the BASELINE trade, net of 0.10% round-trip fees
+  SOLUSDT   trades so far 226
+  XRPUSDT   trades so far 431
+  DOGEUSDT  trades so far 631
+  ADAUSDT   trades so far 816
+  ETHUSDT   trades so far 1020
+  BNBUSDT   trades so far 1244
+
+ALL RANGE-FAMILY TRADES
+  target 2.00R          n= 1244  -0.0655R +/-0.0795  win 34.8%
+  target 1.00R          n= 1244  -0.1081R +/-0.0557  win 50.1%
+  target 0.75R          n= 1244  -0.0969R +/-0.0481  win 57.9%
+  1.00R vs 2.0R paired: -0.0426R per trade, z = -1.54
+  0.75R vs 2.0R paired: -0.0314R per trade, z = -0.99
+
+LOCATION RULE (shorts in the top 25% / longs in the bottom 25% of the 40-bar range), baseline 2.0R target:
+  at the edge   n=  960  -0.0944R +/-0.0898  win 33.9%
+  mid-range     n=  284  +0.0321R +/-0.1705  win 38.0%
+  edge + 1.00R  n=  960  -0.1350R +/-0.0633  win 48.8%
+  edge + 0.75R  n=  960  -0.1092R +/-0.0548  win 57.2%
+
+PER STRATEGY (target 2.0 -> 1.0 -> 0.75, net R)
+  Range          n=  429  -0.0459 -> -0.1019 -> -0.1054
+  Grid           n=  419  +0.0092 -> -0.0672 -> -0.0720
+  MeanReversion  n=  396  -0.1658 -> -0.1582 -> -0.1140

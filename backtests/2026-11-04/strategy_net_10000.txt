@@ -1,0 +1,12 @@
+candles 10000  (net of fees, extension + RS-chase gates)
+  Breakout             n=  238  -0.0245R +/-0.1849  total     -5.8R
+  Arbitrage            n=  622  -0.0506R +/-0.1118  total    -31.5R
+  VWAP                 n=  305  -0.0709R +/-0.1583  total    -21.6R
+  Grid                 n= 1361  -0.0765R +/-0.0757  total   -104.1R
+  Range                n= 1369  -0.0914R +/-0.0754  total   -125.1R
+  Trend                n= 1069  -0.1095R +/-0.0851  total   -117.1R
+  Swing                n= 1090  -0.1259R +/-0.0842  total   -137.3R
+  MeanReversion        n= 1290  -0.1288R +/-0.0772  total   -166.1R
+  VolatilityBreakout   n=  122  -0.1518R +/-0.2548  total    -18.5R
+  Momentum             n= 1005  -0.1649R +/-0.0863  total   -165.7R
+  Scalping             n= 1016  -0.1678R +/-0.0861  total   -170.5R

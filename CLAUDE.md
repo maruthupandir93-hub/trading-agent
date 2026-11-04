@@ -3749,6 +3749,58 @@ installed: `initdb` into scratch, `DATABASE_URL` overridden in the environment �
 * "only at 0.18, below the 0.18 minimum" — two-decimal rounding of 0.178. Three
   decimals now.
 
+### The 2026-11-04 re-analysis — three proposals measured and REJECTED
+
+Five losing trades, all shorts, all Range/Grid or a late Breakout, each reaching
++0.73R to +0.90R before reversing to the stop. The review proposed three entry or
+exit changes; every one was measured first (non-overlapping trades, live gates
+applied, net of fees, 31 / 62 / 104-day windows) and **none survived**:
+
+* **A nearer target for range strategies (I-2).** 1.0R and 0.75R were never
+  better than 2.0R and were significantly WORSE on 62 days (0.75R: -0.051R per
+  trade, z = -2.22): a nearer winner pays the same fee. `measure_range_rules.py`.
+* **"Range shorts only at the top of the range" (I-3).** Edge entries did WORSE
+  than mid-range ones in all three windows. Same script.
+* **"1h trending + 4h Ranging is not a trend" (I-4, the short bias).**
+  `_consensus` does count that as a trend, which does push a ranging market onto
+  one side — but whether it costs money flips sign by window (31d z = -2.19,
+  62d +2.49, 104d +1.77). Unchanged. The 31-day window also showed shorts
+  out-earning longs, so the recent short bias was the right side of that month.
+  `measure_htf_consensus.py`.
+
+**THE FINDING THAT MATTERS: no strategy has a measured edge after fees.**
+`measure_strategy_net.py` (all live entry gates, fees at `2 x taker / stop%`):
+every one of the eleven is negative on the 104-day window; Breakout is positive
+on two windows and negative on the third, its interval including zero each time.
+Fees alone are ~0.07R per trade, about the size of the losses. So the dependable
+levers are SIZE (I-1 below) and COST, not another filter. Outputs in
+`backtests/2026-11-04/`. Do not ship an entry/exit rule from a few trades — this
+review is the fourth time a plausible small-sample fix measured the other way.
+
+**What was fixed:**
+* **I-1, the approval record lied.** With `HONOUR_SESSION_ALLOCATION` governing,
+  the CRO SKIPS its VaR veto, and the stored rationale still read "implied VaR
+  $0.65 ... within $0.39". It now says "VaR check SKIPPED ... EXCEEDS the limit".
+  The setting itself (13-20% of equity per stop at 10x/100%) is the operator's.
+* **I-5, graph refusals never reached `decisions`.** All 408 `rejected` rows in
+  three days were the switched-off event path's "the graph originates entries".
+  `execution_service.record_graph_refusal` now writes DO_NOT_TRADE / WAIT /
+  TRADE_REFUSED for a SETUP (never for a no-setup cycle: a row needs a side and
+  inventing one is invariant 6), origin_tag `graph-analysis`, throttled per symbol
+  (verdict change, else once per 600s — the F10 retention lesson).
+  `abstention` drops the event path's refusals while the graph owns entries.
+
+`tests/test_review_2026_11_04.py` pins both, and that the three rejecting
+measurements stay committed.
+
+**THE FINAL END-TO-END RUN (real backend, local Postgres) FOUND TWO MORE, both in
+the I-5 fix's own path:** a Supervisor DO_NOT_TRADE row recorded the GATEWAY's
+placeholder "nothing to validate: the Supervisor decided DO_NOT_TRADE" as its
+reason (the gateway's list is only meaningful when the gateway refused), and
+`abstention.classify` filed every WAIT ("only at 0.169, below the 0.180
+minimum") as `venue-minimum`, because that rule was the bare word "minimum".
+Neither was reachable until graph refusals started arriving. Fixed and pinned.
+
 ### The two rows of the review's measurement table that had nothing behind them
 
 Section 6 lists six things the agent should measure. Four already existed:
@@ -3975,7 +4027,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2626 passed + 2 skipped, must all pass (~5.5 min)
+.venv/Scripts/python.exe -m pytest -q   # backend; 2639 passed + 2 skipped, must all pass (~5.5 min)
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

@@ -488,6 +488,9 @@ def isolate_agent_singletons():
             ("backend.services.trading_session", "_throttled_notes"),
             ("backend.services.trading_session", "_sessions"),
             ("backend.services.trading_session", "_tasks"),
+            # The graph-refusal throttle (I-5): one test's recorded verdict must
+            # not suppress the next test's identical one.
+            ("backend.services.execution_service", "_graph_refusal_last"),
         ):
             try:
                 import importlib

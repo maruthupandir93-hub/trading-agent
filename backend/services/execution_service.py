@@ -216,6 +216,78 @@ async def record_graph_decision(event: Any, tar: Any, size: float) -> None:
                        getattr(event, "symbol", "?"), type(exc).__name__, exc)
 
 
+# Throttle for graph refusals: (symbol) -> (last verdict key, last written epoch).
+_GRAPH_REFUSAL_EVERY_S = 600.0
+_graph_refusal_last: Dict[str, Any] = {}
+
+GRAPH_REFUSAL_ORIGIN = "graph-analysis"
+
+
+async def record_graph_refusal(
+    *, symbol: str, direction: Optional[str], price: Optional[float], action: str,
+    rationale: str, reasons: Optional[List[str]] = None, tab: str = "paper",
+    run_id: Optional[str] = None, now: Optional[float] = None,
+) -> bool:
+    """Record a GRAPH decision NOT to trade a setup. Throttled. Never raises.
+
+    THE GAP (2026-11-04 review, I-5): all 408 `rejected` rows in three days came
+    from the switched-off EVENT path ("entries are originated by the 24-node
+    analysis graph ..."), and the GRAPH path's DO_NOT_TRADE / WAIT / refused
+    TRADE verdicts were written nowhere but the session log. So
+    `services/abstention` measured the path that does not trade, and "why did it
+    not trade that setup?" had no answer in the database.
+
+    ONLY A SETUP IS RECORDED. A cycle with no thesis has nothing to refuse, and a
+    row needs a side — inventing one would be a fabricated record (invariant 6).
+
+    THROTTLED per symbol: written when the verdict changes, otherwise at most
+    once per `_GRAPH_REFUSAL_EVERY_S`. The loop decides every ~30s; unthrottled,
+    these rows would evict real history from the 2,000-row retention window —
+    the event path's F10 failure, which is why it is throttled too.
+
+    Returns True when a row was written.
+    """
+    import time as _time
+
+    side = {"LONG": "buy", "SHORT": "sell"}.get(str(direction or "").upper())
+    if side is None:
+        return False
+    key = f"{action}:{side}"
+    t = _time.time() if now is None else now
+    last = _graph_refusal_last.get(symbol)
+    if last and last[0] == key and (t - last[1]) < _GRAPH_REFUSAL_EVERY_S:
+        return False
+    _graph_refusal_last[symbol] = (key, t)
+    try:
+        import datetime
+        import json
+        import uuid
+
+        from backend.core.db import get_db_pool
+
+        pool = get_db_pool()
+        if pool is None:
+            return False
+        text = rationale + (f" [graph run {run_id}]" if run_id else "")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO decisions (id, ts, symbol, side, tab, origin_tag,
+                    requested_qty, requested_price, outcome, urgency, rationale,
+                    rejection_reasons)
+                VALUES ($1, $2, $3, $4, $5, $6, 0, $7, 'rejected', 'normal', $8, $9)
+                """,
+                str(uuid.uuid4()), datetime.datetime.utcnow(), symbol, side, tab,
+                GRAPH_REFUSAL_ORIGIN, float(price or 0.0), text[:2000],
+                json.dumps(list(reasons or [rationale])[:10]),
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001 - an audit row must never block trading
+        logger.warning("Could not record the graph refusal for %s (%s: %s)",
+                       symbol, type(exc).__name__, exc)
+        return False
+
+
 async def resolve_graph_decision(tar_id: str, *, filled: bool, detail: str) -> None:
     """Move a graph decision to its executed / not-executed outcome. Never raises.
 
