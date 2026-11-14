@@ -452,7 +452,7 @@ def _exit_context_line(event: PositionClosedEvent) -> str:
     ]
     evidence = getattr(event, "exit_context", None)
     if evidence:
-        parts.append(f"panel at exit: {evidence}")
+        parts.append(f"exit evidence: {evidence}")
     return "; ".join(parts)
 
 

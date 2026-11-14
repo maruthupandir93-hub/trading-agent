@@ -214,6 +214,33 @@ def enumerate_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
 # 2. Strategy Scoring
 # ===========================================================================
 
+DISABLED_STRATEGIES_VAR = "DISABLED_ENTRY_STRATEGIES"
+
+
+def disabled_entry_strategies() -> frozenset:
+    """Strategies the operator has switched off as entry originators. Lower-cased.
+
+    A comma-separated list (e.g. `Grid,Range`), read at CALL time — the
+    `simulation_mode` rule: an operator who switches a strategy off expects the
+    next decision to see it, not the next restart. Default EMPTY.
+
+    THIS IS AN OPERATOR CONTROL, NOT LEARNING (invariant 5). Nothing in the
+    system writes this variable; a human sets it. It only ever removes a
+    strategy from ENTRY selection — an open position chosen by a strategy that
+    is later switched off keeps its stop, target and exits (invariant 4).
+
+    Added for the 2026-11-12 review (issue 3: Grid and Range were 9 of 14 live
+    closes with 0 wins). It is EMPTY by default on the evidence:
+    `measure_ema_trend_gate.py` put Grid and Range at -0.06R to -0.09R after the
+    live gates — among the LEAST bad of eleven strategies, all of which are
+    negative — so switching those two off leaves measurably worse ones to trade.
+    """
+    import os
+
+    raw = os.getenv(DISABLED_STRATEGIES_VAR) or ""
+    return frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+
+
 async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
     """Score each eligible candidate and select the best.
 
@@ -285,11 +312,24 @@ async def score_candidates(state: TradingState) -> Optional[Dict[str, Any]]:
             prior = None
         return (prior, "backtest") if prior is not None else (None, "none")
 
+    disabled = disabled_entry_strategies()
     scored: List[StrategyCandidate] = []
     for candidate in candidates:
         if not candidate.eligible:
             # Preserved unscored, with its gating reason intact.
             scored.append(candidate)
+            continue
+        if candidate.name.lower() in disabled:
+            # The operator's deny-list. Kept in the list as INELIGIBLE with the
+            # reason, so the trace shows it was considered and why it was not
+            # used — a silently missing strategy looks like a broken scorer.
+            scored.append(StrategyCandidate(
+                name=candidate.name, score=None, eligible=False,
+                gated_out_reason=(
+                    f"switched off by the operator ({DISABLED_STRATEGIES_VAR}); it "
+                    f"may not originate entries"
+                ),
+            ))
             continue
 
         rate, rate_source = _rate(candidate.name)

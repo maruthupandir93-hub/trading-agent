@@ -368,3 +368,125 @@ def chases_relative_strength(
             f"returned -0.41R each; these relative moves revert."
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# The EMA trend rule — the classifier that actually separates (2026-11-13)
+# ---------------------------------------------------------------------------
+#
+# WHY A SECOND TREND RULE EXISTS BESIDE `assess`. Every one of the 15 live
+# trades was labelled "1h/4h Bearish, aligned" by `_trend_of` (price vs EMA9 vs
+# EMA21) and 13 lost; `measure_htf_consensus.py` shows that classifier's effect
+# FLIPPING SIGN between windows. An external review (TRADE_LOSS_ANALYSIS
+# 2026-11-12, issue 4) found a slower rule — close vs EMA20 vs EMA50 on 1h and
+# 4h — separating cleanly, and asked for it to be measured properly first.
+#
+# MEASURED (`scripts/measure_ema_trend_gate.py`: the real functions on 120
+# clock-aligned candles, every strategy's real signal, the extension / RS-chase
+# / fee gates, non-overlapping, net of fees; `backtests/2026-11-13/`):
+#
+#     EMA COUNTER entries        104d -0.086R (6,162)   166d -0.115R (9,655)
+#                                negative in all six time-thirds
+#     of trades the EXISTING gate passes, the ones this rule also refuses:
+#                                104d -0.163R (294)     166d -0.241R (462)
+#                                worse than the kept set in 5 of 6 thirds
+#
+# So it ships as an ADDITION to `assess`, refusing COUNTER only, at a cost of
+# about 9% of entries.
+#
+# WHAT THIS DOES NOT CLAIM. No kept set is profitable: with both gates the
+# survivors still average about -0.09R to -0.10R, and no strategy has a
+# measured edge after fees. This removes a losing slice; it is not an edge.
+#
+# WHAT WAS MEASURED AND NOT DONE:
+#   * REPLACING `assess` with this rule looked better on these windows (-0.007R
+#     and -0.038R against -0.098R and -0.115R) but the advantage comes from one
+#     time-third of three and reverses in the oldest. Not stable; not shipped.
+#   * "Aligned only" is WORSE than mixed — the range strategies earn their keep
+#     when the higher timeframes disagree.
+#   * A "pullback into the trend" entry (the review's issue 7): 7-11 trades
+#     with the real function, inconclusive; negative on a first pass. Not built.
+#
+# Pure and replay-safe: it reads the 1h/4h candles `validate_market_data`
+# already fetched (120 per timeframe). UNKNOWN (too few candles for an EMA50)
+# never blocks, for the same reason `assess`'s UNKNOWN does not.
+
+EMA_FAST, EMA_SLOW = 20, 50
+EMA_GATE_VAR = "REQUIRE_EMA_TREND_ALIGNMENT"
+
+EMA_ALIGNED, EMA_MIXED, EMA_COUNTER, EMA_UNKNOWN = "aligned", "mixed", "counter", "unknown"
+
+
+def _ema_last(values: Sequence[float], n: int) -> Optional[float]:
+    """EMA(n) at the last value, seeded with the SMA of the first n. None if short."""
+    if len(values) < n:
+        return None
+    k = 2.0 / (n + 1)
+    e = sum(values[:n]) / n
+    for v in values[n:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def ema_trend_of(bars: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Bullish / Bearish / Neutral for one timeframe; None when unmeasurable.
+
+    Bullish is close > EMA20 > EMA50, Bearish the mirror, anything else Neutral.
+    None — never "Neutral" — below EMA_SLOW + 1 candles: an unmeasured trend is
+    not a flat one (invariant 6).
+    """
+    try:
+        closes = [float(b["close"]) for b in bars]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(closes) < EMA_SLOW + 1:
+        return None
+    fast, slow = _ema_last(closes, EMA_FAST), _ema_last(closes, EMA_SLOW)
+    if fast is None or slow is None:
+        return None
+    last = closes[-1]
+    if last > fast > slow:
+        return "Bullish"
+    if last < fast < slow:
+        return "Bearish"
+    return "Neutral"
+
+
+def ema_alignment(direction: str, candles: Dict[str, List[Dict[str, Any]]]) -> Alignment:
+    """Where a trade sits against the 1h + 4h EMA trend. Blocks COUNTER only."""
+    want = (direction or "").strip().upper()
+    if want not in ("LONG", "SHORT"):
+        return Alignment(EMA_UNKNOWN, f"direction {direction!r} is not LONG or SHORT")
+    states = {tf: ema_trend_of((candles or {}).get(tf, [])) for tf in HIGHER_TIMEFRAMES}
+    read = {tf: s for tf, s in states.items() if s is not None}
+    if not read:
+        return Alignment(
+            EMA_UNKNOWN,
+            f"the EMA{EMA_FAST}/EMA{EMA_SLOW} trend could not be measured on "
+            f"{'/'.join(HIGHER_TIMEFRAMES)} (fewer than {EMA_SLOW + 1} candles), so "
+            f"it is unknown rather than absent",
+        )
+    with_, against = ("Bullish", "Bearish") if want == "LONG" else ("Bearish", "Bullish")
+    w = sum(1 for s in read.values() if s == with_)
+    o = sum(1 for s in read.values() if s == against)
+    shown = ", ".join(f"{tf} {s}" for tf, s in read.items())
+    if o >= 1 and w == 0:
+        return Alignment(
+            EMA_COUNTER,
+            f"{want} is against the EMA{EMA_FAST}/EMA{EMA_SLOW} trend ({shown}) with "
+            f"no higher timeframe in its favour. Measured over 9,655 "
+            f"non-overlapping trades net of fees, entries in this state averaged a "
+            f"loss in every period tested.",
+            blocks=True,
+        )
+    if w == len(HIGHER_TIMEFRAMES):
+        return Alignment(EMA_ALIGNED, f"{want} agrees with the EMA trend ({shown})")
+    return Alignment(EMA_MIXED, f"the EMA trend is mixed for a {want} ({shown})")
+
+
+def ema_gate_enabled() -> bool:
+    """Default ON; only an explicit off value disables it. Read at call time."""
+    import os
+
+    raw = (os.getenv(EMA_GATE_VAR) or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")

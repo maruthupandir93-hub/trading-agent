@@ -1,0 +1,43 @@
+candles 10000 per symbol, 9 symbols, non-overlapping, extension + RS-chase + fee gates, net of fees
+  XRPUSDT   signals so far 1232
+  SOLUSDT   signals so far 2401
+  DOGEUSDT  signals so far 3612
+  ADAUSDT   signals so far 5102
+  LTCUSDT   signals so far 6312
+  LINKUSDT  signals so far 7767
+  SUIUSDT   signals so far 9193
+  ETHUSDT   signals so far 10110
+  BNBUSDT   signals so far 10752
+
+EMA20/EMA50 TREND STATE (1h + 4h), all strategies pooled
+  ALIGNED  n= 1621  -0.0562R +/-0.0692  z=-1.59  win 33.9%
+  MIXED    n= 3075  +0.0889R +/-0.0517  z=+3.37  win 38.8%
+  COUNTER  n= 6056  -0.1476R +/-0.0349  z=-8.29  win 30.7%
+  ALIGNED vs COUNTER: z = +2.31     ALIGNED vs MIXED: z = -3.29
+
+  by time-third (oldest -> newest), ALIGNED / MIXED / COUNTER mean R:
+    third 1:  +0.058 (420)   +0.132 (961)   -0.217 (1975)
+    third 2:  -0.072 (467)   -0.019 (1119)   -0.107 (2180)
+    third 3:  -0.111 (734)   +0.169 (995)   -0.122 (1901)
+
+  ALIGNED only, by direction:
+    LONG   n=  650  +0.0427R +/-0.1120  z=+0.75  win 37.1%
+    SHORT  n=  971  -0.1224R +/-0.0877  z=-2.73  win 31.8%
+
+  per strategy: ALIGNED  |  MIXED  |  COUNTER   (mean R, n)
+    Arbitrage           -0.303 ( 111) | +0.146 ( 307) | -0.100 ( 611)
+    Breakout            +0.051 (  61) | -0.150 (  64) | +0.002 ( 103)
+    Grid                -0.473 ( 100) | +0.162 ( 453) | -0.119 (1040)
+    MeanReversion       -0.187 (  91) | +0.073 ( 418) | -0.095 ( 893)
+    Momentum            -0.009 ( 149) | -0.071 ( 277) | -0.247 ( 616)
+    Range               -0.350 ( 128) | +0.141 ( 456) | -0.124 ( 985)
+    Scalping            +0.078 ( 161) | -0.054 ( 299) | -0.197 ( 590)
+    Swing               +0.053 ( 423) | +0.067 ( 306) | -0.288 ( 352)
+    Trend               +0.025 ( 355) | +0.143 ( 307) | -0.153 ( 461)
+    VWAP                +0.045 (  30) | +0.218 ( 172) | -0.104 ( 364)
+    VolatilityBreakout  +0.417 (  12) | +0.225 (  16) | -0.574 (  41)
+
+PULLBACK INTO THE EMA TREND (15m RSI extreme against an aligned 1h+4h trend)
+  RSI 65/35:  n=   88  -0.3621R +/-0.2687  z=-2.64  win 23.9%   thirds: -0.126 (25)  -0.516 (27)  -0.411 (36)
+  RSI 70/30:  n=   18  -0.3997R +/-0.5919  z=-1.32  win 22.2%   thirds: +0.432 (2)  -0.313 (4)  -0.567 (12)
+  RSI 75/25:  n=    6  -1.0733R +/-0.0121  z=-173.47  win  0.0%   thirds: n/a  -1.099 (1)  -1.068 (5)

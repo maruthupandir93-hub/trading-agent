@@ -105,6 +105,17 @@ os.environ["PROFIT_TARGET_PCT"] = "0"
 os.environ["PARTIAL_TP_FRACTION"] = "0"
 os.environ["LIVE_TRADING"] = "false"
 os.environ["UNTRADEABLE_SYMBOLS"] = "BTC/USDT"
+# THE HARNESS PASSED 18/18 WITH THE OPERATOR'S `.env` AND 17/18 WITHOUT IT
+# (2026-11-12 review, 11g). Scenario 14 drives a plan through the execution
+# service, which only submits a TAR when this is on — and the code default is
+# off, so on a machine with no `.env` the plan was a dry run and "the CRO must
+# approve" failed for a reason that had nothing to do with the CRO. Pinned, with
+# the other operator switches, so the result does not depend on whose `.env` is
+# present.
+os.environ["GRAPH_EXECUTION_ENABLED"] = "true"
+for _name in ("DISABLED_ENTRY_STRATEGIES", "GRAPH_BREAKEVEN_AT_R",
+              "REQUIRE_EMA_TREND_ALIGNMENT", "RUN_UNTIL_TARGET"):
+    os.environ.pop(_name, None)
 
 from backend.agents.execution_agent import (  # noqa: E402
     ExecutionAgent, get_execution_agent, reset_execution_agent,

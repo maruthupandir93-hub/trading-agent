@@ -322,6 +322,11 @@ def isolate_loss_brakes(monkeypatch):
     `tests/test_run_until_target.py` sets it explicitly where it is the subject.
     """
     monkeypatch.delenv("RUN_UNTIL_TARGET", raising=False)
+    # Operator trading-logic switches (2026-11-13): the suite tests the code's
+    # defaults, never whatever the operator's `.env` happens to select.
+    for _name in ("DISABLED_ENTRY_STRATEGIES", "GRAPH_BREAKEVEN_AT_R",
+                  "REQUIRE_EMA_TREND_ALIGNMENT"):
+        monkeypatch.delenv(_name, raising=False)
 
 
 @pytest.fixture(autouse=True)

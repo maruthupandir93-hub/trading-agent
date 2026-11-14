@@ -160,7 +160,7 @@ def test_after_scaling_out_a_pullback_to_entry_closes_the_runner_at_breakeven(mo
     asyncio.run(monitor._check_price("SOL/USDT", 70_000.0))
     assert monitor.open_position_count == 0
     # Two closes total: the partial, then the runner.
-    assert [c["reason"] for c in monitor._execution.closes] == ["partial-tp", "stop-loss"]
+    assert [c["reason"] for c in monitor._execution.closes] == ["partial-tp", "breakeven-stop"]
 
 
 def test_a_short_scales_out_at_plus_one_R_too(monitor):

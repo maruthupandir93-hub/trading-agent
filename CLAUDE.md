@@ -3801,6 +3801,104 @@ reason (the gateway's list is only meaningful when the gateway refused), and
 minimum") as `venue-minimum`, because that rule was the bare word "minimum".
 Neither was reachable until graph refusals started arriving. Fixed and pinned.
 
+### The 2026-11-12 loss analysis — what was built, and what the measurement refused
+
+`TRADE_LOSS_ANALYSIS_2026-11-12.md` (another agent): 15 live closes, all
+shorts, 2 wins, -3.33. Its diagnosis is right — **no strategy has an edge after
+fees** — and it asked for its entry proposals to be MEASURED first. They were
+(`scripts/measure_ema_trend_gate.py`, the REAL functions on 120 clock-aligned
+candles, 9 coins, 104 and 166 days, non-overlapping, net of fees;
+`backtests/2026-11-13/`).
+
+**SHIPPED:**
+* **The EMA20/EMA50 trend gate** (`market_context.ema_alignment`, in
+  `risk_gateway.gate` after EXIT; `REQUIRE_EMA_TREND_ALIGNMENT`, default ON). It
+  refuses COUNTER only — a 1h/4h EMA state against the trade with none for it.
+  COUNTER averaged a loss in all six time-thirds (-0.086R / -0.115R), and of the
+  trades the existing gate passes, the ones this also refuses made -0.16R and
+  -0.24R (worse than the kept set in 5 of 6 thirds). An ADDITION to `assess`,
+  ~9% fewer entries. The verdict is recorded as `ema_trend=` in the entry
+  snapshot.
+* **Honest stop labels.** A stop moved to entry closed as `stop-loss`, so the
+  reflection model concluded a stop had been PLACED 0.0001 from entry. Now
+  `breakeven-stop` / `trailing-stop`, decided by a `stop_moved` FACT set in
+  `tighten_stop` — not inferred from prices (a first version labelled a
+  misconfigured stop "trailing"; the suite caught it). `_path_note` puts the
+  placed stop, the move and MFE/MAE on the closing row and into the reflection.
+* **`GRAPH_BREAKEVEN_AT_R`** — the break-even move was an unswitchable
+  constant. **Default stays 1.0**: paired over 4,214 trades it was +0.017R
+  BETTER than none (z = +1.65), and z > 3 on 1h. The review wanted it off after
+  one painful scratch; the data did not agree.
+* **`DISABLED_ENTRY_STRATEGIES`** — an operator deny-list, call-time. **Empty by
+  default**: Grid and Range are among the LEAST bad of eleven after the gates.
+* One reflection retry on an EMPTY completion only; the full-system harness
+  pins `GRAPH_EXECUTION_ENABLED` (it passed 18/18 only with the operator's `.env`).
+
+**MEASURED AND NOT BUILT:**
+* **No kept set is profitable.** With both gates: -0.09R to -0.10R.
+* **Replacing `assess` with the EMA rule** looked far better (-0.007R / -0.038R
+  vs -0.098R / -0.115R; the existing gate's KEPT set was worse than what it
+  blocked in both windows) — but the advantage comes from one time-third and
+  reverses in the oldest. Unstable; an operator may try
+  `REQUIRE_HTF_ALIGNMENT=false`, it is not the default.
+* **Pullback into the trend** (issue 7): 7-11 trades, inconclusive; negative on
+  a first pass. **Nearer/further targets, 1h candles, a time exit**: none helps
+  (2026-11-12 exit study).
+
+**THE ONE POSITIVE LEAD, UNPROVEN:** the live PANEL's own direction, scored
+against the market from the recorded verdicts (8 days, 46 verdicts): +0.95R vs
++0.42R for shorting at random hours (z = +2.44), and best exactly when it
+DISAGREED with the strategy setup. The agent only trades when a zero-edge
+strategy and the panel agree. One falling market is not evidence; re-score
+weekly before building a panel-led entry.
+
+`tests/test_trade_logic_2026_11_13.py` pins the shipped parts.
+
+### The 2026-11-13 local verification — the models had died again, and two more
+
+Run on the REAL backend against a local Postgres 18 (uvicorn on 8011,
+`PAPER_TESTNET_MIRROR=false` so nothing reached the demo venue), plus the
+automatic chain driven in-process against its own database.
+
+**MODEL CENSUS, 2026-11-13 — three of the four configured models were dead.**
+`nvidia/nemotron-3-ultra-550b-a55b` accepts and never answers (90s timeout, so
+the session loop was blind for 90s per decision), `google/diffusiongemma-26b-a4b-it`
+is 410, `nemotron-3.5-lightning-30b` 404. Of 62 chat-looking catalog entries, 5
+answer; probed twice with a realistic prompt:
+
+    ALIVE  nvidia/nemotron-3.5-super-vl-120b-a12b          8-25s   -> LLM_MODEL / REASONING
+    ALIVE  nvidia/nemotron-3-nano-omni-30b-a3b-reasoning   5-28s   -> NARRATIVE and CONSULT
+    ALIVE  nvidia/nemotron-3.5-bolt-e4b                    1.5s    -> MECHANICAL (unchanged)
+    "OK"   poolside/laguna-xs-2.1    answers a one-liner, times out on a real prompt
+
+No non-Nemotron model answers a real prompt, so the consultation is a DIFFERENT
+MODEL but the same family as the reasoning tier — a weaker second opinion than
+before, and the note should say so. **Apply the same `.env` change on the Oracle
+backend.**
+
+**THE EMPTY-ANSWER RETRY REUSED THE BUDGET THE MODEL HAD JUST RUN OUT OF.** With
+the new reasoning model all three closes in the chain run returned
+`finish_reason=length` twice and stored the canned lesson. The retry now asks
+for `RETRY_BUDGET_MULTIPLE` (2) times the first budget, still under the tier
+cap; re-run, all three lessons came from the model and each named the placed
+stop, the move and the excursion.
+
+**`naive_utc.timestamp()` IS LOCAL TIME.** `openedAtTs` and the venue-close
+`opened_ms` were computed that way, so on this UTC+5:30 machine a position
+opened seconds ago was exported as opened 5.5h ago (the monitoring graph's
+stale-position rule reads that) and the "a fill older than the position cannot
+be its exit" filter was 5.5h loose. Correct on a UTC server by accident.
+`PositionMonitorAgent._epoch_seconds`.
+
+**VERIFIED WORKING, on a real database:** all 24 nodes on five coins; a manual
+long stopped out by a live tick in 12s; the automatic chain plan -> CRO ->
+fill -> take-profit / stop-loss / breakeven-stop, with `decisions`
+approved-executed and linked, `execution_submissions` filled, strategy / run id
+/ entry context on all six rows, the path note on each close, an empty watch
+list, and cash 5.00 + realised = the book to the cent. A $5 six-coin session
+rotated every ~35s and refused every setup (panel NEUTRAL at 0.00-0.17 in a
+Range market) — it opened nothing, which is the gates working, not a fault.
+
 ### The two rows of the review's measurement table that had nothing behind them
 
 Section 6 lists six things the agent should measure. Four already existed:
@@ -4027,7 +4125,7 @@ script does NOT help even though every worker inherits it.
 config exists) — it is not part of the verification loop.
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q   # backend; 2639 passed + 2 skipped, must all pass (~5.5 min)
+.venv/Scripts/python.exe -m pytest -q   # backend; 2672 passed + 2 skipped, must all pass (~5.5 min)
 ```
 
 **Network: `api.binance.com` IS reachable from this machine.** This note

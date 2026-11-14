@@ -76,6 +76,40 @@ logger = logging.getLogger(__name__)
 # that was still intact.
 TRAIL_TO_BREAKEVEN_R = 1.0
 
+# THE THRESHOLD IS A SETTING NOW, READ AT CALL TIME (2026-11-12 review, issue 6).
+#
+# It was a bare constant, and `TRAILING_STOP_R=0` did NOT disable it — that
+# setting belongs to a different mechanism in `position_monitor` — so an
+# operator had no way to turn the break-even move off. `GRAPH_BREAKEVEN_AT_R=0`
+# does; any positive value moves the trigger.
+#
+# THE DEFAULT STAYS 1.0, AND THAT IS A MEASURED CHOICE, NOT INERTIA. The review
+# proposed default-off after a +1.29R trade scratched at entry. Paired over
+# 4,214 non-overlapping 15m trades with every live entry gate, net of fees
+# (2026-11-12): break-even at +1R was +0.017R per trade BETTER than none
+# (z = +1.65), +0.001R on a 62-day window, and +0.047R to +0.071R (z > 3) on 1h
+# candles. It lowers the win rate (33% -> 26%) because some would-be winners
+# scratch — which is what one painful trade shows — and saves more than that on
+# the trades that would have gone on to the full stop. The review's own replay
+# called its opposite reading "inside the noise".
+BREAKEVEN_VAR = "GRAPH_BREAKEVEN_AT_R"
+
+
+def breakeven_at_r() -> float:
+    """R multiple at which the stop moves to entry. 0 = never. Call-time read."""
+    import os
+
+    raw = (os.getenv(BREAKEVEN_VAR) or "").strip()
+    if not raw:
+        return TRAIL_TO_BREAKEVEN_R
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %.1f.", BREAKEVEN_VAR, raw,
+                       TRAIL_TO_BREAKEVEN_R)
+        return TRAIL_TO_BREAKEVEN_R
+    return max(0.0, value)
+
 # Beyond this, the stop trails the peak by a fraction of the initial risk rather
 # than sitting at break-even. Set above the break-even trigger so the two rules
 # cannot both apply and produce different stops for the same position.
@@ -719,10 +753,15 @@ def _trail_stop(position: MonitoredPosition) -> tuple:
             or position.stop_loss is None:
         return None, "no trailing rule applies: R multiple or levels unavailable"
 
-    if position.r_multiple < TRAIL_TO_BREAKEVEN_R:
+    be_at = breakeven_at_r()
+    # With break-even OFF (0) the first rule that can apply is the peak trail.
+    first_rule = be_at if be_at > 0 else TRAIL_BEHIND_PEAK_R
+    if position.r_multiple < first_rule:
         return None, (
             f"no trailing rule applies at {position.r_multiple:+.2f}R (needs "
-            f"{TRAIL_TO_BREAKEVEN_R}R; tightening earlier would pull the stop inside "
+            f"{first_rule}R"
+            + ("" if be_at > 0 else f"; the break-even move is off, {BREAKEVEN_VAR}=0")
+            + "; tightening earlier would pull the stop inside "
             f"the noise the ATR distance was sized to absorb)"
         )
 

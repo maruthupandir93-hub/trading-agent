@@ -104,7 +104,7 @@ _GATES: Tuple[Tuple[str, str], ...] = (
     ("tradeable-universe", r"may be watched|not tradeable|untradeable"),
     ("strategy-approval", r"not approved for real money"),
     ("entry-proximity", r"chasing an extended"),
-    ("counter-trend", r"counter-trend|higher[- ]timeframe|htf"),
+    ("counter-trend", r"counter-trend|counter to the ema trend|higher[- ]timeframe|htf"),
     ("fee-vs-edge", r"fee|round trip"),
     ("volatility-regime", r"volatility regime|volatility is"),
     ("confidence-floor", r"confidence|conviction|panel reads|do.?not.?trade"),

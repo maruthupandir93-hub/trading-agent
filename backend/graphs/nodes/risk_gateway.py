@@ -108,6 +108,8 @@ from backend.algorithms.market_context import assess as assess_alignment
 from backend.algorithms.market_context import build as build_market_context
 from backend.algorithms.market_context import (
     chase_gate_enabled,
+    ema_alignment,
+    ema_gate_enabled,
     chases_relative_strength,
 )
 from backend.services.tradeable_universe import refusal_reason as untradeable_reason
@@ -264,6 +266,10 @@ def build_entry_context(
     # gate is off, because turning a gate off must not also stop recording the
     # data that would judge it -- the arrangement REQUIRE_HTF_ALIGNMENT uses.
     entry_extension: Any = None,
+    # The EMA20/EMA50 trend verdict (aligned / mixed / counter / unknown).
+    # Recorded on every entry for the same reason: the learning loop must be
+    # able to judge the EMA gate from real closed trades later.
+    ema_trend: Any = None,
 ) -> str:
     """A compact snapshot of what the agent saw, for the trade row.
 
@@ -331,6 +337,9 @@ def build_entry_context(
             described = ""
         if described:
             bits.append(f"{described},")
+
+    if ema_trend is not None and getattr(ema_trend, "verdict", None):
+        bits.append(f"ema_trend={ema_trend.verdict},")
 
     if strategy:
         bits.append(f"strategy={strategy}")
@@ -795,6 +804,39 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
                     },
                 )
             }
+
+    # ---- EMA TREND: REFUSE A COUNTER-TREND ENTRY (measured 2026-11-13) ----
+    #
+    # The gate above uses `_trend_of` (price vs EMA9 vs EMA21). It labelled all
+    # 15 live trades "aligned" and 13 lost, and its measured effect flips sign
+    # between windows. This is the slower rule that separates in every period
+    # tested — see `market_context.ema_alignment` and CLAUDE.md for the numbers.
+    # It ADDS to the gate above rather than replacing it: both were measured
+    # together and that is the combination the result is for.
+    #
+    # Same placement and reasoning: after EXIT (invariant 4), a property of
+    # WHERE THE MARKET IS so not reachable by a smaller trade, and an
+    # unmeasurable trend passes. The verdict is computed unconditionally so it
+    # can be recorded even with the refusal off.
+    ema_trend = None
+    if snapshot is not None and thesis is not None:
+        try:
+            ema_trend = ema_alignment(decision.direction, snapshot.candles)
+        except Exception as exc:  # noqa: BLE001 - a measurement, never a crash
+            logger.debug("EMA trend could not be measured: %s", exc)
+    if ema_trend is not None and ema_trend.blocks and ema_gate_enabled():
+        return {
+            "risk_assessment": RiskAssessment(
+                approved=False,
+                rejection_reasons=[f"counter to the EMA trend: {ema_trend.detail}"],
+                checks={
+                    "EmaTrendAlignment": {
+                        "status": "reject",
+                        "detail": ema_trend.detail,
+                    }
+                },
+            )
+        }
 
     # ---- CHASING RELATIVE STRENGTH (measured 2026-11-03) -----------------
     #
@@ -1572,6 +1614,7 @@ def gate(state: TradingState) -> Optional[Dict[str, Any]]:
             # records WHY as well as WHAT. Safe when None.
             market_context=market_context,
             entry_extension=extension,
+            ema_trend=ema_trend,
         ),
         symbol=symbol,
         side=side,

@@ -200,6 +200,10 @@ def classify_outcome(state: TradingState) -> Dict[str, Any]:
 # The lesson — the one node a model may write
 # ---------------------------------------------------------------------------
 
+# The one retry after an EMPTY completion asks for this many times the first
+# budget. See the retry in `_model_lesson` for the measurement behind it.
+RETRY_BUDGET_MULTIPLE = 2
+
 _LESSON_SYSTEM_PROMPT = (
     "You are a professional futures trading analyst reviewing ONE trade that has "
     "ALREADY closed. You are not deciding anything and no trade depends on your "
@@ -270,7 +274,7 @@ def _lesson_prompt(state: TradingState, reflection: TradeReflection) -> str:
         f"(realized P&L {pnl:+.2f})" if pnl is not None else f"Outcome: {reflection.outcome}",
         f"Entry: {receipt.get('entry_price')}  Exit: {receipt.get('exit_price')}",
         f"Exit reason: {receipt.get('exit_reason', 'unknown')}"
-        + (f" — panel at exit: {receipt['exit_context']}"
+        + (f" — exit evidence: {receipt['exit_context']}"
            if receipt.get("exit_context") else ""),
         f"Held: {receipt.get('held_seconds')} seconds",
         f"Strategies active: {', '.join(receipt.get('strategies') or []) or 'none recorded'}",
@@ -365,11 +369,39 @@ async def write_lesson(state: TradingState) -> Dict[str, Any]:
         temperature=DEFAULT_TEMPERATURE,
     )
 
+    calls, tokens = 1, result.total_tokens
+
+    # ONE RETRY FOR AN EMPTY ANSWER, AND ONLY FOR THAT (2026-11-12 review, issue
+    # 8). A reasoning model sometimes spends its whole budget thinking and
+    # returns no content; on 11-09 that cost a real loss its lesson, and the
+    # canned fallback was stored instead. An empty completion is the one failure
+    # that is usually different on a second attempt — a 404, an auth error or a
+    # timeout is not, so those are NOT retried. Off the trading path, so the
+    # extra seconds cost nothing a fill waits on; the rate limiter still paces it.
+    if not result.ok and "empty completion" in (result.error or ""):
+        retry = await provider.complete(
+            system=_LESSON_SYSTEM_PROMPT,
+            user=_lesson_prompt(state, reflection),
+            tier=ModelTier.REASONING,
+            # TWICE THE ROOM, NOT THE SAME ROOM (found 2026-11-13 running three
+            # closes through the real chain). An empty answer here is almost
+            # always finish_reason=length: the model spent the whole budget
+            # thinking. Retrying with the identical budget failed identically
+            # on all three, and every lesson was the canned fallback. The tier
+            # cap in `provider._TIER_MAX_TOKENS` still clamps this.
+            max_tokens=RETRY_BUDGET_MULTIPLE * request_budget(400),
+            temperature=DEFAULT_TEMPERATURE,
+        )
+        calls += 1
+        tokens += retry.total_tokens
+        if retry.ok:
+            result = retry
+
     delta: Dict[str, Any] = {
         # Budget accounting happens whether or not the call succeeded: a failed
         # call still consumed a request.
-        "llm_calls_made": (state.get("llm_calls_made") or 0) + 1,
-        "llm_tokens_used": (state.get("llm_tokens_used") or 0) + result.total_tokens,
+        "llm_calls_made": (state.get("llm_calls_made") or 0) + calls,
+        "llm_tokens_used": (state.get("llm_tokens_used") or 0) + tokens,
     }
 
     if not result.ok:

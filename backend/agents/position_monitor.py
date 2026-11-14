@@ -511,6 +511,13 @@ class _Tracked:
         # sentence ("the specialist evidence now reads LONG at 0.21 ...") and the
         # plan carries it; it was dropped here, one hop before the record.
         "exit_evidence",
+        # True once `tighten_stop` has MOVED the stop from where it was placed.
+        # The exit label and the path note read this FACT rather than inferring a
+        # move from prices: a stop that was simply placed on the wrong side of
+        # entry (a misconfiguration) is not a trailed stop. In-memory only, so
+        # after a restart a moved stop reads as plain `stop-loss` — the label
+        # that claims least.
+        "stop_moved",
     )
 
     def __init__(self, **kw):
@@ -1900,7 +1907,7 @@ class PositionMonitorAgent(BaseAgent):
                 "protection": pos.protection or PROTECTION_IN_PROCESS,
                 "protectedQty": pos.protected_qty or 0.0,
                 "takeProfit": pos.take_profit,
-                "openedAtTs": pos.opened_at.timestamp() if pos.opened_at else None,
+                "openedAtTs": self._epoch_seconds(pos.opened_at),
                 "peakPrice": pos.peak_price,
                 "worstPrice": pos.worst_price,
                 # Live excursion, so an operator can see how far a position has
@@ -1982,6 +1989,7 @@ class PositionMonitorAgent(BaseAgent):
             )
 
         pos.stop_loss = new_stop
+        pos.stop_moved = True
         logger.info(
             "Tightened stop on %s %s: %.8g -> %.8g (entry %s)",
             pos.side, pos.symbol, current, new_stop, pos.entry_price,
@@ -2327,8 +2335,77 @@ class PositionMonitorAgent(BaseAgent):
             # candle that gapped through the stop AND the target is far more
             # likely to have hit the stop first, and assuming the favourable
             # one would systematically overstate performance.
-            reason = "stop-loss" if hit_stop else "take-profit"
+            reason = self._stop_exit_label(pos) if hit_stop else "take-profit"
             await self._close(pos, price, reason)
+
+    @staticmethod
+    def _epoch_seconds(when: Optional[datetime.datetime]) -> Optional[float]:
+        """Epoch seconds of a naive-UTC datetime (this codebase's convention).
+
+        `naive.timestamp()` treats the value as LOCAL time, so on any host that
+        is not on UTC it is wrong by the UTC offset: measured on a UTC+5:30
+        machine, a position opened seconds ago was exported as opened 5.5 hours
+        ago — which the monitoring graph reads as "held 5.5h" (its stale-position
+        rule) and which loosens the "a fill older than the position cannot be
+        its exit" filter on a venue close by the same 5.5 hours. Correct on a
+        UTC server by accident, not by construction.
+        """
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        return when.timestamp()
+
+    @staticmethod
+    def _stop_exit_label(pos: "_Tracked") -> str:
+        """`stop-loss`, `breakeven-stop` or `trailing-stop` — what the stop WAS.
+
+        A STOP THAT HAD BEEN MOVED TO ENTRY WAS RECORDED AS `stop-loss`
+        (2026-11-12 review, issue 8). Live trade 12 reached +1.29R, the graph
+        review moved its stop to entry, and it closed there for -0.038 (fees).
+        The row said "stop-loss at 1.1051 from entry 1.1052", so the reflection
+        model concluded the stop had been PLACED 0.0001 from entry — a false
+        lesson from a misleading input — and every statistic counted a scratch
+        as a stopped-out loss.
+
+        The stop's position relative to entry is the fact: on the loss side it
+        is the protective stop; at entry it is a break-even stop; beyond entry
+        it is a trailed stop locking profit. The 5%-of-risk band absorbs tick
+        rounding. When the entry is unknown it stays `stop-loss`, the label that
+        claims least.
+        """
+        if pos.entry_price is None or pos.stop_loss is None                 or not getattr(pos, "stop_moved", None):
+            # Never moved (or unknown): it is the protective stop as placed,
+            # wherever that was.
+            return "stop-loss"
+        d = 1.0 if pos.side == "buy" else -1.0
+        beyond = (pos.stop_loss - pos.entry_price) * d      # >0 = locked profit
+        band = 0.05 * pos.initial_risk if (pos.initial_risk or 0) > 0 \
+            else abs(pos.entry_price) * 1e-4
+        if beyond > band:
+            return "trailing-stop"
+        if beyond >= -band:
+            return "breakeven-stop"
+        return "stop-loss"
+
+    def _path_note(self, pos: "_Tracked") -> Optional[str]:
+        """How the trade went, in the units a reader needs: where the stop was
+        PLACED, where it was when the trade ended, and the best and worst points
+        reached. Built only from measured fields; None when the risk is unknown
+        (invariant 6 — no invented stop)."""
+        if pos.entry_price is None or not pos.initial_risk or pos.initial_risk <= 0:
+            return None
+        d = 1.0 if pos.side == "buy" else -1.0
+        placed = pos.entry_price - d * pos.initial_risk
+        parts = [f"stop was PLACED at {placed:.8g} (1R = {pos.initial_risk:.6g})"]
+        if pos.stop_loss is not None and getattr(pos, "stop_moved", None):
+            parts.append(f"and had been MOVED to {pos.stop_loss:.8g} before the exit")
+        mfe, mae = self._excursions(pos)
+        if mfe is not None:
+            parts.append(f"best point reached {mfe:+.2f}R")
+        if mae is not None:
+            parts.append(f"worst point {-abs(mae):.2f}R")
+        return "; ".join(parts)
 
     @staticmethod
     def _max_holding_minutes(pos: "_Tracked") -> Optional[int]:
@@ -2677,6 +2754,17 @@ class PositionMonitorAgent(BaseAgent):
             return
 
         self._closing.add(pos.tar_id)
+        # The trade's PATH joins whatever judgement evidence `close_tracked` set,
+        # so the closing row and the reflection see where the stop started and
+        # ended. The prior value is restored if the close FAILS, so a retry does
+        # not double the note.
+        _prior_evidence = getattr(pos, "exit_evidence", None)
+        try:
+            _path = self._path_note(pos)
+        except Exception:  # noqa: BLE001 - a note must never block an exit
+            _path = None
+        if _path:
+            pos.exit_evidence = "; ".join(x for x in (_prior_evidence, _path) if x)[:1000]
         try:
             fill_price = await self._execution.close_position(
                 symbol=pos.symbol,
@@ -2711,7 +2799,7 @@ class PositionMonitorAgent(BaseAgent):
                 # measured booked as -$37.7. A fill that predates this position
                 # cannot possibly be its exit.
                 opened_ms=(
-                    int(pos.opened_at.timestamp() * 1000) if pos.opened_at else None
+                    int(self._epoch_seconds(pos.opened_at) * 1000) if pos.opened_at else None
                 ),
             )
 
@@ -2979,6 +3067,9 @@ class PositionMonitorAgent(BaseAgent):
             return float(fill_price)
         finally:
             self._closing.discard(pos.tar_id)
+            if pos.tar_id in self._open:
+                # Still open: the close did not complete.
+                pos.exit_evidence = _prior_evidence
 
 
 # The ONE monitor. See `get_position_monitor`.

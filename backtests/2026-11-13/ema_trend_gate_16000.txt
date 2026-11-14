@@ -1,0 +1,54 @@
+candles 16000 per symbol, 9 symbols, non-overlapping, extension + RS-chase + fee gates, net of fees
+  XRPUSDT   signals so far 1743
+  SOLUSDT   signals so far 3479
+  DOGEUSDT  signals so far 5214
+  ADAUSDT   signals so far 7502
+  LTCUSDT   signals so far 9279
+  LINKUSDT  signals so far 11350
+  SUIUSDT   signals so far 13402
+  ETHUSDT   signals so far 14850
+  BNBUSDT   signals so far 15715
+
+EMA20/EMA50 STATE (the real `ema_alignment`, 120 clock-aligned candles)
+  aligned  n= 2137  -0.1038R +/-0.0596  z=-3.41  win 32.5%
+  mixed    n= 3923  -0.0024R +/-0.0451  z=-0.10  win 35.9%
+  counter  n= 9655  -0.1152R +/-0.0279  z=-8.09  win 32.0%
+  by time-third (oldest -> newest), aligned / mixed / counter mean R (n):
+    third 1:  -0.358 (609)   -0.110 (1415)   -0.078 (2888)
+    third 2:  +0.103 (673)   +0.075 (1295)   -0.243 (3508)
+    third 3:  -0.085 (855)   +0.040 (1213)   -0.011 (3259)
+
+WHAT WOULD SHIP — kept sets, net of fees
+  no trend gate at all               n=15715  -0.0855R +/-0.0221  z=-7.59  win 33.0%
+  existing gate only (live today)    n= 4944  -0.1154R +/-0.0391  z=-5.79  win 32.2%
+  EMA gate only                      n= 6060  -0.0381R +/-0.0360  z=-2.08  win 34.7%
+  BOTH gates (proposed)              n= 4482  -0.1025R +/-0.0412  z=-4.88  win 32.6%
+
+THE INCREMENTAL QUESTION — of trades the existing gate passes:
+  EMA rule would ALSO refuse   n=  462  -0.2411R +/-0.1233  z=-3.83  win 28.1%
+  EMA rule keeps               n= 4482  -0.1025R +/-0.0412  z=-4.88  win 32.6%
+  kept vs refused: z = +2.09
+  by time-third, kept / refused mean R (n):
+    third 1:  -0.251 (1454)   /   -0.372 (154)
+    third 2:  +0.039 (1416)   /   -0.027 (137)
+    third 3:  -0.093 (1612)   /   -0.295 (171)
+
+  BOTH gates, by direction:
+    LONG   n= 2003  -0.1172R +/-0.0615  z=-3.74  win 32.0%
+    SHORT  n= 2479  -0.0906R +/-0.0554  z=-3.20  win 33.0%
+
+  per strategy: existing gate only -> BOTH gates   (mean R, n)
+    Arbitrage           -0.171 ( 298) -> -0.178 ( 277)
+    Breakout            -0.094 ( 206) -> -0.130 ( 179)
+    Grid                -0.122 ( 378) -> -0.084 ( 346)
+    MeanReversion       -0.084 ( 337) -> -0.071 ( 318)
+    Momentum            -0.231 ( 473) -> -0.213 ( 432)
+    Range               -0.086 ( 419) -> -0.068 ( 385)
+    Scalping            -0.135 ( 507) -> -0.097 ( 463)
+    Swing               -0.059 (1159) -> -0.057 (1040)
+    Trend               -0.139 (1013) -> -0.124 ( 903)
+    VWAP                +0.020 (  92) -> +0.001 (  88)
+    VolatilityBreakout  -0.074 (  62) -> -0.033 (  51)
+
+PULLBACK INTO THE EMA TREND (15m RSI extreme against an aligned 1h+4h trend)
+  RSI 65/35:  n=   11  +0.0080R +/-0.9002  z=+0.02  win 36.4%
